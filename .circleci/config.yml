@@ -1,0 +1,37 @@
+version: 2.1
+
+# PR validation gate for the public terraform-aws-ao-data-platform module.
+# Validate-only: no AWS creds, no context, no secrets — so forked-PR builds are safe.
+# Releasing is done by pushing a vX.Y.Z git tag (the Terraform Registry ingests via webhook),
+# not by this pipeline.
+
+jobs:
+  run-sanity-check:
+    docker:
+      - image: hashicorp/terraform:1.13
+    steps:
+      - checkout
+      - run:
+          name: Install dependencies
+          command: apk add --update make
+      - run:
+          name: Format and validate
+          command: make sanity-check
+
+  run-test:
+    docker:
+      - image: hashicorp/terraform:1.13
+    steps:
+      - checkout
+      - run:
+          name: Install dependencies
+          command: apk add --update make
+      - run:
+          name: Terraform test
+          command: make test
+
+workflows:
+  validate:
+    jobs:
+      - run-sanity-check
+      - run-test

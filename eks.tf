@@ -1,0 +1,173 @@
+data "aws_eks_cluster" "existing" {
+  count = var.cluster.create ? 0 : 1
+  name  = var.cluster.existing_cluster_name
+}
+
+# -----------------------------------------------------------------------------
+# EKS Cluster (conditional)
+# Creates a new cluster with a managed node group, standard add-ons, and OIDC.
+# -----------------------------------------------------------------------------
+
+module "eks" {
+  source  = "terraform-aws-modules/eks/aws"
+  version = "21.10.1"
+  count   = var.cluster.create ? 1 : 0
+
+  name               = var.cluster.name
+  kubernetes_version = "1.35"
+
+  # Private access is always on (in-VPC clients, the module's local-exec
+  # provisioners when run from inside the VPC); public exposure is
+  # caller-controlled — see the cluster variable for the hardened path.
+  endpoint_public_access                   = var.cluster.endpoint_public_access
+  endpoint_public_access_cidrs             = var.cluster.endpoint_public_access_cidrs
+  endpoint_private_access                  = true
+  enable_cluster_creator_admin_permissions = true
+  enable_irsa                              = true
+
+  # Secrets envelope encryption is enabled by default in this module version:
+  # create_kms_key = true, encryption_config = { resources = ["secrets"] }
+
+  # Addon versions are pinned explicitly (not most_recent) so applies can't
+  # silently upgrade them. Bump deliberately: list versions for the target
+  # cluster version and pick the default (or a newer compatible build) with
+  #   aws eks describe-addon-versions --kubernetes-version <ver> --addon-name <addon>
+  # Versions below are known-good builds; bump deliberately from here.
+  addons = {
+    vpc-cni = {
+      addon_version  = "v1.22.1-eksbuild.2"
+      before_compute = true
+
+      # Enable the vpc-cni NetworkPolicy enforcement engine. No NetworkPolicy
+      # objects are applied yet, so this is a no-op functionally today; it warms
+      # the engine so workloads can adopt Kubernetes NetworkPolicies later
+      # without an addon reconfigure (and the pod restart that comes with it).
+      configuration_values = jsonencode({
+        enableNetworkPolicy = "true"
+      })
+    }
+    coredns = {
+      addon_version = "v1.14.3-eksbuild.2"
+    }
+    kube-proxy = {
+      addon_version = "v1.35.3-eksbuild.11"
+    }
+    aws-ebs-csi-driver = {
+      addon_version            = "v1.61.1-eksbuild.1"
+      service_account_role_arn = aws_iam_role.ebs_csi_controller[0].arn
+    }
+  }
+
+  eks_managed_node_groups = merge(
+    {
+      main = {
+        instance_types = [var.cluster.node_instance_type]
+        min_size       = local.main_node_group_size_resolved
+        max_size       = 10
+        desired_size   = local.main_node_group_size_resolved
+
+        # IMDS hop limit 2 (default for EKS managed NGs). Every controller
+        # on this NG uses IRSA (load-balancer-controller, cert-manager,
+        # external-secrets, external-dns, otel-collector, llm-worker,
+        # ebs-csi-controller), so no pod here currently needs pod-level
+        # IMDS to assume the node's instance profile. Left at 2 as a
+        # defensive default for future addons; the hostNetwork DaemonSets
+        # (vpc-cni, kube-proxy, ebs-csi-node) bypass the pod hop limit
+        # entirely either way.
+        metadata_options = {
+          http_endpoint               = "enabled"
+          http_tokens                 = "required"
+          http_put_response_hop_limit = 2
+        }
+      }
+    },
+    local.clickhouse_node_placement_enabled ? {
+      # Dedicated single-AZ node group for ClickHouse. The taint blocks any
+      # pod without a matching toleration from scheduling here; the matching
+      # toleration is wired into the ClickHouse pod template automatically
+      # via the helm_release values block below.
+      clickhouse = {
+        instance_types = [var.clickhouse_node_group.instance_type]
+        min_size       = 1
+        max_size       = 1
+        desired_size   = 1
+        subnet_ids     = local.clickhouse_node_group_subnet_ids
+
+        # Pin the dedicated CH node group's AMI (asymmetric: the main NG
+        # above keeps the eks module default use_latest = true). Defaulting
+        # use_latest = false here stops the per-apply SSM "latest AMI"
+        # lookup, so an unrelated apply can no longer drift the AMI and
+        # bounce ClickHouse — a single-replica, AZ-locked StatefulSet whose
+        # roll is a ~2 min outage. ami_release_version (null by default)
+        # is the optional explicit pin; setting it performs a deliberate,
+        # auditable AMI bump.
+        use_latest_ami_release_version = var.clickhouse_node_group.use_latest_ami_release_version
+        ami_release_version            = var.clickhouse_node_group.ami_release_version
+
+        # Hardcoded (not a variable): a single-replica, AZ-locked,
+        # PDB-protected node group can't drain gracefully, so force is
+        # required for ANY roll to complete — both an (opted-in) drift roll
+        # and a deliberate ami_release_version bump. Without it a pinned
+        # bump fails mid-apply on PodEvictionFailure. Inert when no roll is
+        # in flight. Revisit when ClickHouse goes HA (multi-replica +
+        # keeper): a roll then becomes a no-downtime rolling update and
+        # both this flag and the AMI pin fall away — they share the
+        # single-replica root cause.
+        force_update_version = true
+
+        labels = {
+          (local.clickhouse_node_label_key) = local.clickhouse_node_label_value
+        }
+        taints = {
+          dedicated = {
+            key    = local.clickhouse_node_label_key
+            value  = local.clickhouse_node_label_value
+            effect = "NO_SCHEDULE"
+          }
+        }
+
+        # Hop limit 1 (vs 2 on the main NG): ClickHouse calls no AWS APIs
+        # (the Altinity operator's ClickHouseInstallation sets no
+        # ServiceAccount role-arn), so the CH pod has no IMDS dependency.
+        # The EKS-managed DaemonSets that land here (aws-node, kube-proxy,
+        # ebs-csi-node) reach IMDS via hostNetwork=true, which bypasses
+        # the pod-level hop limit entirely. Tightening to 1 blocks
+        # pod-level IMDS for any non-hostNetwork container — useful if a
+        # future workload (matching the toleration) ends up co-located
+        # here; it would need its own IRSA binding rather than borrowing
+        # the node's instance profile.
+        metadata_options = {
+          http_endpoint               = "enabled"
+          http_tokens                 = "required"
+          http_put_response_hop_limit = 1
+        }
+      }
+    } : {}
+  )
+
+  vpc_id     = local.effective_vpc_id
+  subnet_ids = local.effective_private_subnet_ids
+
+  tags = var.tags
+}
+
+# -----------------------------------------------------------------------------
+# OIDC Provider — existing clusters only
+# For new clusters, the EKS module creates the OIDC provider (enable_irsa = true).
+# For existing clusters, we register one if not already present.
+# If the cluster already has an OIDC provider managed outside Terraform, import it:
+#   terraform import 'aws_iam_openid_connect_provider.cluster[0]' <arn>
+# -----------------------------------------------------------------------------
+
+data "tls_certificate" "cluster" {
+  count = var.cluster.create ? 0 : 1
+  url   = data.aws_eks_cluster.existing[0].identity[0].oidc[0].issuer
+}
+
+resource "aws_iam_openid_connect_provider" "cluster" {
+  count           = var.cluster.create ? 0 : 1
+  url             = data.aws_eks_cluster.existing[0].identity[0].oidc[0].issuer
+  client_id_list  = ["sts.amazonaws.com"]
+  thumbprint_list = [data.tls_certificate.cluster[0].certificates[0].sha1_fingerprint]
+  tags            = var.tags
+}
