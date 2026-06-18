@@ -60,7 +60,8 @@ provider "helm" {
 
 module "ao_data_platform" {
   # When using this example outside the repo, replace with the published source:
-  #   source = "github.com/monte-carlo-data/terraform-aws-ao-data-platform?ref=v0.0.15"
+  #   source  = "monte-carlo-data/ao-data-platform/aws"
+  #   version = "~> 1.0"
   source = "../../"
 
   region = var.region
