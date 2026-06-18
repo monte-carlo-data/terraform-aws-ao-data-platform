@@ -1,0 +1,35 @@
+NOTICE
+======
+
+terraform-aws-ao-data-platform
+Copyright 2026 Monte Carlo AI, Inc.
+
+This product includes software developed at Monte Carlo AI, Inc.
+(https://montecarlo.ai).
+
+
+--------------------------------------------------------------------------------
+Third-party components
+--------------------------------------------------------------------------------
+
+This Terraform module distributes only its own configuration source. It does
+NOT bundle or redistribute any third-party code. The external Terraform modules,
+Terraform providers, Helm charts, and container images that the module references
+are fetched at `terraform init` / `terraform apply` from their respective
+registries and remain subject to their own licenses — nothing third-party is
+included in this repository's published artifact.
+
+For reference, the module deploys the following third-party components, each
+licensed under the Apache License, Version 2.0 (fetched at apply time, not
+redistributed here):
+
+  - AWS Load Balancer Controller   https://github.com/kubernetes-sigs/aws-load-balancer-controller
+  - cert-manager                   https://github.com/cert-manager/cert-manager
+  - external-secrets               https://github.com/external-secrets/external-secrets
+  - external-dns                   https://github.com/kubernetes-sigs/external-dns
+  - OpenTelemetry Collector        https://github.com/open-telemetry/opentelemetry-helm-charts
+  - Altinity ClickHouse Operator   https://github.com/Altinity/clickhouse-operator
+
+Component versions are pinned in the module's `.tf` sources. Because none of this
+third-party code is redistributed in this module, no third-party license texts
+are included here.
