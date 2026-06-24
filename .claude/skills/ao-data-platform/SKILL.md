@@ -80,7 +80,26 @@ symptom), then proceed.
 
 ## Reading the platform's state
 
-For **Verify** and **Troubleshoot**, start by gathering read-only state with the keystone
+### Resolve and confirm the target first
+
+Before running anything, work out *which* cluster / account / region you're pointing at and
+confirm it back to the user — a customer may have several AWS accounts and kube contexts, and a
+sweep against the wrong one is confusing at best.
+
+1. If the user named a kube context (e.g. "verify my AO platform in `acme-prod`"), read its cluster
+   ARN to get the region and account:
+   `kubectl config view -o jsonpath="{.contexts[?(@.name=='<ctx>')].context.cluster}"`
+   → `arn:aws:eks:<region>:<account>:cluster/<name>`.
+2. Pick the AWS profile whose `aws sts get-caller-identity` account matches that account ID (check
+   the current credentials first; only switch profile if it doesn't match).
+3. **State the resolved context / region / account back to the user** before the first command, so
+   a wrong target is caught early. If you can't resolve one unambiguously, ask.
+
+Pass these through to the script as `--context`, `-r <region>`, and `--profile` as needed.
+
+### Run the sweep
+
+For **Verify** and **Troubleshoot**, gather read-only state with the keystone
 script. It is bundled in this skill's own `scripts/` directory — invoke it **by its path inside
 this skill directory** (it is self-contained and works the same whether the skill was installed
 to `~/.claude/skills/`, committed into a project, or used in place). Keep the customer's Terraform
