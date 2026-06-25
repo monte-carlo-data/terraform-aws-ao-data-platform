@@ -134,6 +134,53 @@ Doc: *The LLM worker can't run evaluations*.
 
 ---
 
+## AWS permissions / IRSA (cuts across the symptoms above)
+
+AWS permission failures are the **hidden root cause** under many of the nodes above: the symptom
+is downstream (cert not Ready, ExternalSecret not synced, NLB not provisioned, evals failing), but
+the real error is an `AccessDenied` buried in the *controller's* pod logs — in its own namespace.
+Each in-cluster component assumes a dedicated IRSA role via the cluster's OIDC provider:
+
+| Component (ns) | IRSA role needs | Symptom when denied |
+| :--- | :--- | :--- |
+| External Secrets (`external-secrets`) | `secretsmanager:GetSecretValue`, `kms:Decrypt` | ExternalSecret not SecretSynced |
+| cert-manager (`cert-manager`) | `route53:ChangeResourceRecordSets`, … | TLS cert never Ready (DNS-01) |
+| external-dns (`external-dns`) | `route53:ChangeResourceRecordSets`, … | DNS doesn't resolve |
+| AWS Load Balancer Controller (`kube-system`) | `elasticloadbalancing:*`, `ec2:Describe*` | NLB not provisioned |
+| LLM worker (`<ns>`) | `bedrock:InvokeModel` | evaluations fail |
+
+`collect-state.sh` scans the four controllers' logs for denials and surfaces them under the
+**iam** layer. To diagnose (all read-only — the operator runs these; results may themselves need
+`iam:Get*`/`iam:SimulatePrincipalPolicy`, so degrade gracefully if those are denied):
+
+1. **Read the literal error** — it names the exact action and often the deny source:
+   ```bash
+   kubectl logs -n <controller-ns> -l <controller-label> --tail=200 | grep -iE 'AccessDenied|not authorized to perform|AssumeRoleWithWebIdentity'
+   ```
+2. **Map to the IRSA role and confirm the wiring:**
+   ```bash
+   SA_ROLE=$(kubectl get sa -n <controller-ns> <sa> -o jsonpath='{.metadata.annotations.eks\.amazonaws\.com/role-arn}')
+   aws iam get-role --role-name "${SA_ROLE##*/}" --query 'Role.AssumeRolePolicyDocument'   # trust: OIDC provider + the SA :sub condition
+   ```
+   A trust-policy mismatch (wrong OIDC provider URL, or a `:sub` that doesn't match
+   `system:serviceaccount:<ns>:<sa>`) shows up as an `AssumeRoleWithWebIdentity` failure rather
+   than a per-action `AccessDenied`.
+3. **Test the specific action definitively** with the policy simulator — the read-only power tool:
+   ```bash
+   aws iam simulate-principal-policy --policy-source-arn "$SA_ROLE" \
+     --action-names secretsmanager:GetSecretValue --resource-arns <secret-arn>
+   ```
+4. **Mind simulate's blind spots.** It does not evaluate **KMS key policies** or all resource
+   policies, and may not reflect **SCPs / permission boundaries**. So if the role *looks* allowed
+   but the call still fails, suspect the KMS key policy (for ESO's `kms:Decrypt`), an Organizations
+   SCP, or a permission boundary. The literal error from step 1 is ground truth.
+
+Fix (emit): the module's `iam.tf` defines these roles; if a policy/trust is wrong on a
+module-managed deploy it's usually an existing-cluster OIDC/boundary interaction — adjust the
+offending policy/SCP/key policy and re-apply. Never have the skill modify IAM itself.
+
+---
+
 ## FAQ pointers (route, don't restate)
 - **Which user does Monte Carlo connect as?** The `otel` user (creds from
   `clickhouse_otel_credentials_secret_arn`). A read-only user is **not** required for the MC

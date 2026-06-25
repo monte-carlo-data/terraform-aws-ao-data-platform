@@ -436,6 +436,40 @@ else
   fi
 fi
 
+# ── controller IAM / IRSA permission denials ────────────────────────────────────
+# AWS permission problems show up as the downstream symptoms above (cert not Ready,
+# ExternalSecret not synced, NLB not provisioned), but the actual AccessDenied is buried
+# in the controller pod's logs — in its own namespace. Surface it proactively. Read-only,
+# redacted; WARN (not FAIL) since a single transient line may be benign. Routes to the
+# "AWS permissions / IRSA" section of troubleshoot.md.
+section "Controller IAM (permission denials)"
+scan_iam() {  # namespace label friendly hint
+  local ns="$1" label="$2" friendly="$3" hint="$4" pod logs denials
+  pod="$("${KUBECTL[@]}" -n "$ns" get pods -l "$label" --no-headers -o custom-columns=":metadata.name" 2>/dev/null | head -1)"
+  if [[ -z "$pod" ]]; then
+    record SKIP iam "$friendly" "controller not found in ns ${ns} (install_*=false or absent)"
+    return
+  fi
+  if ! logs="$("${KUBECTL[@]}" -n "$ns" logs "$pod" --tail="$LOG_LINES" 2>/dev/null)"; then
+    record SKIP iam "$friendly" "couldn't read logs in ns ${ns} (RBAC?)"
+    return
+  fi
+  denials="$(printf '%s\n' "$logs" \
+    | grep -iE 'AccessDenied|not authorized to perform|UnauthorizedOperation|AssumeRoleWithWebIdentity' \
+    | sed -E 's/(password|token|secret|authorization)=[^[:space:]]+/\1=***REDACTED***/Ig' \
+    | tail -5)"
+  if [[ -n "$denials" ]]; then
+    record WARN iam "$friendly" "IAM denial(s) in logs — likely ${hint}; see troubleshoot.md 'AWS permissions / IRSA'"
+    echo "${DIM}${denials}${RST}" | sed 's/^/      /'
+  else
+    record PASS iam "$friendly" "no IAM denials in last ${LOG_LINES} lines"
+  fi
+}
+scan_iam external-secrets "app.kubernetes.io/name=external-secrets"            "External Secrets"         "external-secrets IRSA missing secretsmanager:GetSecretValue / kms:Decrypt"
+scan_iam cert-manager     "app.kubernetes.io/name=cert-manager"                "cert-manager"             "cert-manager IRSA missing route53 permissions"
+scan_iam external-dns     "app.kubernetes.io/name=external-dns"                "external-dns"             "external-dns IRSA missing route53 permissions"
+scan_iam kube-system      "app.kubernetes.io/name=aws-load-balancer-controller" "Load Balancer Controller" "load-balancer-controller IRSA missing elasticloadbalancing/ec2 permissions"
+
 # ── summary ──────────────────────────────────────────────────────────────────
 print_summary
 
