@@ -13,7 +13,10 @@ jobs:
       - checkout
       - run:
           name: Install dependencies
-          command: apk add --update make
+          # bash is needed by hack/skill-drift-check.sh (run via the skill-check
+          # prerequisite of sanity-check); the hashicorp/terraform image is Alpine and
+          # ships only busybox ash.
+          command: apk add --update make bash
       - run:
           name: Format and validate
           command: make sanity-check

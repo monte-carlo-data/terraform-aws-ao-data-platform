@@ -5,3 +5,11 @@
 *.backup
 *.tfvars
 *.tfvars.json
+
+# This module bundles a Claude Code skill under .claude/skills/ that must be
+# version-controlled. .claude is commonly excluded by a developer's global
+# gitignore, so re-include it here — but only the bundled skill, not local
+# Claude state (settings.local.json, worktrees/).
+!.claude/
+.claude/*
+!.claude/skills/

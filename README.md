@@ -513,6 +513,44 @@ traffic is allowed by default until you define your own. Enabling the engine up
 front lets you adopt policies later without reconfiguring the add-on (which
 restarts the CNI pods).
 
+## Bundled Claude Code skill
+
+This module bundles a [Claude Code](https://docs.claude.com/en/docs/claude-code) skill,
+`ao-data-platform`, that guides you through deploying, verifying, and troubleshooting the
+platform. It is a **guided advisor**: it inspects state read-only and gives you the exact
+commands to run — it never applies changes itself and never prints secrets.
+
+The skill source lives in [`.claude/skills/ao-data-platform/`](.claude/skills/ao-data-platform).
+Claude Code auto-discovers skills under a `.claude/skills/` directory, so choose whichever
+of the following fits how you work:
+
+**Install for your user (recommended)** — available in every project you open:
+
+```bash
+make install-skill          # copies the skill to ~/.claude/skills/ao-data-platform
+```
+
+**Commit it into your own infrastructure repo** — versioned alongside your root module and
+shared with your team:
+
+```bash
+make install-skill SKILL_DEST=/path/to/your-infra-repo/.claude/skills
+```
+
+> **Note:** if you commit the skill into your own repo, `.claude` is often excluded by a
+> global gitignore. Add a negation so the skill is tracked, for example:
+> ```gitignore
+> !.claude/
+> .claude/*
+> !.claude/skills/
+> ```
+
+**Use it in place** — if you cloned this repository, just open it in Claude Code; the skill
+is discovered automatically with no install step.
+
+Once installed, open Claude Code in your Terraform project and ask it to, for example,
+"deploy the AO data platform", "verify my AO install", or "the ClickHouse pod is Pending".
+
 ## Development
 
 ```bash
