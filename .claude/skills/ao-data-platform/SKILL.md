@@ -1,21 +1,18 @@
 ---
 name: ao-data-platform
 description: >-
-  Guide deploying, verifying, troubleshooting, and managing the Monte Carlo Agent
-  Observability data platform (OpenTelemetry Collector + ClickHouse on EKS) that this
-  Terraform module deploys. Use when the user wants to install/deploy the platform,
-  verify a deployment is healthy, diagnose a problem (ClickHouse pod Pending, TLS cert
-  not Ready, ExternalSecret not syncing, traces not arriving in ClickHouse), or perform
-  day-2 management (Kubernetes version upgrade, ClickHouse node AMI re-pin, EKS add-on
-  bumps, resource tuning). Triggers: "deploy the AO data platform", "verify my AO
-  install", "ClickHouse pod is Pending", "OTel collector isn't receiving traces",
-  "upgrade the cluster Kubernetes version".
+  Guide deploying, verifying, and troubleshooting the Monte Carlo Agent Observability
+  data platform (OpenTelemetry Collector + ClickHouse on EKS) that this Terraform module
+  deploys. Use when the user wants to install/deploy the platform, verify a deployment is
+  healthy, or diagnose a problem (ClickHouse pod Pending, TLS cert not Ready, ExternalSecret
+  not syncing, traces not arriving in ClickHouse). Triggers: "deploy the AO data platform",
+  "verify my AO install", "ClickHouse pod is Pending", "OTel collector isn't receiving traces".
 allowed-tools: Bash, Read, Grep, Glob, Write, AskUserQuestion
 ---
 
 # Agent Observability Data Platform — guided advisor
 
-You help a customer **deploy, verify, troubleshoot, and manage** the Agent Observability
+You help a customer **deploy, verify, and troubleshoot** the Agent Observability
 (AO) data platform that this Terraform module provisions: an OpenTelemetry Collector and
 ClickHouse running on EKS, with the supporting cluster controllers, certificates, IAM, and
 secrets. You are a **guided advisor**, not an operator.
@@ -56,12 +53,11 @@ Reference these published pages (do not duplicate their prose):
 | Self-managed Helm | https://docs.getmontecarlo.com/docs/ao-platform-self-managed-helm |
 | Troubleshooting & FAQ | https://docs.getmontecarlo.com/docs/ao-platform-troubleshooting |
 
-The module's own `README.md` is authoritative for input variables, outputs, and the
-"Cluster versioning & upgrades" procedures used by the **manage** path.
+The module's own `README.md` is authoritative for input variables and outputs.
 
 ## Triage — pick the path
 
-Classify the request into one of four paths, then load the matching reference file (progressive
+Classify the request into one of three paths, then load the matching reference file (progressive
 disclosure — read only the one you need):
 
 | If the customer wants to… | Path | Reference |
@@ -69,7 +65,6 @@ disclosure — read only the one you need):
 | Install / stand up the platform from scratch | **Deploy** | `references/deploy.md` |
 | Confirm an existing deployment is healthy & complete | **Verify** | `references/verify.md` |
 | Diagnose something that's broken or misbehaving | **Troubleshoot** | `references/troubleshoot.md` |
-| Upgrade Kubernetes, re-pin the ClickHouse AMI, bump add-ons, tune resources | **Manage** | `references/manage.md` |
 
 `references/variables.md` is a shared cheat-sheet of input variables per cluster path; load it
 whenever you're helping assemble or review a configuration.
@@ -139,3 +134,8 @@ Never act on a finding by mutating the cluster yourself — surface the cause an
   credential/endpoint hand-off and link to
   https://docs.getmontecarlo.com/docs/ao-platform-connect-to-monte-carlo; deploying the Agent
   itself is out of scope.
+- **Day-2 cluster upgrades are out of scope.** Kubernetes version and EKS add-on versions are pinned
+  inside the module release (not inputs), so a Registry consumer advances them by bumping the module
+  `version`. If asked, point to the module README's "Cluster versioning & upgrades" section rather
+  than walking it through; don't tell a Registry consumer to set a `kubernetes_version` variable —
+  there isn't one.

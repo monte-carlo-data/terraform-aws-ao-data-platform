@@ -516,9 +516,9 @@ restarts the CNI pods).
 ## Bundled Claude Code skill
 
 This module bundles a [Claude Code](https://docs.claude.com/en/docs/claude-code) skill,
-`ao-data-platform`, that guides you through deploying, verifying, troubleshooting, and
-managing the platform. It is a **guided advisor**: it inspects state read-only and gives
-you the exact commands to run — it never applies changes itself and never prints secrets.
+`ao-data-platform`, that guides you through deploying, verifying, and troubleshooting the
+platform. It is a **guided advisor**: it inspects state read-only and gives you the exact
+commands to run — it never applies changes itself and never prints secrets.
 
 The skill source lives in [`.claude/skills/ao-data-platform/`](.claude/skills/ao-data-platform).
 Claude Code auto-discovers skills under a `.claude/skills/` directory, so choose whichever
