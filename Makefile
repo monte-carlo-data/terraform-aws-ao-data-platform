@@ -1,4 +1,4 @@
-.PHONY: default sanity-check test install-skill
+.PHONY: default sanity-check test install-skill skill-check
 
 SKILL_NAME := ao-data-platform
 SKILL_SRC  := .claude/skills/$(SKILL_NAME)
@@ -18,11 +18,17 @@ install-skill:
 	cp -R "$(SKILL_SRC)" "$(SKILL_DEST)/"
 	@echo "Installed '$(SKILL_NAME)' skill to $(SKILL_DEST)/$(SKILL_NAME)"
 
-sanity-check:
-	# Validate TF configuration files and formatting. Used in CI pipeline.
+sanity-check: skill-check
+	# Validate TF configuration + formatting (and, via the skill-check prerequisite,
+	# the bundled skill). Used in CI pipeline.
 	terraform init -backend=false
 	terraform fmt -recursive -check -diff
 	terraform validate
+
+skill-check:
+	# Flag drift between the bundled ao-data-platform skill and the module
+	# (outputs it depends on, reference-file integrity, script health). CI pipeline.
+	./hack/skill-drift-check.sh
 
 test:
 	# Run variable-validation tests. Requires Terraform >= 1.7 for mock_provider.
