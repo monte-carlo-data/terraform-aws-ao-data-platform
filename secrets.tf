@@ -22,6 +22,18 @@ resource "random_password" "clickhouse_monte_carlo" {
   special = false
 }
 
+resource "random_password" "clickhouse_schema_owner" {
+  count   = nonsensitive(var.clickhouse_passwords.schema_owner == null) ? 1 : 0
+  length  = 32
+  special = false
+}
+
+resource "random_password" "clickhouse_llm_worker" {
+  count   = nonsensitive(var.clickhouse_passwords.llm_worker == null) ? 1 : 0
+  length  = 32
+  special = false
+}
+
 resource "random_password" "clickhouse_readonly_user" {
   count   = local.clickhouse_readonly_user_enabled && nonsensitive(var.clickhouse_passwords.readonly_user == null) ? 1 : 0
   length  = 32
@@ -42,7 +54,8 @@ resource "aws_kms_alias" "pipeline_secrets" {
   target_key_id = aws_kms_key.pipeline_secrets.key_id
 }
 
-# Secrets Manager — ClickHouse passwords (admin, otel user, monte_carlo user).
+# Secrets Manager — ClickHouse passwords (admin, otel, monte_carlo,
+# schema_owner, llm_worker users; readonly_user is provisioned conditionally).
 
 resource "aws_secretsmanager_secret" "clickhouse_admin_password" {
   name                    = "${local.effective_cluster_name}/clickhouse/admin-credentials"
@@ -78,6 +91,30 @@ resource "aws_secretsmanager_secret" "clickhouse_monte_carlo_password" {
 resource "aws_secretsmanager_secret_version" "clickhouse_monte_carlo_password" {
   secret_id     = aws_secretsmanager_secret.clickhouse_monte_carlo_password.id
   secret_string = local.clickhouse_monte_carlo_password
+}
+
+resource "aws_secretsmanager_secret" "clickhouse_schema_owner_password" {
+  name                    = "${local.effective_cluster_name}/clickhouse/schema-owner-credentials"
+  kms_key_id              = aws_kms_key.pipeline_secrets.arn
+  recovery_window_in_days = 0 # See clickhouse_admin_password above.
+  tags                    = var.tags
+}
+
+resource "aws_secretsmanager_secret_version" "clickhouse_schema_owner_password" {
+  secret_id     = aws_secretsmanager_secret.clickhouse_schema_owner_password.id
+  secret_string = local.clickhouse_schema_owner_password
+}
+
+resource "aws_secretsmanager_secret" "clickhouse_llm_worker_password" {
+  name                    = "${local.effective_cluster_name}/clickhouse/llm-worker-credentials"
+  kms_key_id              = aws_kms_key.pipeline_secrets.arn
+  recovery_window_in_days = 0 # See clickhouse_admin_password above.
+  tags                    = var.tags
+}
+
+resource "aws_secretsmanager_secret_version" "clickhouse_llm_worker_password" {
+  secret_id     = aws_secretsmanager_secret.clickhouse_llm_worker_password.id
+  secret_string = local.clickhouse_llm_worker_password
 }
 
 resource "aws_secretsmanager_secret" "clickhouse_readonly_user_password" {

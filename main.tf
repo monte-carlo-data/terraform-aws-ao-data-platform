@@ -57,9 +57,11 @@ locals {
   # ones. Either way the value is sensitive (var.clickhouse_passwords is a
   # sensitive variable; random_password.result is provider-sensitive), so these
   # locals are redacted everywhere downstream.
-  clickhouse_admin_password       = var.clickhouse_passwords.admin != null ? var.clickhouse_passwords.admin : random_password.clickhouse_admin[0].result
-  clickhouse_otel_password        = var.clickhouse_passwords.otel != null ? var.clickhouse_passwords.otel : random_password.clickhouse_otel[0].result
-  clickhouse_monte_carlo_password = var.clickhouse_passwords.monte_carlo != null ? var.clickhouse_passwords.monte_carlo : random_password.clickhouse_monte_carlo[0].result
+  clickhouse_admin_password        = var.clickhouse_passwords.admin != null ? var.clickhouse_passwords.admin : random_password.clickhouse_admin[0].result
+  clickhouse_otel_password         = var.clickhouse_passwords.otel != null ? var.clickhouse_passwords.otel : random_password.clickhouse_otel[0].result
+  clickhouse_monte_carlo_password  = var.clickhouse_passwords.monte_carlo != null ? var.clickhouse_passwords.monte_carlo : random_password.clickhouse_monte_carlo[0].result
+  clickhouse_schema_owner_password = var.clickhouse_passwords.schema_owner != null ? var.clickhouse_passwords.schema_owner : random_password.clickhouse_schema_owner[0].result
+  clickhouse_llm_worker_password   = var.clickhouse_passwords.llm_worker != null ? var.clickhouse_passwords.llm_worker : random_password.clickhouse_llm_worker[0].result
 
   clickhouse_readonly_user_enabled = try(var.helm.clickhouse.readonly_user.enabled, false)
   clickhouse_readonly_user_password = local.clickhouse_readonly_user_enabled ? (
