@@ -449,6 +449,8 @@ variable "clickhouse_passwords" {
     admin         = optional(string, null)
     otel          = optional(string, null)
     monte_carlo   = optional(string, null)
+    schema_owner  = optional(string, null)
+    llm_worker    = optional(string, null)
     readonly_user = optional(string, null)
   })
   default   = {}
