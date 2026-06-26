@@ -5,3 +5,6 @@
 *.backup
 *.tfvars
 *.tfvars.json
+
+# Local planning/working artifacts — never published.
+.work/
