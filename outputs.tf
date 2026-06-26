@@ -70,6 +70,16 @@ output "clickhouse_monte_carlo_credentials_secret_arn" {
   value       = aws_secretsmanager_secret.clickhouse_monte_carlo_password.arn
 }
 
+output "clickhouse_schema_owner_credentials_secret_arn" {
+  description = "Secrets Manager ARN for the ClickHouse schema_owner user password."
+  value       = aws_secretsmanager_secret.clickhouse_schema_owner_password.arn
+}
+
+output "clickhouse_llm_worker_credentials_secret_arn" {
+  description = "Secrets Manager ARN for the ClickHouse llm_worker user password."
+  value       = aws_secretsmanager_secret.clickhouse_llm_worker_password.arn
+}
+
 output "clickhouse_readonly_user_credentials_secret_arn" {
   description = "Secrets Manager ARN for the password of the ClickHouse SQL user `readonly_user` (profile: readonly, SELECT-only). Null when helm.clickhouse.readonly_user is disabled."
   value       = local.clickhouse_readonly_user_enabled ? aws_secretsmanager_secret.clickhouse_readonly_user_password[0].arn : null
