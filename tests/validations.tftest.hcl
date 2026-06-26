@@ -425,6 +425,14 @@ run "clickhouse_passwords_omitted_generate_random" {
     error_message = "clickhouse_monte_carlo password must be generated when clickhouse_passwords.monte_carlo is null."
   }
   assert {
+    condition     = length(random_password.clickhouse_schema_owner) == 1
+    error_message = "clickhouse_schema_owner password must be generated when clickhouse_passwords.schema_owner is null."
+  }
+  assert {
+    condition     = length(random_password.clickhouse_llm_worker) == 1
+    error_message = "clickhouse_llm_worker password must be generated when clickhouse_passwords.llm_worker is null."
+  }
+  assert {
     condition     = length(random_password.clickhouse_readonly_user) == 1
     error_message = "clickhouse_readonly_user password must be generated when readonly_user is enabled and clickhouse_passwords.readonly_user is null."
   }
@@ -448,6 +456,8 @@ run "clickhouse_passwords_supplied_suppress_random" {
       admin         = "supplied-admin"
       otel          = "supplied-otel"
       monte_carlo   = "supplied-mc"
+      schema_owner  = "supplied-schema-owner"
+      llm_worker    = "supplied-llm-worker"
       readonly_user = "supplied-ro"
     }
   }
@@ -462,6 +472,14 @@ run "clickhouse_passwords_supplied_suppress_random" {
   assert {
     condition     = length(random_password.clickhouse_monte_carlo) == 0
     error_message = "clickhouse_monte_carlo password must NOT be generated when clickhouse_passwords.monte_carlo is supplied."
+  }
+  assert {
+    condition     = length(random_password.clickhouse_schema_owner) == 0
+    error_message = "clickhouse_schema_owner password must NOT be generated when clickhouse_passwords.schema_owner is supplied."
+  }
+  assert {
+    condition     = length(random_password.clickhouse_llm_worker) == 0
+    error_message = "clickhouse_llm_worker password must NOT be generated when clickhouse_passwords.llm_worker is supplied."
   }
   assert {
     condition     = length(random_password.clickhouse_readonly_user) == 0
