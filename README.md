@@ -228,6 +228,50 @@ module "ao_data_platform" {
 }
 ```
 
+### Least-privilege ClickHouse users
+
+The module provisions a per-access-path ClickHouse user model (`ao-data-platform` chart `>= 2.0.0`), where each component authenticates as a user scoped to what it does. Four users are always provisioned; two are opt-in.
+
+| User | Used by | Provisioned |
+|------|---------|-------------|
+| `otel` | OTel Collector ingest | always |
+| `schema_owner` | schema migrations (DDL) + materialized-view owner | always |
+| `llm_worker` | LLM-worker queue reader/writer | always |
+| `monte_carlo` | Monte Carlo data-source reads + agent queue producer | always |
+| `admin` | break-glass superuser (loopback-only) | opt-in — `helm.clickhouse.admin` |
+| `readonly_user` | human / MCP / JDBC read access | opt-in — `helm.clickhouse.readonly_user` (see below) |
+
+For each provisioned user the module generates a 32-character password (or uses the matching `clickhouse_passwords.*` override), stores it in Secrets Manager KMS-encrypted with the pipeline key, grants the External Secrets Operator read access, and forwards the per-user `externalSecret` config into the chart so ESO syncs the password into Kubernetes. Each user's secret ARN is exposed as a `clickhouse_*_credentials_secret_arn` output.
+
+- Set `helm.clickhouse.otel.restrict_grants = true` to tighten the `otel` ingest user to `INSERT`-only on the telemetry source tables. Flip this only after any external readers have moved to the `monte_carlo` user — see [Upgrading to v2.0.0](#upgrading-to-v200).
+- Enable the gated break-glass `admin` superuser with `helm.clickhouse.admin = { enabled = true }`. It is reachable only over loopback by default (i.e. via `kubectl exec` into the ClickHouse pod). Disabled by default; when disabled no admin secret is created and `clickhouse_admin_credentials_secret_arn` is `null`.
+
+**Requires `ao-data-platform` chart >= 2.0.0.** Older charts silently ignore the per-user values; the module stays compatible with them via a transitional dual-wiring of the `otel` credential.
+
+```hcl
+module "ao_data_platform" {
+  source  = "monte-carlo-data/ao-data-platform/aws"
+  version = "~> 2.0"
+
+  region                = "us-east-1"
+  otel_collector_domain = "otel.acme.com"
+  clickhouse_domain     = "clickhouse.acme.com"
+  hosted_zone_id        = "Z1234567890ABC"
+
+  helm = {
+    chart_registry = "oci://123456789012.dkr.ecr.us-east-1.amazonaws.com"
+    chart_version  = "2.0.0"
+
+    clickhouse = {
+      # Gated break-glass superuser (loopback-only). Off by default.
+      admin = { enabled = true }
+      # Tighten otel to INSERT-only once external readers use monte_carlo.
+      otel = { restrict_grants = false }
+    }
+  }
+}
+```
+
 ### Read-only ClickHouse user
 
 Set `helm.clickhouse.readonly_user = { enabled = true }` to provision a SELECT-only ClickHouse user — SQL username `readonly_user`, `profile: readonly`. When `enabled = true`, the module:
@@ -411,6 +455,28 @@ aws secretsmanager get-secret-value \
   --secret-id <clickhouse_monte_carlo_credentials_secret_arn> \
   --query SecretString --output text
 ```
+
+## Upgrading
+
+### Upgrading to v2.0.0
+
+**Breaking — the `admin` ClickHouse user is now opt-in.**
+
+Earlier versions always created an `admin` Secrets Manager secret. As of v2.0.0
+it is gated behind `helm.clickhouse.admin = { enabled = true }` and is **disabled
+by default**. Upgrading and applying without enabling it will:
+
+- delete the existing `<cluster_name>/clickhouse/admin-credentials` secret, and
+- make the `clickhouse_admin_credentials_secret_arn` output `null`.
+
+To keep the admin user and its credential, set
+`helm.clickhouse.admin = { enabled = true }` before applying.
+
+The full least-privilege user model (the `schema_owner` / `llm_worker` /
+`monte_carlo` users and the `helm.clickhouse.otel.restrict_grants` flag) requires
+`ao-data-platform` chart **>= 2.0.0**. The module stays compatible with older
+charts, which ignore the new per-user values via a transitional dual-wiring of
+the `otel` credential. See [Least-privilege ClickHouse users](#least-privilege-clickhouse-users).
 
 ## Cluster versioning & upgrades
 
