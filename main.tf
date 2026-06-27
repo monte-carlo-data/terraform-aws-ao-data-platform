@@ -116,6 +116,24 @@ locals {
   helm_llm_worker_resources_block = var.helm.llm_worker.resources != null ? {
     resources = { for k, v in var.helm.llm_worker.resources : k => v if v != null }
   } : {}
+  # Per-user ExternalSecret config forwarded into the ao-data-platform chart so
+  # ESO syncs each ClickHouse user's password from Secrets Manager into the K8s
+  # Secret the chart consumes. The secretStoreRef is the same ClusterSecretStore
+  # for every user; only the remoteRef key differs. Keyed by the chart's per-user
+  # value key (chart >= 2.0.0). readonly_user is wired separately below because it
+  # is gated.
+  clickhouse_user_external_secret = {
+    for user, slug in {
+      otel        = "otel-credentials"
+      schemaOwner = "schema-owner-credentials"
+      llmWorker   = "llm-worker-credentials"
+      monteCarlo  = "monte-carlo-credentials"
+      } : user => {
+      secretStoreRef = { name = "aws-secrets-manager", kind = "ClusterSecretStore" }
+      remoteRef      = { key = "${local.effective_cluster_name}/clickhouse/${slug}" }
+    }
+  }
+
   # Singleton map merged into clickhouse helm values when readonly_user is enabled.
   # Mirrors the otel ExternalSecret shape: ESO syncs from Secrets Manager into
   # the K8s Secret the chart consumes.
