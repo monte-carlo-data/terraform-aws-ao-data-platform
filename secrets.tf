@@ -5,7 +5,7 @@
 # never the password itself.
 
 resource "random_password" "clickhouse_admin" {
-  count   = nonsensitive(var.clickhouse_passwords.admin == null) ? 1 : 0
+  count   = local.clickhouse_admin_enabled && nonsensitive(var.clickhouse_passwords.admin == null) ? 1 : 0
   length  = 32
   special = false
 }
@@ -54,10 +54,25 @@ resource "aws_kms_alias" "pipeline_secrets" {
   target_key_id = aws_kms_key.pipeline_secrets.key_id
 }
 
-# Secrets Manager — ClickHouse passwords (admin, otel, monte_carlo,
-# schema_owner, llm_worker users; readonly_user is provisioned conditionally).
+# Secrets Manager — ClickHouse passwords (otel, monte_carlo, schema_owner,
+# llm_worker users always provisioned; admin and readonly_user conditional on
+# their respective enabled flags).
+
+# admin and admin_password versions were unconditional before the gated
+# break-glass admin user existed. The moved blocks let enabling admin adopt the
+# existing secret in place rather than destroy/recreate it.
+moved {
+  from = aws_secretsmanager_secret.clickhouse_admin_password
+  to   = aws_secretsmanager_secret.clickhouse_admin_password[0]
+}
+
+moved {
+  from = aws_secretsmanager_secret_version.clickhouse_admin_password
+  to   = aws_secretsmanager_secret_version.clickhouse_admin_password[0]
+}
 
 resource "aws_secretsmanager_secret" "clickhouse_admin_password" {
+  count                   = local.clickhouse_admin_enabled ? 1 : 0
   name                    = "${local.effective_cluster_name}/clickhouse/admin-credentials"
   kms_key_id              = aws_kms_key.pipeline_secrets.arn
   recovery_window_in_days = 0 # Allow immediate deletion so destroy + re-apply with the same cluster name doesn't fail during the default 30-day recovery window.
@@ -65,7 +80,8 @@ resource "aws_secretsmanager_secret" "clickhouse_admin_password" {
 }
 
 resource "aws_secretsmanager_secret_version" "clickhouse_admin_password" {
-  secret_id     = aws_secretsmanager_secret.clickhouse_admin_password.id
+  count         = local.clickhouse_admin_enabled ? 1 : 0
+  secret_id     = aws_secretsmanager_secret.clickhouse_admin_password[0].id
   secret_string = local.clickhouse_admin_password
 }
 

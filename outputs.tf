@@ -56,8 +56,8 @@ output "oidc_provider_arn" {
 }
 
 output "clickhouse_admin_credentials_secret_arn" {
-  description = "Secrets Manager ARN for the ClickHouse admin password."
-  value       = aws_secretsmanager_secret.clickhouse_admin_password.arn
+  description = "Secrets Manager ARN for the ClickHouse admin password. Null when helm.clickhouse.admin is disabled."
+  value       = local.clickhouse_admin_enabled ? aws_secretsmanager_secret.clickhouse_admin_password[0].arn : null
 }
 
 output "clickhouse_otel_credentials_secret_arn" {

@@ -351,6 +351,14 @@ variable "helm" {
     charts). Intended to be flipped to true only after external readers have moved
     to the monte_carlo user.
 
+    clickhouse.admin optionally provisions the gated break-glass superuser
+    (`admin`). When { enabled = true }, the module creates its Secrets Manager
+    secret + ExternalSecret pipeline and enables the chart's admin user (which
+    stays loopback-only by default — reachable only via pod-exec). When disabled
+    (the default), no admin secret is created and clickhouse_admin_credentials_secret_arn
+    is null. Requires chart version >= 2.0.0. The password is supplied via
+    var.clickhouse_passwords.admin (or auto-generated).
+
     clickhouse.readonly_user optionally provisions a second SELECT-only ClickHouse
     user (`readonly_user`, profile: readonly). When { enabled = true }, the module
     creates a Secrets Manager secret + ExternalSecret pipeline mirroring the otel
@@ -399,6 +407,9 @@ variable "helm" {
       otel = optional(object({
         restrict_grants = optional(bool, false)
       }), {})
+      admin = optional(object({
+        enabled = bool
+      }), null)
       readonly_user = optional(object({
         enabled = bool
       }), null)
@@ -462,7 +473,8 @@ variable "clickhouse_passwords" {
     TF_VAR_clickhouse_passwords rather than -var on a command line. Note that
     Terraform state still contains the values — protect state accordingly.
 
-    readonly_user is only used when helm.clickhouse.readonly_user.enabled = true.
+    admin is only used when helm.clickhouse.admin.enabled = true, and
+    readonly_user only when helm.clickhouse.readonly_user.enabled = true.
   EOT
   type = object({
     admin         = optional(string, null)

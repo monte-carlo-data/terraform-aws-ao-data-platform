@@ -253,7 +253,7 @@ resource "helm_release" "ao_data_platform" {
             "service.beta.kubernetes.io/load-balancer-source-ranges" = join(",", local.clickhouse_nlb_source_ranges)
           } : {})
         }
-      }, local.helm_clickhouse_resources_block, local.helm_clickhouse_readonly_user_block, local.helm_clickhouse_node_selector_block, local.helm_clickhouse_tolerations_block)
+      }, local.helm_clickhouse_resources_block, local.helm_clickhouse_admin_block, local.helm_clickhouse_readonly_user_block, local.helm_clickhouse_node_selector_block, local.helm_clickhouse_tolerations_block)
       "opentelemetry-collector" = merge({
         serviceAccount = {
           annotations = {

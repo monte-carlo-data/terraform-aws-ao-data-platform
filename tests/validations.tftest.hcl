@@ -394,8 +394,10 @@ run "irsa_role_names_are_region_qualified" {
 # generated password. These two runs pin both directions of the gate.
 #
 # cluster.create = false keeps module.eks out of the plan (random_password is
-# not an EKS dependency); readonly_user.enabled = true exercises the compound
-# gate on clickhouse_readonly_user (enabled && password == null).
+# not an EKS dependency); admin.enabled and readonly_user.enabled = true exercise
+# the compound gates on clickhouse_admin / clickhouse_readonly_user
+# (enabled && password == null). The admin-disabled direction is pinned by
+# clickhouse_admin_disabled_creates_no_secret below.
 
 run "clickhouse_passwords_omitted_generate_random" {
   command = plan
@@ -408,6 +410,7 @@ run "clickhouse_passwords_omitted_generate_random" {
     helm = {
       deploy_charts = false
       clickhouse = {
+        admin         = { enabled = true }
         readonly_user = { enabled = true }
       }
     }
@@ -449,6 +452,7 @@ run "clickhouse_passwords_supplied_suppress_random" {
     helm = {
       deploy_charts = false
       clickhouse = {
+        admin         = { enabled = true }
         readonly_user = { enabled = true }
       }
     }
@@ -487,6 +491,34 @@ run "clickhouse_passwords_supplied_suppress_random" {
   }
 }
 
+# --- admin is gated: disabled (default) creates no secret ---
+#
+# admin defaults off. With no helm.clickhouse.admin block, neither the password
+# nor the Secrets Manager secret/version may be created — this pins the gate so a
+# regression can't silently resurrect the orphan admin secret.
+
+run "clickhouse_admin_disabled_creates_no_secret" {
+  command = plan
+  variables {
+    cluster = {
+      create                = false
+      name                  = "test-cluster"
+      existing_cluster_name = "test-cluster"
+    }
+    helm = {
+      deploy_charts = false
+    }
+  }
+  assert {
+    condition     = length(random_password.clickhouse_admin) == 0
+    error_message = "clickhouse_admin password must NOT be generated when helm.clickhouse.admin is disabled."
+  }
+  assert {
+    condition     = length(aws_secretsmanager_secret.clickhouse_admin_password) == 0
+    error_message = "clickhouse_admin secret must NOT be created when helm.clickhouse.admin is disabled."
+  }
+}
+
 # --- var.tags propagates to taggable AWS resources ---
 #
 # tags is threaded onto every taggable resource the module creates. Assert it
@@ -517,7 +549,7 @@ run "tags_propagate_to_resources" {
     error_message = "var.tags must propagate to the pipeline_secrets KMS key."
   }
   assert {
-    condition     = aws_secretsmanager_secret.clickhouse_admin_password.tags["Team"] == "ao"
-    error_message = "var.tags must propagate to the ClickHouse admin Secrets Manager secret."
+    condition     = aws_secretsmanager_secret.clickhouse_otel_password.tags["Team"] == "ao"
+    error_message = "var.tags must propagate to a ClickHouse Secrets Manager secret."
   }
 }

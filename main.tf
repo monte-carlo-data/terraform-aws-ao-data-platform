@@ -57,11 +57,18 @@ locals {
   # ones. Either way the value is sensitive (var.clickhouse_passwords is a
   # sensitive variable; random_password.result is provider-sensitive), so these
   # locals are redacted everywhere downstream.
-  clickhouse_admin_password        = var.clickhouse_passwords.admin != null ? var.clickhouse_passwords.admin : random_password.clickhouse_admin[0].result
   clickhouse_otel_password         = var.clickhouse_passwords.otel != null ? var.clickhouse_passwords.otel : random_password.clickhouse_otel[0].result
   clickhouse_monte_carlo_password  = var.clickhouse_passwords.monte_carlo != null ? var.clickhouse_passwords.monte_carlo : random_password.clickhouse_monte_carlo[0].result
   clickhouse_schema_owner_password = var.clickhouse_passwords.schema_owner != null ? var.clickhouse_passwords.schema_owner : random_password.clickhouse_schema_owner[0].result
   clickhouse_llm_worker_password   = var.clickhouse_passwords.llm_worker != null ? var.clickhouse_passwords.llm_worker : random_password.clickhouse_llm_worker[0].result
+
+  # admin is a gated break-glass superuser (off by default), so — like
+  # readonly_user — its password, secret, and chart wiring are all conditional
+  # on its enabled flag.
+  clickhouse_admin_enabled = try(var.helm.clickhouse.admin.enabled, false)
+  clickhouse_admin_password = local.clickhouse_admin_enabled ? (
+    var.clickhouse_passwords.admin != null ? var.clickhouse_passwords.admin : random_password.clickhouse_admin[0].result
+  ) : null
 
   clickhouse_readonly_user_enabled = try(var.helm.clickhouse.readonly_user.enabled, false)
   clickhouse_readonly_user_password = local.clickhouse_readonly_user_enabled ? (
@@ -143,6 +150,20 @@ locals {
       externalSecret = {
         secretStoreRef = { name = "aws-secrets-manager", kind = "ClusterSecretStore" }
         remoteRef      = { key = "${local.effective_cluster_name}/clickhouse/readonly-user-credentials" }
+      }
+    }
+  } : {}
+
+  # Singleton map merged into clickhouse helm values when the gated admin
+  # break-glass user is enabled. Wires the chart's admin user to its Secrets
+  # Manager password; the chart's loopback-only networksIp default is left
+  # in place, so admin stays reachable only via pod-exec.
+  helm_clickhouse_admin_block = local.clickhouse_admin_enabled ? {
+    admin = {
+      enabled = true
+      externalSecret = {
+        secretStoreRef = { name = "aws-secrets-manager", kind = "ClusterSecretStore" }
+        remoteRef      = { key = "${local.effective_cluster_name}/clickhouse/admin-credentials" }
       }
     }
   } : {}
