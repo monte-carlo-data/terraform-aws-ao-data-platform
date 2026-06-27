@@ -419,6 +419,17 @@ run "clickhouse_passwords_omitted_generate_random" {
     condition     = length(random_password.clickhouse_admin) == 1
     error_message = "clickhouse_admin password must be generated when clickhouse_passwords.admin is null."
   }
+  # Pin the enabled direction of the admin secret gate: generating the password is
+  # not enough — the Secrets Manager secret + version must also be created, or the
+  # break-glass credential never lands in Secrets Manager for ESO to sync.
+  assert {
+    condition     = length(aws_secretsmanager_secret.clickhouse_admin_password) == 1
+    error_message = "clickhouse_admin secret must be created when helm.clickhouse.admin is enabled."
+  }
+  assert {
+    condition     = length(aws_secretsmanager_secret_version.clickhouse_admin_password) == 1
+    error_message = "clickhouse_admin secret version must be created when helm.clickhouse.admin is enabled."
+  }
   assert {
     condition     = length(random_password.clickhouse_otel) == 1
     error_message = "clickhouse_otel password must be generated when clickhouse_passwords.otel is null."
@@ -516,6 +527,26 @@ run "clickhouse_admin_disabled_creates_no_secret" {
   assert {
     condition     = length(aws_secretsmanager_secret.clickhouse_admin_password) == 0
     error_message = "clickhouse_admin secret must NOT be created when helm.clickhouse.admin is disabled."
+  }
+  # The disabled admin output contract is the one piece of output behavior a
+  # plan-only run can verify (resource ARNs are unknown under the mock, but the
+  # null branch is statically known).
+  assert {
+    condition     = output.clickhouse_admin_credentials_secret_arn == null
+    error_message = "clickhouse_admin_credentials_secret_arn must be null when helm.clickhouse.admin is disabled."
+  }
+  # schema_owner and llm_worker are always provisioned (no enabled gate), even on
+  # the admin-disabled baseline. These are single (uncounted) resources, so assert
+  # a configured attribute directly — this both confirms the secret is in the plan
+  # and pins the always-on contract: a future refactor adding a count gate would
+  # turn these bare references into an error (forcing a [0] index), failing here.
+  assert {
+    condition     = endswith(aws_secretsmanager_secret.clickhouse_schema_owner_password.name, "/clickhouse/schema-owner-credentials")
+    error_message = "clickhouse_schema_owner secret must always be created."
+  }
+  assert {
+    condition     = endswith(aws_secretsmanager_secret.clickhouse_llm_worker_password.name, "/clickhouse/llm-worker-credentials")
+    error_message = "clickhouse_llm_worker secret must always be created."
   }
 }
 

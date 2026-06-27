@@ -265,7 +265,8 @@ module "ao_data_platform" {
     clickhouse = {
       # Gated break-glass superuser (loopback-only). Off by default.
       admin = { enabled = true }
-      # Tighten otel to INSERT-only once external readers use monte_carlo.
+      # Set true to tighten otel to INSERT-only, once external readers use
+      # monte_carlo. Default false (broad access).
       otel = { restrict_grants = false }
     }
   }
