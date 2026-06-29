@@ -549,10 +549,12 @@ resource "aws_iam_role_policy" "external_secrets" {
         Action = ["secretsmanager:GetSecretValue", "secretsmanager:DescribeSecret"]
         Resource = concat(
           [
-            aws_secretsmanager_secret.clickhouse_admin_password.arn,
             aws_secretsmanager_secret.clickhouse_otel_password.arn,
             aws_secretsmanager_secret.clickhouse_monte_carlo_password.arn,
+            aws_secretsmanager_secret.clickhouse_schema_owner_password.arn,
+            aws_secretsmanager_secret.clickhouse_llm_worker_password.arn,
           ],
+          local.clickhouse_admin_enabled ? [aws_secretsmanager_secret.clickhouse_admin_password[0].arn] : [],
           local.clickhouse_readonly_user_enabled ? [aws_secretsmanager_secret.clickhouse_readonly_user_password[0].arn] : [],
         )
       },

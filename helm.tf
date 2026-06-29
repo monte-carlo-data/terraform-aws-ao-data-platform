@@ -214,14 +214,25 @@ resource "helm_release" "ao_data_platform" {
         storageSize  = var.helm.clickhouse.storage_size
         storageClass = var.clickhouse_storage_class
         ttlDays      = var.clickhouse_ttl_days
-        externalSecret = {
-          secretStoreRef = {
-            name = "aws-secrets-manager"
-            kind = "ClusterSecretStore"
-          }
-          remoteRef = {
-            key = "${local.effective_cluster_name}/clickhouse/otel-credentials"
-          }
+        # otel ESO wiring is dual-pathed across the 2.0.0 chart migration: chart
+        # < 2.0.0 reads clickhouse.externalSecret; chart >= 2.0.0 reads
+        # clickhouse.otel.externalSecret. Both resolve to the same Secrets Manager
+        # key, so the module stays compatible with either chart while the fleet
+        # migrates. Remove this legacy clickhouse.externalSecret once every
+        # chart-deployed cell is on >= 2.0.0.
+        externalSecret = local.clickhouse_user_external_secret.otel
+        otel = {
+          restrictGrants = var.helm.clickhouse.otel.restrict_grants
+          externalSecret = local.clickhouse_user_external_secret.otel
+        }
+        schemaOwner = {
+          externalSecret = local.clickhouse_user_external_secret.schemaOwner
+        }
+        llmWorker = {
+          externalSecret = local.clickhouse_user_external_secret.llmWorker
+        }
+        monteCarlo = {
+          externalSecret = local.clickhouse_user_external_secret.monteCarlo
         }
         service = {
           type = "LoadBalancer"
@@ -242,7 +253,7 @@ resource "helm_release" "ao_data_platform" {
             "service.beta.kubernetes.io/load-balancer-source-ranges" = join(",", local.clickhouse_nlb_source_ranges)
           } : {})
         }
-      }, local.helm_clickhouse_resources_block, local.helm_clickhouse_readonly_user_block, local.helm_clickhouse_node_selector_block, local.helm_clickhouse_tolerations_block)
+      }, local.helm_clickhouse_resources_block, local.helm_clickhouse_admin_block, local.helm_clickhouse_readonly_user_block, local.helm_clickhouse_node_selector_block, local.helm_clickhouse_tolerations_block)
       "opentelemetry-collector" = merge({
         serviceAccount = {
           annotations = {

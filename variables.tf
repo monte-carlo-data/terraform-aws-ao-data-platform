@@ -331,9 +331,33 @@ variable "helm" {
     Nothing in the module gates this at apply time; a 1.2.x caller will apply
     cleanly and hit the original scheduler deadlock at runtime.
 
+    The module wires the chart's least-privilege ClickHouse user model
+    (schema_owner / llm_worker / monte_carlo ExternalSecrets + otel.restrictGrants),
+    which the chart consumes at version >= 2.0.0. It stays compatible with
+    pre-2.0.0 charts during migration: the otel ExternalSecret is dual-wired at
+    both the legacy (clickhouse.externalSecret) and 2.0.0 (clickhouse.otel.externalSecret)
+    paths, and the per-user keys are simply ignored by older charts. The legacy
+    otel path is transitional and removed once all chart-deployed cells are on
+    >= 2.0.0.
+
     install_*: set false for any component already installed in the cluster to skip
     reinstalling it. Terraform will still create any dependent resources (e.g.
     ClusterSecretStore, ExternalSecret) but skip the Helm release itself.
+
+    clickhouse.otel.restrict_grants forwards clickhouse.otel.restrictGrants to the
+    chart. When true, the otel ingest user is restricted (via config grants) to
+    INSERT on the telemetry source tables only; when false (default) otel keeps
+    broad access. Requires chart version >= 2.0.0 (the flag is ignored by older
+    charts). Intended to be flipped to true only after external readers have moved
+    to the monte_carlo user.
+
+    clickhouse.admin optionally provisions the gated break-glass superuser
+    (`admin`). When { enabled = true }, the module creates its Secrets Manager
+    secret + ExternalSecret pipeline and enables the chart's admin user (which
+    stays loopback-only by default — reachable only via pod-exec). When disabled
+    (the default), no admin secret is created and clickhouse_admin_credentials_secret_arn
+    is null. Requires chart version >= 2.0.0. The password is supplied via
+    var.clickhouse_passwords.admin (or auto-generated).
 
     clickhouse.readonly_user optionally provisions a second SELECT-only ClickHouse
     user (`readonly_user`, profile: readonly). When { enabled = true }, the module
@@ -379,6 +403,12 @@ variable "helm" {
       resources = optional(object({
         requests = optional(map(string), null)
         limits   = optional(map(string), null)
+      }), null)
+      otel = optional(object({
+        restrict_grants = optional(bool, false)
+      }), {})
+      admin = optional(object({
+        enabled = bool
       }), null)
       readonly_user = optional(object({
         enabled = bool
@@ -443,12 +473,15 @@ variable "clickhouse_passwords" {
     TF_VAR_clickhouse_passwords rather than -var on a command line. Note that
     Terraform state still contains the values — protect state accordingly.
 
-    readonly_user is only used when helm.clickhouse.readonly_user.enabled = true.
+    admin is only used when helm.clickhouse.admin.enabled = true, and
+    readonly_user only when helm.clickhouse.readonly_user.enabled = true.
   EOT
   type = object({
     admin         = optional(string, null)
     otel          = optional(string, null)
     monte_carlo   = optional(string, null)
+    schema_owner  = optional(string, null)
+    llm_worker    = optional(string, null)
     readonly_user = optional(string, null)
   })
   default   = {}

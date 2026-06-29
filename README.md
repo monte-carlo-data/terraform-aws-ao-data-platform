@@ -62,7 +62,7 @@ provider "helm" {
 
 module "ao_data_platform" {
   source  = "monte-carlo-data/ao-data-platform/aws"
-  version = "~> 1.0"
+  version = "~> 2.0"
 
   region                = "us-east-1"
   otel_collector_domain = "otel.acme.com"
@@ -83,7 +83,7 @@ See [`examples/new_cluster/`](examples/new_cluster/) for a complete copy-paste s
 ```hcl
 module "ao_data_platform" {
   source  = "monte-carlo-data/ao-data-platform/aws"
-  version = "~> 1.0"
+  version = "~> 2.0"
 
   region = "us-east-1"
 
@@ -116,7 +116,7 @@ See [`examples/existing_cluster/`](examples/existing_cluster/) for the full conf
 ```hcl
 module "ao_data_platform" {
   source  = "monte-carlo-data/ao-data-platform/aws"
-  version = "~> 1.0"
+  version = "~> 2.0"
 
   region = "us-east-1"
 
@@ -156,7 +156,7 @@ Each managed workload (ClickHouse, OTel Collector, LLM worker) exposes optional 
 ```hcl
 module "ao_data_platform" {
   source  = "monte-carlo-data/ao-data-platform/aws"
-  version = "~> 1.0"
+  version = "~> 2.0"
 
   region                = "us-east-1"
   otel_collector_domain = "otel.acme.com"
@@ -203,7 +203,7 @@ Set `helm.opentelemetry_collector.awss3_receiver` to have the OTel Collector ing
 ```hcl
 module "ao_data_platform" {
   source  = "monte-carlo-data/ao-data-platform/aws"
-  version = "~> 1.0"
+  version = "~> 2.0"
 
   region                = "us-east-1"
   otel_collector_domain = "otel.acme.com"
@@ -228,6 +228,52 @@ module "ao_data_platform" {
 }
 ```
 
+### Least-privilege ClickHouse users
+
+The module provisions a per-access-path ClickHouse user model (`ao-data-platform` chart `>= 2.0.0`), where each component authenticates as a user scoped to what it does. Four users are always provisioned; two are opt-in.
+
+| User | Used by | Provisioned |
+|------|---------|-------------|
+| `otel` | OTel Collector ingest | always |
+| `schema_owner` | schema migrations (DDL) + materialized-view owner | always |
+| `llm_worker` | LLM-worker queue reader/writer | always |
+| `monte_carlo` | Monte Carlo data-source reads + agent queue producer | always |
+| `admin` | break-glass superuser (loopback-only) | opt-in — `helm.clickhouse.admin` |
+| `readonly_user` | human / MCP / JDBC read access | opt-in — `helm.clickhouse.readonly_user` (see below) |
+
+For each provisioned user the module generates a 32-character password (or uses the matching `clickhouse_passwords.*` override), stores it in Secrets Manager KMS-encrypted with the pipeline key, grants the External Secrets Operator read access, and forwards the per-user `externalSecret` config into the chart so ESO syncs the password into Kubernetes. Each user's secret ARN is exposed as a `clickhouse_*_credentials_secret_arn` output.
+
+- Set `helm.clickhouse.otel.restrict_grants = true` to tighten the `otel` ingest user to `INSERT`-only on the telemetry source tables. Flip this only after any external readers have moved to the `monte_carlo` user — see [Upgrading to v2.0.0](#upgrading-to-v200).
+- Enable the gated break-glass `admin` superuser with `helm.clickhouse.admin = { enabled = true }`. It is reachable only over loopback by default (i.e. via `kubectl exec` into the ClickHouse pod). Disabled by default; when disabled no admin secret is created and `clickhouse_admin_credentials_secret_arn` is `null`.
+
+**Requires `ao-data-platform` chart >= 2.0.0.** Older charts silently ignore the per-user values; the module stays compatible with them via a transitional dual-wiring of the `otel` credential.
+
+```hcl
+module "ao_data_platform" {
+  source  = "monte-carlo-data/ao-data-platform/aws"
+  version = "~> 2.0"
+
+  region                = "us-east-1"
+  otel_collector_domain = "otel.acme.com"
+  clickhouse_domain     = "clickhouse.acme.com"
+  hosted_zone_id        = "Z1234567890ABC"
+
+  helm = {
+    chart_registry = "oci://123456789012.dkr.ecr.us-east-1.amazonaws.com"
+    chart_version  = "2.0.0"
+
+    clickhouse = {
+      # Gated break-glass superuser (loopback-only). Off by default.
+      admin = { enabled = true }
+      # Set true to tighten otel to INSERT-only, once external readers use
+      # monte_carlo. Defaults to false (broad access) when omitted; uncomment
+      # the line below to opt in.
+      # otel = { restrict_grants = true }
+    }
+  }
+}
+```
+
 ### Read-only ClickHouse user
 
 Set `helm.clickhouse.readonly_user = { enabled = true }` to provision a SELECT-only ClickHouse user — SQL username `readonly_user`, `profile: readonly`. When `enabled = true`, the module:
@@ -245,7 +291,7 @@ Leave `helm.clickhouse.readonly_user` unset (or `null`) to disable; existing con
 ```hcl
 module "ao_data_platform" {
   source  = "monte-carlo-data/ao-data-platform/aws"
-  version = "~> 1.0"
+  version = "~> 2.0"
 
   region                = "us-east-1"
   otel_collector_domain = "otel.acme.com"
@@ -290,7 +336,7 @@ For existing clusters (`cluster.create = false`), the module does not manage the
 ```hcl
 module "ao_data_platform" {
   source  = "monte-carlo-data/ao-data-platform/aws"
-  version = "~> 1.0"
+  version = "~> 2.0"
 
   region                = "us-east-1"
   otel_collector_domain = "otel.acme.com"
@@ -366,8 +412,10 @@ To use a StorageClass you manage outside this module, set `clickhouse_storage_cl
 | `helm.llm_worker.image_repository` | `string` | `null` | LLM-worker container image repo override. Defaults to deriving from `chart_registry` (same ECR account/region, repo `ao-llm-worker`). |
 | `helm.llm_worker.image_tag` | `string` | `"latest"` | LLM-worker container image tag. |
 | `helm.clickhouse.resources` | `object` | `null` | Kubernetes resource requests/limits for the ClickHouse pods. Shape: `{ requests = map(string), limits = map(string) }`. Omit to use chart defaults. |
+| `helm.clickhouse.otel.restrict_grants` | `bool` | `false` | Forwards `clickhouse.otel.restrictGrants` to the chart. When `true`, the `otel` ingest user is restricted to `INSERT` on the telemetry source tables only; `false` keeps it broad. **Requires chart version >= 2.0.0** (ignored by older charts). Flip to `true` only after external readers have moved to the `monte_carlo` user. |
+| `helm.clickhouse.admin` | `object` | `null` | Optionally provisions the gated break-glass superuser (`admin`). Shape: `{ enabled = bool }`. When `enabled = true`, a Secrets Manager secret + ExternalSecret pipeline is created and the chart's admin user is enabled (loopback-only by default — reachable only via pod-exec); the password comes from `clickhouse_passwords.admin` (or is auto-generated). When disabled (default), no admin secret is created. **Requires chart version >= 2.0.0.** Omit (or `null`) to disable. |
 | `helm.clickhouse.readonly_user` | `object` | `null` | Optionally provisions a second SELECT-only ClickHouse user (`readonly_user`, profile `readonly`). Shape: `{ enabled = bool }`. When `enabled = true`, a Secrets Manager secret + ExternalSecret pipeline mirroring the otel user is created and the toggle is forwarded to the chart; the password comes from `clickhouse_passwords.readonly_user` (or is auto-generated). **Requires chart version >= 1.2.0.** Omit (or `null`) to disable. |
-| `clickhouse_passwords` | `object` (sensitive) | `{}` (all auto-generated) | Passwords for the ClickHouse SQL users. Shape: `{ admin = optional(string), otel = optional(string), monte_carlo = optional(string), readonly_user = optional(string) }`. Any field left null is auto-generated. Marked `sensitive`, so caller-supplied values are redacted in plan/apply output and CI logs — supply via a `.tfvars` file or `TF_VAR_clickhouse_passwords`. Stored in Secrets Manager and synced into the cluster by ESO; never passed through Helm values. Values remain readable in Terraform state — protect state accordingly. |
+| `clickhouse_passwords` | `object` (sensitive) | `{}` (all auto-generated) | Passwords for the ClickHouse SQL users. Shape: `{ admin = optional(string), otel = optional(string), monte_carlo = optional(string), schema_owner = optional(string), llm_worker = optional(string), readonly_user = optional(string) }`. Any field left null is auto-generated. Marked `sensitive`, so caller-supplied values are redacted in plan/apply output and CI logs — supply via a `.tfvars` file or `TF_VAR_clickhouse_passwords`. Stored in Secrets Manager and synced into the cluster by ESO; never passed through Helm values. Values remain readable in Terraform state — protect state accordingly. |
 | `helm.opentelemetry_collector.resources` | `object` | `null` | Kubernetes resource requests/limits for the OTel Collector pods. Same shape as `helm.clickhouse.resources`. Omit to use chart defaults. |
 | `helm.opentelemetry_collector.awss3_receiver` | `object` | `null` | Optional awss3 receiver config for the OTel Collector. When set with `enabled = true`, emits chart values that activate the receiver and appends `awss3` to the trace pipeline, and attaches SQS + S3 read permissions to the otel-collector IRSA role. Shape: `{ enabled = bool, sqs_queue_arn = string, sqs_queue_url = string, sqs_region = optional(string), s3_bucket = string, s3_region = optional(string), s3_prefix = optional(string, "") }`. Omit (or leave `null`) to disable. |
 | `helm.llm_worker.resources` | `object` | `null` | Kubernetes resource requests/limits for the LLM-worker pods. Same shape as `helm.clickhouse.resources`. Omit to use chart defaults. |
@@ -386,9 +434,11 @@ To use a StorageClass you manage outside this module, set `clickhouse_storage_cl
 | `llm_worker_irsa_role_arn` | IAM role ARN for the LLM Worker pods (IRSA) |
 | `otel_collector_certificate_arn` | ACM certificate ARN for the OTel Collector domain |
 | `clickhouse_certificate_arn` | ACM certificate ARN for the ClickHouse domain |
-| `clickhouse_admin_credentials_secret_arn` | Secrets Manager ARN for the ClickHouse admin password |
+| `clickhouse_admin_credentials_secret_arn` | Secrets Manager ARN for the ClickHouse admin password. Null when `helm.clickhouse.admin` is disabled. |
 | `clickhouse_otel_credentials_secret_arn` | Secrets Manager ARN for the ClickHouse otel user password |
 | `clickhouse_monte_carlo_credentials_secret_arn` | Secrets Manager ARN for the ClickHouse monte_carlo user password — retrieve and provide to MC during onboarding |
+| `clickhouse_schema_owner_credentials_secret_arn` | Secrets Manager ARN for the ClickHouse schema_owner user password |
+| `clickhouse_llm_worker_credentials_secret_arn` | Secrets Manager ARN for the ClickHouse llm_worker user password |
 | `clickhouse_readonly_user_credentials_secret_arn` | Secrets Manager ARN for the password of the ClickHouse SQL user `readonly_user` (profile: readonly, SELECT-only). Null when `helm.clickhouse.readonly_user` is disabled. |
 | `clickhouse_node_group` | Identity of the dedicated ClickHouse node group when active: `{ availability_zone, instance_type, size, label = { key, value }, taint = { key, value, effect } }`. Null when not active. Useful for verifying the resolved AZ during plan/apply review. |
 
@@ -407,6 +457,34 @@ aws secretsmanager get-secret-value \
   --secret-id <clickhouse_monte_carlo_credentials_secret_arn> \
   --query SecretString --output text
 ```
+
+## Upgrading
+
+### Upgrading to v2.0.0
+
+**Breaking — the `admin` ClickHouse user is now opt-in.**
+
+Earlier versions always created an `admin` Secrets Manager secret. As of v2.0.0
+it is gated behind `helm.clickhouse.admin = { enabled = true }` and is **disabled
+by default**. Upgrading and applying without enabling it will:
+
+- delete the existing `<cluster_name>/clickhouse/admin-credentials` secret, and
+- make the `clickhouse_admin_credentials_secret_arn` output `null`.
+
+To keep the admin user and its credential, set
+`helm.clickhouse.admin = { enabled = true }` before applying.
+
+When admin stays enabled, the upgrade auto-migrates the existing
+`aws_secretsmanager_secret.clickhouse_admin_password` (and its secret
+version) to the new `[0]` count-indexed address via built-in `moved`
+blocks. The state move shown in `terraform plan` is therefore expected
+and requires no manual `terraform state mv`.
+
+The full least-privilege user model (the `schema_owner` / `llm_worker` /
+`monte_carlo` users and the `helm.clickhouse.otel.restrict_grants` flag) requires
+`ao-data-platform` chart **>= 2.0.0**. The module stays compatible with older
+charts, which ignore the new per-user values via a transitional dual-wiring of
+the `otel` credential. See [Least-privilege ClickHouse users](#least-privilege-clickhouse-users).
 
 ## Cluster versioning & upgrades
 

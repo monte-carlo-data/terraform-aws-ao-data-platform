@@ -57,9 +57,18 @@ locals {
   # ones. Either way the value is sensitive (var.clickhouse_passwords is a
   # sensitive variable; random_password.result is provider-sensitive), so these
   # locals are redacted everywhere downstream.
-  clickhouse_admin_password       = var.clickhouse_passwords.admin != null ? var.clickhouse_passwords.admin : random_password.clickhouse_admin[0].result
-  clickhouse_otel_password        = var.clickhouse_passwords.otel != null ? var.clickhouse_passwords.otel : random_password.clickhouse_otel[0].result
-  clickhouse_monte_carlo_password = var.clickhouse_passwords.monte_carlo != null ? var.clickhouse_passwords.monte_carlo : random_password.clickhouse_monte_carlo[0].result
+  clickhouse_otel_password         = var.clickhouse_passwords.otel != null ? var.clickhouse_passwords.otel : random_password.clickhouse_otel[0].result
+  clickhouse_monte_carlo_password  = var.clickhouse_passwords.monte_carlo != null ? var.clickhouse_passwords.monte_carlo : random_password.clickhouse_monte_carlo[0].result
+  clickhouse_schema_owner_password = var.clickhouse_passwords.schema_owner != null ? var.clickhouse_passwords.schema_owner : random_password.clickhouse_schema_owner[0].result
+  clickhouse_llm_worker_password   = var.clickhouse_passwords.llm_worker != null ? var.clickhouse_passwords.llm_worker : random_password.clickhouse_llm_worker[0].result
+
+  # admin is a gated break-glass superuser (off by default), so — like
+  # readonly_user — its password, secret, and chart wiring are all conditional
+  # on its enabled flag.
+  clickhouse_admin_enabled = try(var.helm.clickhouse.admin.enabled, false)
+  clickhouse_admin_password = local.clickhouse_admin_enabled ? (
+    var.clickhouse_passwords.admin != null ? var.clickhouse_passwords.admin : random_password.clickhouse_admin[0].result
+  ) : null
 
   clickhouse_readonly_user_enabled = try(var.helm.clickhouse.readonly_user.enabled, false)
   clickhouse_readonly_user_password = local.clickhouse_readonly_user_enabled ? (
@@ -114,6 +123,24 @@ locals {
   helm_llm_worker_resources_block = var.helm.llm_worker.resources != null ? {
     resources = { for k, v in var.helm.llm_worker.resources : k => v if v != null }
   } : {}
+  # Per-user ExternalSecret config forwarded into the ao-data-platform chart so
+  # ESO syncs each ClickHouse user's password from Secrets Manager into the K8s
+  # Secret the chart consumes. The secretStoreRef is the same ClusterSecretStore
+  # for every user; only the remoteRef key differs. Keyed by the chart's per-user
+  # value key (chart >= 2.0.0). readonly_user is wired separately below because it
+  # is gated.
+  clickhouse_user_external_secret = {
+    for user, slug in {
+      otel        = "otel-credentials"
+      schemaOwner = "schema-owner-credentials"
+      llmWorker   = "llm-worker-credentials"
+      monteCarlo  = "monte-carlo-credentials"
+      } : user => {
+      secretStoreRef = { name = "aws-secrets-manager", kind = "ClusterSecretStore" }
+      remoteRef      = { key = "${local.effective_cluster_name}/clickhouse/${slug}" }
+    }
+  }
+
   # Singleton map merged into clickhouse helm values when readonly_user is enabled.
   # Mirrors the otel ExternalSecret shape: ESO syncs from Secrets Manager into
   # the K8s Secret the chart consumes.
@@ -123,6 +150,20 @@ locals {
       externalSecret = {
         secretStoreRef = { name = "aws-secrets-manager", kind = "ClusterSecretStore" }
         remoteRef      = { key = "${local.effective_cluster_name}/clickhouse/readonly-user-credentials" }
+      }
+    }
+  } : {}
+
+  # Singleton map merged into clickhouse helm values when the gated admin
+  # break-glass user is enabled. Wires the chart's admin user to its Secrets
+  # Manager password; the chart's loopback-only networksIp default is left
+  # in place, so admin stays reachable only via pod-exec.
+  helm_clickhouse_admin_block = local.clickhouse_admin_enabled ? {
+    admin = {
+      enabled = true
+      externalSecret = {
+        secretStoreRef = { name = "aws-secrets-manager", kind = "ClusterSecretStore" }
+        remoteRef      = { key = "${local.effective_cluster_name}/clickhouse/admin-credentials" }
       }
     }
   } : {}

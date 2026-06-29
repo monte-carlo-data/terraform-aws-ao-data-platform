@@ -394,8 +394,10 @@ run "irsa_role_names_are_region_qualified" {
 # generated password. These two runs pin both directions of the gate.
 #
 # cluster.create = false keeps module.eks out of the plan (random_password is
-# not an EKS dependency); readonly_user.enabled = true exercises the compound
-# gate on clickhouse_readonly_user (enabled && password == null).
+# not an EKS dependency); admin.enabled and readonly_user.enabled = true exercise
+# the compound gates on clickhouse_admin / clickhouse_readonly_user
+# (enabled && password == null). The admin-disabled direction is pinned by
+# clickhouse_admin_disabled_creates_no_secret below.
 
 run "clickhouse_passwords_omitted_generate_random" {
   command = plan
@@ -408,6 +410,7 @@ run "clickhouse_passwords_omitted_generate_random" {
     helm = {
       deploy_charts = false
       clickhouse = {
+        admin         = { enabled = true }
         readonly_user = { enabled = true }
       }
     }
@@ -416,6 +419,17 @@ run "clickhouse_passwords_omitted_generate_random" {
     condition     = length(random_password.clickhouse_admin) == 1
     error_message = "clickhouse_admin password must be generated when clickhouse_passwords.admin is null."
   }
+  # Pin the enabled direction of the admin secret gate: generating the password is
+  # not enough — the Secrets Manager secret + version must also be created, or the
+  # break-glass credential never lands in Secrets Manager for ESO to sync.
+  assert {
+    condition     = length(aws_secretsmanager_secret.clickhouse_admin_password) == 1
+    error_message = "clickhouse_admin secret must be created when helm.clickhouse.admin is enabled."
+  }
+  assert {
+    condition     = length(aws_secretsmanager_secret_version.clickhouse_admin_password) == 1
+    error_message = "clickhouse_admin secret version must be created when helm.clickhouse.admin is enabled."
+  }
   assert {
     condition     = length(random_password.clickhouse_otel) == 1
     error_message = "clickhouse_otel password must be generated when clickhouse_passwords.otel is null."
@@ -423,6 +437,14 @@ run "clickhouse_passwords_omitted_generate_random" {
   assert {
     condition     = length(random_password.clickhouse_monte_carlo) == 1
     error_message = "clickhouse_monte_carlo password must be generated when clickhouse_passwords.monte_carlo is null."
+  }
+  assert {
+    condition     = length(random_password.clickhouse_schema_owner) == 1
+    error_message = "clickhouse_schema_owner password must be generated when clickhouse_passwords.schema_owner is null."
+  }
+  assert {
+    condition     = length(random_password.clickhouse_llm_worker) == 1
+    error_message = "clickhouse_llm_worker password must be generated when clickhouse_passwords.llm_worker is null."
   }
   assert {
     condition     = length(random_password.clickhouse_readonly_user) == 1
@@ -441,6 +463,7 @@ run "clickhouse_passwords_supplied_suppress_random" {
     helm = {
       deploy_charts = false
       clickhouse = {
+        admin         = { enabled = true }
         readonly_user = { enabled = true }
       }
     }
@@ -448,6 +471,8 @@ run "clickhouse_passwords_supplied_suppress_random" {
       admin         = "supplied-admin"
       otel          = "supplied-otel"
       monte_carlo   = "supplied-mc"
+      schema_owner  = "supplied-schema-owner"
+      llm_worker    = "supplied-llm-worker"
       readonly_user = "supplied-ro"
     }
   }
@@ -464,8 +489,64 @@ run "clickhouse_passwords_supplied_suppress_random" {
     error_message = "clickhouse_monte_carlo password must NOT be generated when clickhouse_passwords.monte_carlo is supplied."
   }
   assert {
+    condition     = length(random_password.clickhouse_schema_owner) == 0
+    error_message = "clickhouse_schema_owner password must NOT be generated when clickhouse_passwords.schema_owner is supplied."
+  }
+  assert {
+    condition     = length(random_password.clickhouse_llm_worker) == 0
+    error_message = "clickhouse_llm_worker password must NOT be generated when clickhouse_passwords.llm_worker is supplied."
+  }
+  assert {
     condition     = length(random_password.clickhouse_readonly_user) == 0
     error_message = "clickhouse_readonly_user password must NOT be generated when clickhouse_passwords.readonly_user is supplied."
+  }
+}
+
+# --- admin is gated: disabled (default) creates no secret ---
+#
+# admin defaults off. With no helm.clickhouse.admin block, neither the password
+# nor the Secrets Manager secret/version may be created — this pins the gate so a
+# regression can't silently resurrect the orphan admin secret.
+
+run "clickhouse_admin_disabled_creates_no_secret" {
+  command = plan
+  variables {
+    cluster = {
+      create                = false
+      name                  = "test-cluster"
+      existing_cluster_name = "test-cluster"
+    }
+    helm = {
+      deploy_charts = false
+    }
+  }
+  assert {
+    condition     = length(random_password.clickhouse_admin) == 0
+    error_message = "clickhouse_admin password must NOT be generated when helm.clickhouse.admin is disabled."
+  }
+  assert {
+    condition     = length(aws_secretsmanager_secret.clickhouse_admin_password) == 0
+    error_message = "clickhouse_admin secret must NOT be created when helm.clickhouse.admin is disabled."
+  }
+  # The disabled admin output contract is the one piece of output behavior a
+  # plan-only run can verify (resource ARNs are unknown under the mock, but the
+  # null branch is statically known).
+  assert {
+    condition     = output.clickhouse_admin_credentials_secret_arn == null
+    error_message = "clickhouse_admin_credentials_secret_arn must be null when helm.clickhouse.admin is disabled."
+  }
+  # schema_owner and llm_worker are always provisioned (no enabled gate), even on
+  # the admin-disabled baseline. These are single (uncounted) resources, so assert
+  # a configured attribute directly — this both confirms the secret is in the plan
+  # and pins the always-on contract: a future refactor adding a count gate would
+  # turn these bare references into an error (forcing a [0] index), failing here.
+  assert {
+    condition     = endswith(aws_secretsmanager_secret.clickhouse_schema_owner_password.name, "/clickhouse/schema-owner-credentials")
+    error_message = "clickhouse_schema_owner secret must always be created."
+  }
+  assert {
+    condition     = endswith(aws_secretsmanager_secret.clickhouse_llm_worker_password.name, "/clickhouse/llm-worker-credentials")
+    error_message = "clickhouse_llm_worker secret must always be created."
   }
 }
 
@@ -499,7 +580,15 @@ run "tags_propagate_to_resources" {
     error_message = "var.tags must propagate to the pipeline_secrets KMS key."
   }
   assert {
-    condition     = aws_secretsmanager_secret.clickhouse_admin_password.tags["Team"] == "ao"
-    error_message = "var.tags must propagate to the ClickHouse admin Secrets Manager secret."
+    condition     = aws_secretsmanager_secret.clickhouse_otel_password.tags["Team"] == "ao"
+    error_message = "var.tags must propagate to a ClickHouse Secrets Manager secret."
+  }
+  assert {
+    condition     = aws_secretsmanager_secret.clickhouse_schema_owner_password.tags["Team"] == "ao"
+    error_message = "var.tags must propagate to the clickhouse_schema_owner Secrets Manager secret."
+  }
+  assert {
+    condition     = aws_secretsmanager_secret.clickhouse_llm_worker_password.tags["Team"] == "ao"
+    error_message = "var.tags must propagate to the clickhouse_llm_worker Secrets Manager secret."
   }
 }

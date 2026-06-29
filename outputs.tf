@@ -56,8 +56,8 @@ output "oidc_provider_arn" {
 }
 
 output "clickhouse_admin_credentials_secret_arn" {
-  description = "Secrets Manager ARN for the ClickHouse admin password."
-  value       = aws_secretsmanager_secret.clickhouse_admin_password.arn
+  description = "Secrets Manager ARN for the ClickHouse admin password. Null when helm.clickhouse.admin is disabled."
+  value       = local.clickhouse_admin_enabled ? aws_secretsmanager_secret.clickhouse_admin_password[0].arn : null
 }
 
 output "clickhouse_otel_credentials_secret_arn" {
@@ -68,6 +68,16 @@ output "clickhouse_otel_credentials_secret_arn" {
 output "clickhouse_monte_carlo_credentials_secret_arn" {
   description = "Secrets Manager ARN for the ClickHouse monte_carlo user password."
   value       = aws_secretsmanager_secret.clickhouse_monte_carlo_password.arn
+}
+
+output "clickhouse_schema_owner_credentials_secret_arn" {
+  description = "Secrets Manager ARN for the ClickHouse schema_owner user password."
+  value       = aws_secretsmanager_secret.clickhouse_schema_owner_password.arn
+}
+
+output "clickhouse_llm_worker_credentials_secret_arn" {
+  description = "Secrets Manager ARN for the ClickHouse llm_worker user password."
+  value       = aws_secretsmanager_secret.clickhouse_llm_worker_password.arn
 }
 
 output "clickhouse_readonly_user_credentials_secret_arn" {
