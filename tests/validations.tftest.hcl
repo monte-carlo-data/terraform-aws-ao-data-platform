@@ -583,4 +583,12 @@ run "tags_propagate_to_resources" {
     condition     = aws_secretsmanager_secret.clickhouse_otel_password.tags["Team"] == "ao"
     error_message = "var.tags must propagate to a ClickHouse Secrets Manager secret."
   }
+  assert {
+    condition     = aws_secretsmanager_secret.clickhouse_schema_owner_password.tags["Team"] == "ao"
+    error_message = "var.tags must propagate to the clickhouse_schema_owner Secrets Manager secret."
+  }
+  assert {
+    condition     = aws_secretsmanager_secret.clickhouse_llm_worker_password.tags["Team"] == "ao"
+    error_message = "var.tags must propagate to the clickhouse_llm_worker Secrets Manager secret."
+  }
 }

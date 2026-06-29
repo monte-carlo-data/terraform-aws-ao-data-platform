@@ -266,8 +266,9 @@ module "ao_data_platform" {
       # Gated break-glass superuser (loopback-only). Off by default.
       admin = { enabled = true }
       # Set true to tighten otel to INSERT-only, once external readers use
-      # monte_carlo. Default false (broad access).
-      otel = { restrict_grants = false }
+      # monte_carlo. Defaults to false (broad access) when omitted; uncomment
+      # the line below to opt in.
+      # otel = { restrict_grants = true }
     }
   }
 }
@@ -472,6 +473,12 @@ by default**. Upgrading and applying without enabling it will:
 
 To keep the admin user and its credential, set
 `helm.clickhouse.admin = { enabled = true }` before applying.
+
+When admin stays enabled, the upgrade auto-migrates the existing
+`aws_secretsmanager_secret.clickhouse_admin_password` (and its secret
+version) to the new `[0]` count-indexed address via built-in `moved`
+blocks. The state move shown in `terraform plan` is therefore expected
+and requires no manual `terraform state mv`.
 
 The full least-privilege user model (the `schema_owner` / `llm_worker` /
 `monte_carlo` users and the `helm.clickhouse.otel.restrict_grants` flag) requires
