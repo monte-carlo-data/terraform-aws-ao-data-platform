@@ -62,7 +62,7 @@ provider "helm" {
 
 module "ao_data_platform" {
   source  = "monte-carlo-data/ao-data-platform/aws"
-  version = "~> 1.0"
+  version = "~> 2.0"
 
   region                = "us-east-1"
   otel_collector_domain = "otel.acme.com"
@@ -83,7 +83,7 @@ See [`examples/new_cluster/`](examples/new_cluster/) for a complete copy-paste s
 ```hcl
 module "ao_data_platform" {
   source  = "monte-carlo-data/ao-data-platform/aws"
-  version = "~> 1.0"
+  version = "~> 2.0"
 
   region = "us-east-1"
 
@@ -116,7 +116,7 @@ See [`examples/existing_cluster/`](examples/existing_cluster/) for the full conf
 ```hcl
 module "ao_data_platform" {
   source  = "monte-carlo-data/ao-data-platform/aws"
-  version = "~> 1.0"
+  version = "~> 2.0"
 
   region = "us-east-1"
 
@@ -156,7 +156,7 @@ Each managed workload (ClickHouse, OTel Collector, LLM worker) exposes optional 
 ```hcl
 module "ao_data_platform" {
   source  = "monte-carlo-data/ao-data-platform/aws"
-  version = "~> 1.0"
+  version = "~> 2.0"
 
   region                = "us-east-1"
   otel_collector_domain = "otel.acme.com"
@@ -203,7 +203,7 @@ Set `helm.opentelemetry_collector.awss3_receiver` to have the OTel Collector ing
 ```hcl
 module "ao_data_platform" {
   source  = "monte-carlo-data/ao-data-platform/aws"
-  version = "~> 1.0"
+  version = "~> 2.0"
 
   region                = "us-east-1"
   otel_collector_domain = "otel.acme.com"
@@ -291,7 +291,7 @@ Leave `helm.clickhouse.readonly_user` unset (or `null`) to disable; existing con
 ```hcl
 module "ao_data_platform" {
   source  = "monte-carlo-data/ao-data-platform/aws"
-  version = "~> 1.0"
+  version = "~> 2.0"
 
   region                = "us-east-1"
   otel_collector_domain = "otel.acme.com"
@@ -336,7 +336,7 @@ For existing clusters (`cluster.create = false`), the module does not manage the
 ```hcl
 module "ao_data_platform" {
   source  = "monte-carlo-data/ao-data-platform/aws"
-  version = "~> 1.0"
+  version = "~> 2.0"
 
   region                = "us-east-1"
   otel_collector_domain = "otel.acme.com"
