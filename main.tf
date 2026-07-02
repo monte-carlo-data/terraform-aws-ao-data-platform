@@ -219,6 +219,40 @@ locals {
     }]
   } : {}
 
+  # Keeper values, merged into the ao-data-platform release at the top level.
+  # Emitted only when keeper_availability_zones is set — opting into the keeper
+  # topology implies a keeper-capable chart (chart >= the version exposing
+  # keeper.*; see the chart_version note in helm.tf). replicaCount is derived
+  # from the AZ-list length so it cannot drift from the keeper node-group count.
+  helm_keeper_block = length(var.keeper_availability_zones) > 0 ? {
+    keeper = {
+      replicaCount = length(var.keeper_availability_zones)
+      storageClass = var.keeper_node_group.storage_class
+      storageSize  = var.keeper_node_group.storage_size
+      nodeSelector = {
+        (local.keeper_node_label_key) = local.keeper_node_label_value
+      }
+      tolerations = [{
+        key      = local.keeper_node_label_key
+        operator = "Equal"
+        value    = local.keeper_node_label_value
+        effect   = "NoSchedule"
+      }]
+    }
+  } : {}
+
+  # Optional replica-count overrides for the collector and llm-worker. null
+  # (default) omits the key so the chart controls the count; setting it (e.g. 0)
+  # pins the count as config that survives a `helm upgrade` — used to pause and
+  # resume ingest during the HA migration window without a manual kubectl scale
+  # being reset by the next apply.
+  helm_otel_replica_block = var.helm.opentelemetry_collector.replica_count != null ? {
+    replicaCount = var.helm.opentelemetry_collector.replica_count
+  } : {}
+  helm_llm_worker_replica_block = var.helm.llm_worker.replica_count != null ? {
+    replicaCount = var.helm.llm_worker.replica_count
+  } : {}
+
   # NLB source-range restriction. Each NLB is restricted only when its
   # *_nlb_allowed_source_ranges variable is set (non-null); when null the
   # source-range annotation is omitted and the NLB keeps its default

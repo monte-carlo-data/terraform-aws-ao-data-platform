@@ -208,12 +208,18 @@ resource "helm_release" "ao_data_platform" {
   wait_for_jobs    = true
 
   values = [
-    yamlencode({
+    yamlencode(merge({
       clickhouse = merge({
         hostname     = var.clickhouse_domain
         storageSize  = var.helm.clickhouse.storage_size
         storageClass = var.clickhouse_storage_class
         ttlDays      = var.clickhouse_ttl_days
+        # TF-owned replica count, held at 1 until every existing table has been
+        # converted to a replicated engine (see README: Clustered / HA
+        # topology), so bumping chart_version never silently scales replicas
+        # against not-yet-converted tables (the chart's own default becomes 2
+        # at its replicated-SQL version).
+        replicasCount = var.clickhouse_replica_count
         # otel ESO wiring is dual-pathed across the 2.0.0 chart migration: chart
         # < 2.0.0 reads clickhouse.externalSecret; chart >= 2.0.0 reads
         # clickhouse.otel.externalSecret. Both resolve to the same Secrets Manager
@@ -280,7 +286,7 @@ resource "helm_release" "ao_data_platform" {
             "service.beta.kubernetes.io/load-balancer-source-ranges" = join(",", local.otel_collector_nlb_source_ranges)
           } : {})
         }
-      }, local.helm_otel_resources_block, local.helm_otel_awss3_block)
+      }, local.helm_otel_resources_block, local.helm_otel_awss3_block, local.helm_otel_replica_block)
       llmWorker = merge({
         image = {
           repository = local.llm_worker_image_repository
@@ -294,14 +300,23 @@ resource "helm_release" "ao_data_platform" {
             "eks.amazonaws.com/role-arn" = aws_iam_role.llm_worker.arn
           }
         }
-      }, local.helm_llm_worker_resources_block)
-    })
+      }, local.helm_llm_worker_resources_block, local.helm_llm_worker_replica_block)
+    }, local.helm_keeper_block))
   ]
 
   lifecycle {
     precondition {
       condition     = var.clickhouse_domain != null && var.otel_collector_domain != null
       error_message = "clickhouse_domain and otel_collector_domain are required when helm.deploy_charts = true."
+    }
+
+    # Cross-variable check enforced here rather than as a variable validation:
+    # referencing another variable inside a validation block requires Terraform
+    # >= 1.9, and this module supports >= 1.3. You cannot request more ClickHouse
+    # replicas than there are per-AZ node groups to place them on.
+    precondition {
+      condition     = var.clickhouse_replica_count <= max(length(var.clickhouse_availability_zones), 1)
+      error_message = "clickhouse_replica_count (${var.clickhouse_replica_count}) must not exceed the number of clickhouse_availability_zones (${length(var.clickhouse_availability_zones)}). You cannot place more replicas than there are single-AZ node groups; with no clickhouse_availability_zones set, only 1 replica is valid."
     }
   }
 
