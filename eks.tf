@@ -3,6 +3,59 @@ data "aws_eks_cluster" "existing" {
   name  = var.cluster.existing_cluster_name
 }
 
+locals {
+  # Dedicated per-AZ ClickHouse Keeper node groups (one voter per AZ), merged
+  # into the module's eks_managed_node_groups below. Keyed keeper-<az>; the count
+  # is length(keeper_availability_zones) — the same list that drives the chart's
+  # keeper.replicaCount, so voters and node capacity cannot drift. Each is a
+  # single-AZ, tainted (dedicated=keeper) group so only Keeper pods (which carry
+  # the matching toleration, wired in helm.tf) schedule here, kept off the
+  # ClickHouse nodes so a CH node failure can't also drop a voter.
+  keeper_node_groups = local.clickhouse_node_placement_enabled ? {
+    for az in var.keeper_availability_zones : "keeper-${az}" => {
+      instance_types = [var.keeper_node_group.instance_type]
+      min_size       = 1
+      max_size       = 1
+      desired_size   = 1
+      subnet_ids     = local.keeper_subnet_ids_by_az[az]
+
+      # Pin the AMI (no per-apply SSM "latest" lookup), same rationale as the
+      # ClickHouse node group: with N single-AZ voters, an uncontrolled AMI
+      # drift could try to roll all of them at once and lose quorum. Bump
+      # deliberately, one at a time, via keeper_node_group.ami_release_version.
+      use_latest_ami_release_version = var.keeper_node_group.use_latest_ami_release_version
+      ami_release_version            = var.keeper_node_group.ami_release_version
+
+      # force_update_version stays false (the module default): a keeper voter is
+      # part of an HA quorum, so its node drains gracefully behind the chart's
+      # PDB. force = true would force-terminate past the drain timeout, ignoring
+      # the PDB and risking multiple voters down at once — the opposite of what
+      # the legacy single-replica ClickHouse node group needs it for.
+      force_update_version = false
+
+      labels = {
+        (local.keeper_node_label_key) = local.keeper_node_label_value
+      }
+      taints = {
+        dedicated = {
+          key    = local.keeper_node_label_key
+          value  = local.keeper_node_label_value
+          effect = "NO_SCHEDULE"
+        }
+      }
+
+      # Hop limit 1: Keeper calls no AWS APIs (no IRSA), and the EKS-managed
+      # DaemonSets that land here reach IMDS via hostNetwork. Matches the
+      # ClickHouse node group.
+      metadata_options = {
+        http_endpoint               = "enabled"
+        http_tokens                 = "required"
+        http_put_response_hop_limit = 1
+      }
+    }
+  } : {}
+}
+
 # -----------------------------------------------------------------------------
 # EKS Cluster (conditional)
 # Creates a new cluster with a managed node group, standard add-ons, and OIDC.
@@ -142,7 +195,8 @@ module "eks" {
           http_put_response_hop_limit = 1
         }
       }
-    } : {}
+    } : {},
+    local.keeper_node_groups,
   )
 
   vpc_id     = local.effective_vpc_id
