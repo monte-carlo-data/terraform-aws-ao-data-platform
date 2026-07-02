@@ -180,6 +180,210 @@ variable "clickhouse_node_group" {
   }
 }
 
+# --- ClickHouse / Keeper HA Topology ---
+# These variables stand up the clustered/HA node-group topology (per-AZ, AZ-pinned
+# node groups for ClickHouse replicas and Keeper voters). All are additive and
+# default to a no-op: with the AZ lists empty, no new node groups are created and
+# the module behaves exactly as the single-instance deployment did.
+
+variable "clickhouse_availability_zones" {
+  description = <<-EOT
+    Explicit AZ names for the dedicated per-AZ ClickHouse node groups that back a
+    clustered/HA deployment (1 shard x N replicas). One managed node group is created
+    per entry, keyed by AZ name (clickhouse-<az>). EBS volumes are AZ-locked, so each
+    replica's node group must be single-AZ; placement is driven by these explicit AZ
+    names rather than a positional index into the available-AZ data source (which can
+    silently remap "the first AZ" to a different physical zone across applies).
+
+    IMPORTANT: element 0 MUST be the AZ of the existing single-instance ClickHouse PV
+    (the AZ that var.clickhouse_node_group.availability_zone resolves to). During the
+    in-place migration the running ClickHouse pod relocates onto clickhouse-<element-0>
+    and reattaches its existing AZ-locked volume; a mismatch strands that volume and
+    leaves the pod Pending.
+
+    When create_vpc = true, entries must be a subset of the AZs the module's private
+    subnets were placed in (the first N of the available-AZ data source) — otherwise
+    the per-AZ subnet postcondition fails at plan time.
+
+    Empty (default) creates no per-AZ CH node groups: the module keeps only the legacy
+    single ClickHouse node group. Set this (e.g. 2 AZs for RF=2) to stand up the HA
+    topology. The list length is the ceiling for clickhouse_replica_count.
+  EOT
+  type        = list(string)
+  default     = []
+
+  validation {
+    condition     = alltrue([for az in var.clickhouse_availability_zones : can(regex("^[a-z0-9-]+$", az))])
+    error_message = "clickhouse_availability_zones entries must be AZ names (lowercase letters, digits, hyphens), e.g. \"us-east-1a\"."
+  }
+
+  validation {
+    condition     = length(var.clickhouse_availability_zones) == length(distinct(var.clickhouse_availability_zones))
+    error_message = "clickhouse_availability_zones must not contain duplicate AZ names (one node group is created per entry)."
+  }
+}
+
+variable "keeper_availability_zones" {
+  description = <<-EOT
+    Explicit AZ names for the dedicated per-AZ ClickHouse Keeper node groups (one voter
+    per AZ, keeper-<az>). Keeper quorum needs an odd number of voters across distinct
+    failure domains — 3 is standard (tolerates one AZ loss, keeping 2/3); 1 for dev.
+    Like clickhouse_availability_zones, placement is by explicit AZ name because
+    Keeper's EBS volumes are AZ-locked.
+
+    Empty (default) creates no keeper node groups. When set, this list's length is the
+    single source of truth for BOTH the number of keeper node groups AND the
+    keeper.replicaCount passed to the chart — so voter count and node capacity cannot
+    drift.
+  EOT
+  type        = list(string)
+  default     = []
+
+  validation {
+    condition     = alltrue([for az in var.keeper_availability_zones : can(regex("^[a-z0-9-]+$", az))])
+    error_message = "keeper_availability_zones entries must be AZ names (lowercase letters, digits, hyphens), e.g. \"us-east-1a\"."
+  }
+
+  validation {
+    condition     = length(var.keeper_availability_zones) == length(distinct(var.keeper_availability_zones))
+    error_message = "keeper_availability_zones must not contain duplicate AZ names (one keeper node group / voter is created per entry)."
+  }
+
+  validation {
+    condition     = length(var.keeper_availability_zones) == 0 || length(var.keeper_availability_zones) % 2 == 1
+    error_message = "keeper_availability_zones must have an odd length — Keeper quorum needs an odd voter count (typically 3, or 1 for dev). Empty disables keeper node groups."
+  }
+}
+
+variable "clickhouse_replica_count" {
+  description = <<-EOT
+    Number of ClickHouse replicas, passed to the chart as clickhouse.replicasCount.
+    TF-owned and defaulted to 1 so that bumping helm.chart_version — to a chart
+    whose own default is or becomes 2 — never silently scales replicas against
+    not-yet-converted tables. Raise to 2 deliberately, only after every existing
+    table has been converted to a replicated engine (see the README section
+    "Clustered / HA topology").
+
+    Must not exceed the number of per-AZ ClickHouse node groups available to place
+    replicas on (max(length(clickhouse_availability_zones), 1)). That ceiling is
+    enforced by a precondition on the Helm release rather than a variable validation,
+    because it references two variables (cross-variable validation would require
+    Terraform >= 1.9, and this module supports >= 1.3).
+  EOT
+  type        = number
+  default     = 1
+
+  validation {
+    condition     = var.clickhouse_replica_count >= 1
+    error_message = "clickhouse_replica_count must be at least 1."
+  }
+}
+
+variable "clickhouse_active_node_group_count" {
+  description = <<-EOT
+    How many of the per-AZ ClickHouse node groups (clickhouse_availability_zones, in
+    list order) are ACTIVE (desired_size = 1) versus parked (desired_size = 0).
+    Defaults to 0: the per-AZ CH node groups are created but parked, so they cost
+    nothing and cannot attract the running ClickHouse pod before migration day.
+
+    Activation is an explicit, reviewable knob (a terraform plan diff) rather than an
+    inline literal, and is intentionally NOT derived from clickhouse_replica_count:
+    during the migration the topology transiently over-provisions (the legacy node
+    group plus both per-AZ node groups run at once), so node capacity is set
+    operationally and left on. At migration set this to the number of per-AZ node
+    groups (e.g. 2) to bring the empty tainted nodes up. Values above
+    length(clickhouse_availability_zones) simply activate all of them.
+  EOT
+  type        = number
+  default     = 0
+
+  validation {
+    condition     = var.clickhouse_active_node_group_count >= 0
+    error_message = "clickhouse_active_node_group_count must be >= 0."
+  }
+}
+
+variable "clickhouse_ha_node_group" {
+  description = <<-EOT
+    Configuration for the dedicated per-AZ ClickHouse node groups (clickhouse-<az>)
+    used by the clustered/HA topology. Kept separate from clickhouse_node_group so the
+    go-forward instance type can differ from the legacy single node group WITHOUT
+    re-typing the legacy one — re-typing a managed node group replaces its instances,
+    which would roll the running ClickHouse pod.
+
+    instance_type defaults to r6i.xlarge (memory-optimized, current generation).
+
+    use_latest_ami_release_version / ami_release_version behave like their
+    clickhouse_node_group counterparts: the AMI is pinned by default (no per-apply
+    drift), and at RF=2 the pin also stops an uncontrolled "latest AMI" lookup from
+    trying to roll BOTH single-AZ replicas in one apply (which the PDB would then block
+    mid-apply). Set ami_release_version for a deliberate, one-at-a-time bump; the
+    build's minor must match the cluster's kubernetes_version.
+  EOT
+  type = object({
+    instance_type                  = optional(string, "r6i.xlarge")
+    use_latest_ami_release_version = optional(bool, false)
+    ami_release_version            = optional(string)
+  })
+  default = {}
+
+  validation {
+    condition     = !(var.clickhouse_ha_node_group.use_latest_ami_release_version && var.clickhouse_ha_node_group.ami_release_version != null)
+    error_message = "clickhouse_ha_node_group.ami_release_version is ignored when use_latest_ami_release_version = true. Set use_latest_ami_release_version = false to pin to ami_release_version, or clear ami_release_version to track the latest AMI."
+  }
+}
+
+variable "keeper_node_group" {
+  description = <<-EOT
+    Configuration for the dedicated per-AZ ClickHouse Keeper node groups (keeper-<az>).
+    One node group (one voter) is created per keeper_availability_zones entry; there is
+    intentionally NO replica_count field here — the voter count is derived from
+    length(keeper_availability_zones) so the node groups and the chart's
+    keeper.replicaCount cannot drift.
+
+    instance_type defaults to m6i.large (non-burstable: a throttled quorum voter risks
+    spurious leader elections; 2 vCPU is the non-burstable floor).
+
+    storage_size / storage_class configure the Keeper PVC requested via the chart's
+    keeper values (NOT the node's root disk). Default gp3 (WaitForFirstConsumer,
+    reclaim Delete) is sufficient — a replaced Keeper re-syncs its state from quorum,
+    so Retain is not required.
+
+    use_latest_ami_release_version / ami_release_version: the AMI is pinned by default
+    like the ClickHouse node groups. With 3 single-AZ voters, an uncontrolled "latest
+    AMI" lookup could roll all three at once and lose quorum; pinning forces deliberate,
+    one-at-a-time bumps via ami_release_version.
+  EOT
+  type = object({
+    instance_type                  = optional(string, "m6i.large")
+    storage_size                   = optional(string, "10Gi")
+    storage_class                  = optional(string, "gp3")
+    use_latest_ami_release_version = optional(bool, false)
+    ami_release_version            = optional(string)
+  })
+  default = {}
+
+  validation {
+    condition     = !(var.keeper_node_group.use_latest_ami_release_version && var.keeper_node_group.ami_release_version != null)
+    error_message = "keeper_node_group.ami_release_version is ignored when use_latest_ami_release_version = true. Set use_latest_ami_release_version = false to pin to ami_release_version, or clear ami_release_version to track the latest AMI."
+  }
+}
+
+variable "manage_legacy_clickhouse_node_group" {
+  description = <<-EOT
+    Whether the module manages the legacy single-instance ClickHouse node group (the
+    "clickhouse" managed node group at eks.tf). Defaults to true (unchanged behavior).
+
+    During the HA migration this is flipped to false in a final, post-cutover apply to
+    retire the now-empty legacy node group once the ClickHouse pod has relocated onto a
+    per-AZ node group — a config change, so no module release is needed to remove it.
+    Only has an effect when the dedicated CH node group would otherwise be created
+    (helm.deploy_charts = true and cluster.create = true).
+  EOT
+  type        = bool
+  default     = true
+}
+
 # --- Networking ---
 
 variable "networking" {
@@ -380,6 +584,13 @@ variable "helm" {
     map-of-string values keyed by resource name (cpu, memory, ephemeral-storage, etc.).
     Omit to let the chart use its own defaults.
 
+    opentelemetry_collector.replica_count and llm_worker.replica_count optionally
+    override the replica count of those workloads (default null = the chart controls
+    it). Because the collector and llm-worker share this release with ClickHouse, a
+    plain `terraform apply` re-renders and would reset a manually-scaled Deployment;
+    setting these to 0 lets ingest be paused as config that survives an apply (used
+    during the HA migration window), and back to null/non-zero to resume.
+
     opentelemetry_collector.awss3_receiver optionally enables the OTel Collector's
     awss3 receiver to ingest OTLP traces from S3 via SQS notifications. When set
     with enabled = true, the module overrides the chart's awss3 receiver config
@@ -416,6 +627,7 @@ variable "helm" {
     }), {})
 
     opentelemetry_collector = optional(object({
+      replica_count = optional(number, null)
       resources = optional(object({
         requests = optional(map(string), null)
         limits   = optional(map(string), null)
@@ -432,6 +644,7 @@ variable "helm" {
     }), {})
 
     llm_worker = optional(object({
+      replica_count    = optional(number, null)
       bedrock_region   = optional(string, null)
       image_repository = optional(string, null)
       image_tag        = optional(string, "latest")
