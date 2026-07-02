@@ -54,6 +54,54 @@ locals {
       }
     }
   } : {}
+
+  # Dedicated per-AZ ClickHouse node groups for the clustered/HA topology, one
+  # per clickhouse_availability_zones entry (keyed clickhouse-<az>), merged into
+  # eks_managed_node_groups below. They share the SAME dedicated=clickhouse
+  # taint/label as the legacy node group, so at migration a ClickHouse pod
+  # evicted off the legacy node schedules straight onto the matching per-AZ node.
+  #
+  # Parked by default: min=0, and desired driven by clickhouse_active_node_group
+  # _count (the first N AZs in list order are activated to desired=1). At
+  # desired=0 they cost nothing and cannot attract the running pod before
+  # migration day. Instance type comes from clickhouse_ha_node_group
+  # (r6i.xlarge) — deliberately NOT clickhouse_node_group.instance_type, so the
+  # legacy node group's type is never changed (which would roll the live pod).
+  #
+  # AMI pinned like the legacy/keeper node groups; force_update_version stays
+  # false — at RF>=2 a replica drains gracefully behind the PDB, and force would
+  # force-terminate past the drain timeout (ignoring the PDB) and could roll both
+  # single-AZ replicas at once.
+  clickhouse_ha_node_groups = local.clickhouse_node_placement_enabled ? {
+    for idx, az in var.clickhouse_availability_zones : "clickhouse-${az}" => {
+      instance_types = [var.clickhouse_ha_node_group.instance_type]
+      min_size       = 0
+      max_size       = 1
+      desired_size   = idx < var.clickhouse_active_node_group_count ? 1 : 0
+      subnet_ids     = local.clickhouse_subnet_ids_by_az[az]
+
+      use_latest_ami_release_version = var.clickhouse_ha_node_group.use_latest_ami_release_version
+      ami_release_version            = var.clickhouse_ha_node_group.ami_release_version
+      force_update_version           = false
+
+      labels = {
+        (local.clickhouse_node_label_key) = local.clickhouse_node_label_value
+      }
+      taints = {
+        dedicated = {
+          key    = local.clickhouse_node_label_key
+          value  = local.clickhouse_node_label_value
+          effect = "NO_SCHEDULE"
+        }
+      }
+
+      metadata_options = {
+        http_endpoint               = "enabled"
+        http_tokens                 = "required"
+        http_put_response_hop_limit = 1
+      }
+    }
+  } : {}
 }
 
 # -----------------------------------------------------------------------------
@@ -134,11 +182,18 @@ module "eks" {
         }
       }
     },
-    local.clickhouse_node_placement_enabled ? {
-      # Dedicated single-AZ node group for ClickHouse. The taint blocks any
+    (local.clickhouse_node_placement_enabled && var.manage_legacy_clickhouse_node_group) ? {
+      # Legacy single-AZ node group for ClickHouse. The taint blocks any
       # pod without a matching toleration from scheduling here; the matching
       # toleration is wired into the ClickHouse pod template automatically
       # via the helm_release values block below.
+      #
+      # Gated on manage_legacy_clickhouse_node_group (default true) so it can be
+      # retired via config once the HA migration has relocated the ClickHouse pod
+      # onto a per-AZ clickhouse-<az> node group — no module release needed to
+      # remove it. Otherwise left byte-identical (same r5.xlarge instance type):
+      # re-typing a managed node group replaces its instances, rolling the live
+      # ClickHouse pod, so the go-forward r6i.xlarge lives on the new NGs only.
       clickhouse = {
         instance_types = [var.clickhouse_node_group.instance_type]
         min_size       = 1
@@ -197,6 +252,7 @@ module "eks" {
       }
     } : {},
     local.keeper_node_groups,
+    local.clickhouse_ha_node_groups,
   )
 
   vpc_id     = local.effective_vpc_id
