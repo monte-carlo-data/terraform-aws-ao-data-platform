@@ -44,6 +44,38 @@ data "aws_subnets" "ch_node_group_az_subnets" {
   }
 }
 
+# Per-AZ subnet lookup for the HA topology node groups (ClickHouse replicas +
+# Keeper voters). Same shape as ch_node_group_az_subnets above, but fanned out
+# with for_each over the union of the explicit CH + keeper AZ lists — one query
+# per AZ — so each single-AZ node group can be pinned to the matching subnet.
+# Only read when the dedicated node groups are enabled and at least one AZ is
+# listed; empty (legacy single-instance) deployments create no queries.
+data "aws_subnets" "ha_node_group_az_subnets" {
+  for_each = local.clickhouse_node_placement_enabled ? toset(local.ha_node_group_azs) : toset([])
+
+  filter {
+    name   = "vpc-id"
+    values = [local.effective_vpc_id]
+  }
+
+  filter {
+    name   = "availability-zone"
+    values = [each.value]
+  }
+
+  # Same rationale as ch_node_group_az_subnets: the vpc-id edge doesn't cover
+  # the private subnets created inside the VPC module, so a fresh apply could
+  # read an empty list and trip the postcondition on a valid config.
+  depends_on = [module.vpc]
+
+  lifecycle {
+    postcondition {
+      condition     = length(setintersection(toset(self.ids), toset(local.effective_private_subnet_ids))) > 0
+      error_message = "HA node-group AZ \"${each.key}\" (from clickhouse_availability_zones / keeper_availability_zones) matches no private subnet provided to the cluster. When create_vpc = true, list only AZs among the first ${length(var.networking.private_subnet_cidrs)} of the region's available AZs (that's where the module places private subnets); otherwise confirm existing_private_subnet_ids includes a subnet in this AZ."
+    }
+  }
+}
+
 # VPC lookup — used only when an NLB source-range restriction is configured, to
 # fold the VPC's own CIDR block(s) into the allow-list so in-VPC clients always
 # retain access. Keyed off local.effective_vpc_id (created or existing VPC); the

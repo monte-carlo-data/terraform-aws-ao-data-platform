@@ -21,6 +21,13 @@ locals {
   clickhouse_node_label_key         = "dedicated"
   clickhouse_node_label_value       = "clickhouse"
 
+  # Keeper node-group label/taint. Mirrors the ClickHouse constants above so the
+  # keeper node groups and the chart's keeper nodeSelector/tolerations cannot
+  # drift. Same "dedicated" key, distinct value → a separate scheduling tenant,
+  # so a ClickHouse node failure can't also remove a Keeper voter.
+  keeper_node_label_key   = "dedicated"
+  keeper_node_label_value = "keeper"
+
   # Resolved AZ for the dedicated CH NG: explicit override, else first
   # AZ from data.aws_availability_zones.available (alphabetical — typically
   # "-1a" for the region).
@@ -45,6 +52,29 @@ locals {
     toset(data.aws_subnets.ch_node_group_az_subnets[0].ids),
     toset(local.effective_private_subnet_ids)
   ))) : []
+
+  # Union of the explicit CH + keeper AZ names — the set of AZs the HA topology
+  # needs a single-AZ subnet for. Drives the per-AZ data.aws_subnets fan-out in
+  # vpc.tf. Empty (no HA node groups) when neither list is set.
+  ha_node_group_azs = distinct(concat(var.clickhouse_availability_zones, var.keeper_availability_zones))
+
+  # Per-AZ subnet lists for the HA node groups, keyed by AZ name. Each is the
+  # AZ's subnets intersected with the cluster's private subnets (excludes any
+  # public subnet in the same AZ). nonsensitive() for the same reason as
+  # clickhouse_node_group_subnet_ids above — the values feed the EKS module's
+  # for_each over node-group subnet_ids. Empty maps when placement is disabled.
+  clickhouse_subnet_ids_by_az = local.clickhouse_node_placement_enabled ? {
+    for az in var.clickhouse_availability_zones : az => nonsensitive(tolist(setintersection(
+      toset(data.aws_subnets.ha_node_group_az_subnets[az].ids),
+      toset(local.effective_private_subnet_ids)
+    )))
+  } : {}
+  keeper_subnet_ids_by_az = local.clickhouse_node_placement_enabled ? {
+    for az in var.keeper_availability_zones : az => nonsensitive(tolist(setintersection(
+      toset(data.aws_subnets.ha_node_group_az_subnets[az].ids),
+      toset(local.effective_private_subnet_ids)
+    )))
+  } : {}
 
   cluster_endpoint       = var.cluster.create ? module.eks[0].cluster_endpoint : data.aws_eks_cluster.existing[0].endpoint
   cluster_ca_certificate = base64decode(var.cluster.create ? module.eks[0].cluster_certificate_authority_data : data.aws_eks_cluster.existing[0].certificate_authority[0].data)
