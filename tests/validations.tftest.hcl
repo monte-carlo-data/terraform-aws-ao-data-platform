@@ -17,7 +17,7 @@
 //     private subnet) — also requires real-or-mocked subnet data. Exercised by
 //     every apply.
 //   - The clustered/HA ENABLED-path shapes: keeper node-group count = AZ count,
-//     the parked ClickHouse node groups (desired = 0), clickhouse.replicasCount
+//     one ClickHouse node group per AZ (all desired = 1), clickhouse.replicasCount
 //     rendering, and the clickhouse_replica_count <= AZ-count precondition on
 //     the Helm release. All need module.eks + subnet data in the plan (the same
 //     brittle surface as above), so they are exercised by real applies + code
@@ -703,7 +703,7 @@ run "clickhouse_ha_node_group_ami_pin_with_use_latest_rejected" {
 # With no AZ lists set (and charts off), the module creates no keeper or per-AZ
 # ClickHouse node groups and emits no keeper helm values — single-instance
 # behavior is unchanged. Asserts the gating locals collapse to empty. (The
-# enabled-path shapes — keeper NG count = AZ count, CH NGs parked at desired=0,
+# enabled-path shapes — keeper NG count = AZ count, one CH NG per AZ (desired=1),
 # the replicasCount rendering, and the clickhouse_replica_count <= AZ-count
 # precondition — need module.eks + real/mocked subnet data to plan and are
 # exercised by real applies + code review, per this file's scope note above.)

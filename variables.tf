@@ -279,30 +279,6 @@ variable "clickhouse_replica_count" {
   }
 }
 
-variable "clickhouse_active_node_group_count" {
-  description = <<-EOT
-    How many of the per-AZ ClickHouse node groups (clickhouse_availability_zones, in
-    list order) are ACTIVE (desired_size = 1) versus parked (desired_size = 0).
-    Defaults to 0: the per-AZ CH node groups are created but parked, so they cost
-    nothing and cannot attract the running ClickHouse pod before migration day.
-
-    Activation is an explicit, reviewable knob (a terraform plan diff) rather than an
-    inline literal, and is intentionally NOT derived from clickhouse_replica_count:
-    during the migration the topology transiently over-provisions (the legacy node
-    group plus both per-AZ node groups run at once), so node capacity is set
-    operationally and left on. At migration set this to the number of per-AZ node
-    groups (e.g. 2) to bring the empty tainted nodes up. Values above
-    length(clickhouse_availability_zones) simply activate all of them.
-  EOT
-  type        = number
-  default     = 0
-
-  validation {
-    condition     = var.clickhouse_active_node_group_count >= 0
-    error_message = "clickhouse_active_node_group_count must be >= 0."
-  }
-}
-
 variable "clickhouse_ha_node_group" {
   description = <<-EOT
     Configuration for the dedicated per-AZ ClickHouse node groups (clickhouse-<az>)

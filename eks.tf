@@ -61,23 +61,32 @@ locals {
   # taint/label as the legacy node group, so at migration a ClickHouse pod
   # evicted off the legacy node schedules straight onto the matching per-AZ node.
   #
-  # Parked by default: min=0, and desired driven by clickhouse_active_node_group
-  # _count (the first N AZs in list order are activated to desired=1). At
-  # desired=0 they cost nothing and cannot attract the running pod before
-  # migration day. Instance type comes from clickhouse_ha_node_group
-  # (r6i.xlarge) — deliberately NOT clickhouse_node_group.instance_type, so the
-  # legacy node group's type is never changed (which would roll the live pod).
+  # Created ACTIVE (desired=1), symmetric with the keeper node groups: setting
+  # clickhouse_availability_zones brings the nodes up. They come up EMPTY — no CH
+  # replica lands until clickhouse_replica_count is raised at migration — and sit
+  # idle until then. Set the AZ list shortly before raising the replica count to
+  # bound the idle-node cost; standing the nodes up ahead of the cutover moves
+  # all provisioning risk (capacity, subnets, AMI, EBS CSI) OUTSIDE the
+  # maintenance window. We deliberately do NOT park at desired=0 and scale up on
+  # migration day: the EKS managed-node-group submodule sets
+  # ignore_changes = [scaling_config[0].desired_size], so a later desired_size
+  # bump yields no plan diff and no node — the failure would surface mid-window
+  # with ingest already stopped.
+  #
+  # Instance type comes from clickhouse_ha_node_group (r6i.xlarge) — deliberately
+  # NOT clickhouse_node_group.instance_type, so the legacy node group's type is
+  # never changed (which would roll the live pod).
   #
   # AMI pinned like the legacy/keeper node groups; force_update_version stays
   # false — at RF>=2 a replica drains gracefully behind the PDB, and force would
   # force-terminate past the drain timeout (ignoring the PDB) and could roll both
   # single-AZ replicas at once.
   clickhouse_ha_node_groups = local.clickhouse_node_placement_enabled ? {
-    for idx, az in var.clickhouse_availability_zones : "clickhouse-${az}" => {
+    for az in var.clickhouse_availability_zones : "clickhouse-${az}" => {
       instance_types = [var.clickhouse_ha_node_group.instance_type]
-      min_size       = 0
+      min_size       = 1
       max_size       = 1
-      desired_size   = idx < var.clickhouse_active_node_group_count ? 1 : 0
+      desired_size   = 1
       subnet_ids     = local.clickhouse_subnet_ids_by_az[az]
 
       use_latest_ami_release_version = var.clickhouse_ha_node_group.use_latest_ami_release_version
