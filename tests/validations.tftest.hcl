@@ -698,6 +698,36 @@ run "clickhouse_ha_node_group_ami_pin_with_use_latest_rejected" {
   expect_failures = [var.clickhouse_ha_node_group]
 }
 
+# --- keeper AZs require a module-created cluster ---
+#
+# The per-AZ keeper node groups are only created when cluster.create = true, but the
+# keeper helm block (nodeSelector = dedicated=keeper) is emitted whenever keeper AZs are
+# set. On an existing cluster that pairing would leave every Keeper voter Pending, so a
+# precondition on the Helm release rejects it. This is a disabled-path run — cluster.create
+# = false keeps module.eks out of the plan; deploy_charts = true (with chart_registry /
+# chart_version / domains supplied, hosted_zone_id left null so no route53 for_each) makes
+# the Helm release exist so its precondition evaluates.
+
+run "keeper_azs_require_module_created_cluster_rejected" {
+  command = plan
+  variables {
+    cluster = {
+      create                = false
+      name                  = "test-cluster"
+      existing_cluster_name = "test-cluster"
+    }
+    clickhouse_domain         = "clickhouse.example.com"
+    otel_collector_domain     = "otel.example.com"
+    keeper_availability_zones = ["us-east-1a", "us-east-1b", "us-east-1c"]
+    helm = {
+      deploy_charts  = true
+      chart_registry = "oci://123456789012.dkr.ecr.us-east-1.amazonaws.com"
+      chart_version  = "2.0.0"
+    }
+  }
+  expect_failures = [helm_release.ao_data_platform]
+}
+
 # --- HA topology inert by default ---
 #
 # With no AZ lists set (and charts off), the module creates no keeper or per-AZ

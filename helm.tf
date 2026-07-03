@@ -318,6 +318,20 @@ resource "helm_release" "ao_data_platform" {
       condition     = var.clickhouse_replica_count <= max(length(var.clickhouse_availability_zones), 1)
       error_message = "clickhouse_replica_count (${var.clickhouse_replica_count}) must not exceed the number of clickhouse_availability_zones (${length(var.clickhouse_availability_zones)}). You cannot place more replicas than there are single-AZ node groups; with no clickhouse_availability_zones set, only 1 replica is valid."
     }
+
+    # Keeper node groups are only created for module-created clusters
+    # (clickhouse_node_placement_enabled = deploy_charts && cluster.create), but
+    # the keeper helm block (nodeSelector = dedicated=keeper) is emitted whenever
+    # keeper_availability_zones is set. On an existing cluster (create = false) that
+    # pairing would schedule every Keeper voter onto nodes that never exist. Cross-
+    # variable, so a precondition (not a variable validation) for the same >= 1.3
+    # reason as above. (clickhouse_availability_zones has no equivalent trap: on an
+    # existing cluster its scheduling values are gated off via
+    # clickhouse_node_placement_enabled, so the chart gets no CH nodeSelector.)
+    precondition {
+      condition     = length(var.keeper_availability_zones) == 0 || var.cluster.create
+      error_message = "keeper_availability_zones requires cluster.create = true — the per-AZ Keeper node groups are only created for module-created clusters, so on an existing cluster the chart's keeper nodeSelector (dedicated=keeper) would match no nodes and every Keeper voter would stay Pending. For an existing cluster, attach tainted dedicated=keeper node groups out-of-band and wire keeper scheduling via your own helm values."
+    }
   }
 
   depends_on = [
