@@ -84,6 +84,23 @@ module "ao_data_platform" {
   # clickhouse_node_group = {
   #   ami_release_version = "1.35.5-20260527"
   # }
+
+  # Optional: clustered / highly-available ClickHouse topology. Uncomment to
+  # stand up per-AZ, AZ-pinned node groups for ClickHouse replicas and a Keeper
+  # ensemble. AZ-locked EBS volumes require single-AZ node groups, so placement
+  # is by explicit AZ name (not a positional index). Keeper needs an odd voter
+  # count across distinct AZs for quorum (3 tolerates one AZ loss); ClickHouse
+  # needs one AZ per replica. There is no cluster autoscaler, so every AZ that a
+  # replica or voter lands in must be pre-provisioned here. When creating the VPC
+  # (the default), the listed AZs must be among the first
+  # length(networking.private_subnet_cidrs) of the region's available AZs, which
+  # is where the module places private subnets (3 by default) — so 3 keeper AZs +
+  # 2 ClickHouse AZs need no networking change. See the module README section
+  # "Clustered / HA topology" for the full migration ordering.
+  #
+  # clickhouse_availability_zones = ["us-east-1a", "us-east-1b"]
+  # keeper_availability_zones     = ["us-east-1a", "us-east-1b", "us-east-1c"]
+  # clickhouse_replica_count      = 2
 }
 
 variable "region" {

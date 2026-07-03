@@ -356,6 +356,49 @@ module "ao_data_platform" {
 }
 ```
 
+### Clustered / HA topology
+
+By default the module runs a single ClickHouse instance on one dedicated node group (above). To run ClickHouse in a clustered, highly-available configuration — multiple replicas backed by a ClickHouse Keeper ensemble, spread across availability zones — set the per-AZ topology variables. This requires a chart version that supports Keeper and replicated tables; deploying the topology against an older chart has no effect on the Keeper values.
+
+**Node groups are per-AZ and AZ-pinned.** Each ClickHouse replica and each Keeper voter is a stateful pod backed by an EBS volume, and EBS volumes are AZ-locked — a volume cannot move between zones. So every replica and voter needs a single-AZ node group in its own zone, and placement is driven by **explicit AZ names**, not a positional index into the available-AZ list (which can silently remap "the first AZ" to a different physical zone across applies and strand a volume).
+
+- `clickhouse_availability_zones` — one node group (`clickhouse-<az>`) per entry; the list length is the ceiling for `clickhouse_replica_count`. **Element 0 must be the AZ of the existing ClickHouse volume**, since that is the AZ the running pod stays pinned to.
+- `keeper_availability_zones` — one voter node group (`keeper-<az>`) per entry. Keeper quorum requires an **odd** number of voters across distinct zones: 3 tolerates the loss of one AZ (2 of 3 remain); 1 for dev. The keeper voter count and the chart's `keeper.replicaCount` are both derived from this list, so they cannot drift.
+- `clickhouse_replica_count` — replicas requested from the chart (`clickhouse.replicasCount`). Defaults to `1` and is validated (via a Helm-release precondition) to never exceed the number of `clickhouse_availability_zones`.
+
+**Three AZs is Keeper-driven.** ClickHouse itself needs only two AZs for two replicas; the third exists so the Keeper quorum spans three failure domains. The VPC created by this module already spans three AZs by default (`networking.private_subnet_cidrs` provisions three private subnets), so a 3-AZ Keeper + 2-AZ ClickHouse layout needs no networking change.
+
+**No autoscaler — capacity is pre-provisioned.** This module does not install a cluster autoscaler, so every AZ a stateful pod lands in must have a node group standing by. When `create_vpc = true`, the AZs you list must be among the first `length(networking.private_subnet_cidrs)` of the region's available AZs — that is where the module places private subnets. A plan-time postcondition rejects any listed AZ that has no matching private subnet.
+
+**Staged, additive rollout.** The topology is designed to be introduced without disrupting a running single instance:
+
+- The per-AZ ClickHouse node groups are created **parked** (`desired_size = 0`) and activated in list order via `clickhouse_active_node_group_count`, so migration-day scale-up is an explicit, reviewable plan change rather than an implicit side effect.
+- `clickhouse_replica_count` stays TF-owned at `1` until you deliberately raise it — bumping the chart version alone never scales replicas.
+- `manage_legacy_clickhouse_node_group` (default `true`) keeps the original single-instance node group in place; it is flipped to `false` in a final apply to retire that node group once the replica has moved onto a per-AZ node group.
+- `opentelemetry_collector.replica_count` / `llm_worker.replica_count` (on the `helm` variable) let ingest be paused as configuration (scaled to `0`) during a maintenance window and resumed afterward, surviving intervening applies.
+
+```hcl
+module "ao_data_platform" {
+  source  = "monte-carlo-data/ao-data-platform/aws"
+  version = "~> 2.0"
+
+  region                = "us-east-1"
+  otel_collector_domain = "otel.acme.com"
+  clickhouse_domain     = "clickhouse.acme.com"
+
+  # Two ClickHouse replicas across two AZs, backed by a 3-node Keeper ensemble.
+  # Element 0 of clickhouse_availability_zones is the AZ of the existing volume.
+  clickhouse_availability_zones = ["us-east-1a", "us-east-1b"]
+  keeper_availability_zones     = ["us-east-1a", "us-east-1b", "us-east-1c"]
+  clickhouse_replica_count      = 2
+
+  helm = {
+    chart_registry = "oci://123456789012.dkr.ecr.us-east-1.amazonaws.com"
+    chart_version  = "2.0.0" # a version that supports Keeper + replicated tables
+  }
+}
+```
+
 ### ClickHouse storage class
 
 This module creates two cluster-scoped StorageClasses: a general-purpose `gp3` (the module's baseline EBS class — EKS clusters ship only `gp2` by default) and a dedicated `clickhouse-gp3`. The ClickHouse StatefulSet uses `clickhouse-gp3` by default (`clickhouse_storage_class`). `clickhouse-gp3` is a `gp3` class hardened for stateful data in two ways:
@@ -387,6 +430,13 @@ To use a StorageClass you manage outside this module, set `clickhouse_storage_cl
 | `cluster.endpoint_public_access_cidrs` | `list(string)` | `["0.0.0.0/0"]` | CIDR blocks allowed to reach the public API endpoint. Include the egress CIDRs of every machine that runs Terraform or kubectl against the cluster. See "Restricting the EKS API endpoint". Only applies when `cluster.create = true`. |
 | `cluster.main_node_group_size` | `number` | `null` (resolves to 2) | Optional explicit size (desired + min) for the main EKS managed node group. When `null` (default), resolves to `2` — keeps a 2-node HA floor on the stateless tier even when the dedicated CH NG is active. Set explicitly to `1` to opt into a cost-shrunk single-node main pool. Validated to the range `[1, 10]` when set; `max_size` stays at 10 for autoscaling burst. |
 | `clickhouse_node_group` | `object` | `{}` (all defaults) | Configuration for the dedicated single-AZ ClickHouse node group. Shape: `{ availability_zone = optional(string), instance_type = optional(string, "r5.xlarge"), use_latest_ami_release_version = optional(bool, false), ami_release_version = optional(string) }`. The dedicated NG is auto-created when `helm.deploy_charts = true` AND `cluster.create = true` — see the "Dedicated ClickHouse node group" section. `availability_zone`: when null, defaults to the first AZ from `data.aws_availability_zones.available` (alphabetical) — override when the ClickHouse PV is in a different AZ (EBS volumes are AZ-locked). `instance_type`: EC2 instance type for the dedicated node; defaults to `r5.xlarge`. `use_latest_ami_release_version`: defaults to `false` — the CH NG is no-drift pinned, so its AMI won't change on an unrelated apply (see "ClickHouse node group AMI"). `ami_release_version`: optional explicit AMI build to pin to (e.g. `"1.35.5-20260527"`); `null` (default) still prevents drift but records no specific build. Has no effect when `cluster.create = false`. |
+| `clickhouse_availability_zones` | `list(string)` | `[]` | Explicit AZ names for the per-AZ ClickHouse node groups of the clustered/HA topology (one `clickhouse-<az>` node group per entry). Empty (default) keeps the single-instance layout. Element 0 must be the AZ of the existing ClickHouse volume. When `create_vpc = true`, entries must be among the first `length(networking.private_subnet_cidrs)` of the region's available AZs. See "Clustered / HA topology". |
+| `keeper_availability_zones` | `list(string)` | `[]` | Explicit AZ names for the per-AZ ClickHouse Keeper node groups (one voter per entry). Must be an **odd** count across distinct AZs for quorum (3 typical, 1 for dev). Empty (default) creates no Keeper node groups. The list length is the single source of truth for both the voter node-group count and the chart's `keeper.replicaCount`. See "Clustered / HA topology". |
+| `clickhouse_replica_count` | `number` | `1` | ClickHouse replicas requested from the chart (`clickhouse.replicasCount`). TF-owned and defaulted to `1` so a chart-version bump alone never scales replicas. Enforced (via a Helm-release precondition) to be `<= max(length(clickhouse_availability_zones), 1)`. |
+| `clickhouse_active_node_group_count` | `number` | `0` | How many of the per-AZ ClickHouse node groups (in list order) are active (`desired_size = 1`) versus parked (`desired_size = 0`). Defaults to `0` — the node groups are created parked. Raise at migration time to bring the nodes up. Values above the AZ-list length activate all of them. |
+| `clickhouse_ha_node_group` | `object` | `{}` (all defaults) | Configuration for the per-AZ ClickHouse node groups. Shape: `{ instance_type = optional(string, "r6i.xlarge"), use_latest_ami_release_version = optional(bool, false), ami_release_version = optional(string) }`. Kept separate from `clickhouse_node_group` so the go-forward instance type differs from the legacy node group without re-typing it (which would roll the running pod). AMI pinning behaves like `clickhouse_node_group`. |
+| `keeper_node_group` | `object` | `{}` (all defaults) | Configuration for the per-AZ Keeper node groups. Shape: `{ instance_type = optional(string, "m6i.large"), storage_size = optional(string, "10Gi"), storage_class = optional(string, "gp3"), use_latest_ami_release_version = optional(bool, false), ami_release_version = optional(string) }`. No `replica_count` field — the voter count is derived from `keeper_availability_zones`. `storage_size`/`storage_class` configure the Keeper PVC (via chart values), not the node root disk. AMI pinned by default. |
+| `manage_legacy_clickhouse_node_group` | `bool` | `true` | Whether the module manages the legacy single-instance ClickHouse node group. Defaults to `true` (unchanged behavior). Flip to `false` in a post-migration apply to retire the legacy node group via config once the ClickHouse pod has relocated onto a per-AZ node group. Only has an effect when the dedicated CH node group would otherwise be created. |
 | `networking.create_vpc` | `bool` | `true` | Create a new VPC or use an existing one |
 | `networking.vpc_cidr` | `string` | `"10.18.0.0/16"` | CIDR block for the created VPC. The default is a placeholder meant to be overridden — pick a range that doesn't collide with your existing networks (peering or VPN into a colliding range is painful to retrofit). Only applies when `create_vpc = true` |
 | `networking.private_subnet_cidrs` | `list(string)` | `["10.18.1.0/24", "10.18.2.0/24", "10.18.3.0/24"]` | Private subnet CIDRs for the created VPC; must sit inside `vpc_cidr`. Override together with it |
@@ -411,12 +461,14 @@ To use a StorageClass you manage outside this module, set `clickhouse_storage_cl
 | `helm.llm_worker.bedrock_region` | `string` | `null` | AWS region the in-cluster LLM worker targets for Bedrock; defaults to `var.region` when unset |
 | `helm.llm_worker.image_repository` | `string` | `null` | LLM-worker container image repo override. Defaults to deriving from `chart_registry` (same ECR account/region, repo `ao-llm-worker`). |
 | `helm.llm_worker.image_tag` | `string` | `"latest"` | LLM-worker container image tag. |
+| `helm.llm_worker.replica_count` | `number` | `null` | Optional override for the llm-worker replica count. `null` (default) lets the chart control it; set to `0` to pause the worker as configuration that survives an apply (used during a maintenance window). |
 | `helm.clickhouse.resources` | `object` | `null` | Kubernetes resource requests/limits for the ClickHouse pods. Shape: `{ requests = map(string), limits = map(string) }`. Omit to use chart defaults. |
 | `helm.clickhouse.otel.restrict_grants` | `bool` | `false` | Forwards `clickhouse.otel.restrictGrants` to the chart. When `true`, the `otel` ingest user is restricted to `INSERT` on the telemetry source tables only; `false` keeps it broad. **Requires chart version >= 2.0.0** (ignored by older charts). Flip to `true` only after external readers have moved to the `monte_carlo` user. |
 | `helm.clickhouse.admin` | `object` | `null` | Optionally provisions the gated break-glass superuser (`admin`). Shape: `{ enabled = bool }`. When `enabled = true`, a Secrets Manager secret + ExternalSecret pipeline is created and the chart's admin user is enabled (loopback-only by default — reachable only via pod-exec); the password comes from `clickhouse_passwords.admin` (or is auto-generated). When disabled (default), no admin secret is created. **Requires chart version >= 2.0.0.** Omit (or `null`) to disable. |
 | `helm.clickhouse.readonly_user` | `object` | `null` | Optionally provisions a second SELECT-only ClickHouse user (`readonly_user`, profile `readonly`). Shape: `{ enabled = bool }`. When `enabled = true`, a Secrets Manager secret + ExternalSecret pipeline mirroring the otel user is created and the toggle is forwarded to the chart; the password comes from `clickhouse_passwords.readonly_user` (or is auto-generated). **Requires chart version >= 1.2.0.** Omit (or `null`) to disable. |
 | `clickhouse_passwords` | `object` (sensitive) | `{}` (all auto-generated) | Passwords for the ClickHouse SQL users. Shape: `{ admin = optional(string), otel = optional(string), monte_carlo = optional(string), schema_owner = optional(string), llm_worker = optional(string), readonly_user = optional(string) }`. Any field left null is auto-generated. Marked `sensitive`, so caller-supplied values are redacted in plan/apply output and CI logs — supply via a `.tfvars` file or `TF_VAR_clickhouse_passwords`. Stored in Secrets Manager and synced into the cluster by ESO; never passed through Helm values. Values remain readable in Terraform state — protect state accordingly. |
 | `helm.opentelemetry_collector.resources` | `object` | `null` | Kubernetes resource requests/limits for the OTel Collector pods. Same shape as `helm.clickhouse.resources`. Omit to use chart defaults. |
+| `helm.opentelemetry_collector.replica_count` | `number` | `null` | Optional override for the OTel Collector replica count. `null` (default) lets the chart control it; set to `0` to pause ingest as configuration that survives an apply (used during a maintenance window). |
 | `helm.opentelemetry_collector.awss3_receiver` | `object` | `null` | Optional awss3 receiver config for the OTel Collector. When set with `enabled = true`, emits chart values that activate the receiver and appends `awss3` to the trace pipeline, and attaches SQS + S3 read permissions to the otel-collector IRSA role. Shape: `{ enabled = bool, sqs_queue_arn = string, sqs_queue_url = string, sqs_region = optional(string), s3_bucket = string, s3_region = optional(string), s3_prefix = optional(string, "") }`. Omit (or leave `null`) to disable. |
 | `helm.llm_worker.resources` | `object` | `null` | Kubernetes resource requests/limits for the LLM-worker pods. Same shape as `helm.clickhouse.resources`. Omit to use chart defaults. |
 
