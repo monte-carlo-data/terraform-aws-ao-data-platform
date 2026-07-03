@@ -12,9 +12,17 @@
 //     resolution, which pulls in the EKS module's data sources (IAM, KMS,
 //     OIDC, etc.). Mocking that surface is brittle and high-maintenance.
 //     Every real apply exercises the accepted path.
-//   - The postcondition on data.aws_subnets.ch_node_group_az_subnets (AZ
-//     must match a private subnet) — also requires real-or-mocked subnet
-//     data. Exercised by every apply.
+//   - The postcondition on data.aws_subnets.ch_node_group_az_subnets and the
+//     matching per-AZ ha_node_group_az_subnets postcondition (AZ must match a
+//     private subnet) — also requires real-or-mocked subnet data. Exercised by
+//     every apply.
+//   - The clustered/HA ENABLED-path shapes: keeper node-group count = AZ count,
+//     the parked ClickHouse node groups (desired = 0), clickhouse.replicasCount
+//     rendering, and the clickhouse_replica_count <= AZ-count precondition on
+//     the Helm release. All need module.eks + subnet data in the plan (the same
+//     brittle surface as above), so they are exercised by real applies + code
+//     review. The DISABLED path (no AZ lists) is asserted by
+//     ha_topology_inert_by_default below.
 //   - The resolution locals (clickhouse_az_resolved,
 //     main_node_group_size_resolved) — simple coalesce chains; regressions
 //     would show up in plan diffs during code review.
@@ -590,5 +598,136 @@ run "tags_propagate_to_resources" {
   assert {
     condition     = aws_secretsmanager_secret.clickhouse_llm_worker_password.tags["Team"] == "ao"
     error_message = "var.tags must propagate to the clickhouse_llm_worker Secrets Manager secret."
+  }
+}
+
+# --- HA topology: AZ-list and node-group input validations ---
+#
+# Variable-level rejection paths for the clustered/HA inputs, same style as the
+# guards above: each fires at plan time before any provider data source is read.
+# deploy_charts = false keeps the helm chart_registry/chart_version validations
+# from also firing, so each run isolates the single variable under test.
+
+run "keeper_azs_even_length_rejected" {
+  command = plan
+  variables {
+    cluster = {
+      create                = false
+      name                  = "test-cluster"
+      existing_cluster_name = "test-cluster"
+    }
+    helm                      = { deploy_charts = false }
+    keeper_availability_zones = ["us-east-1a", "us-east-1b"]
+  }
+  expect_failures = [var.keeper_availability_zones]
+}
+
+run "keeper_azs_duplicate_rejected" {
+  command = plan
+  variables {
+    cluster = {
+      create                = false
+      name                  = "test-cluster"
+      existing_cluster_name = "test-cluster"
+    }
+    helm                      = { deploy_charts = false }
+    keeper_availability_zones = ["us-east-1a", "us-east-1a", "us-east-1a"]
+  }
+  expect_failures = [var.keeper_availability_zones]
+}
+
+run "clickhouse_azs_duplicate_rejected" {
+  command = plan
+  variables {
+    cluster = {
+      create                = false
+      name                  = "test-cluster"
+      existing_cluster_name = "test-cluster"
+    }
+    helm                          = { deploy_charts = false }
+    clickhouse_availability_zones = ["us-east-1a", "us-east-1a"]
+  }
+  expect_failures = [var.clickhouse_availability_zones]
+}
+
+run "clickhouse_replica_count_below_one_rejected" {
+  command = plan
+  variables {
+    cluster = {
+      create                = false
+      name                  = "test-cluster"
+      existing_cluster_name = "test-cluster"
+    }
+    helm                     = { deploy_charts = false }
+    clickhouse_replica_count = 0
+  }
+  expect_failures = [var.clickhouse_replica_count]
+}
+
+run "keeper_node_group_ami_pin_with_use_latest_rejected" {
+  command = plan
+  variables {
+    cluster = {
+      create                = false
+      name                  = "test-cluster"
+      existing_cluster_name = "test-cluster"
+    }
+    helm = { deploy_charts = false }
+    keeper_node_group = {
+      use_latest_ami_release_version = true
+      ami_release_version            = "1.35.5-20260527"
+    }
+  }
+  expect_failures = [var.keeper_node_group]
+}
+
+run "clickhouse_ha_node_group_ami_pin_with_use_latest_rejected" {
+  command = plan
+  variables {
+    cluster = {
+      create                = false
+      name                  = "test-cluster"
+      existing_cluster_name = "test-cluster"
+    }
+    helm = { deploy_charts = false }
+    clickhouse_ha_node_group = {
+      use_latest_ami_release_version = true
+      ami_release_version            = "1.35.5-20260527"
+    }
+  }
+  expect_failures = [var.clickhouse_ha_node_group]
+}
+
+# --- HA topology inert by default ---
+#
+# With no AZ lists set (and charts off), the module creates no keeper or per-AZ
+# ClickHouse node groups and emits no keeper helm values — single-instance
+# behavior is unchanged. Asserts the gating locals collapse to empty. (The
+# enabled-path shapes — keeper NG count = AZ count, CH NGs parked at desired=0,
+# the replicasCount rendering, and the clickhouse_replica_count <= AZ-count
+# precondition — need module.eks + real/mocked subnet data to plan and are
+# exercised by real applies + code review, per this file's scope note above.)
+
+run "ha_topology_inert_by_default" {
+  command = plan
+  variables {
+    cluster = {
+      create                = false
+      name                  = "test-cluster"
+      existing_cluster_name = "test-cluster"
+    }
+    helm = { deploy_charts = false }
+  }
+  assert {
+    condition     = length(local.keeper_node_groups) == 0
+    error_message = "keeper_node_groups must be empty when no keeper topology / charts are configured."
+  }
+  assert {
+    condition     = length(local.clickhouse_ha_node_groups) == 0
+    error_message = "clickhouse_ha_node_groups must be empty when no ClickHouse HA topology / charts are configured."
+  }
+  assert {
+    condition     = length(local.helm_keeper_block) == 0
+    error_message = "helm_keeper_block must be empty when keeper_availability_zones is unset."
   }
 }
