@@ -110,7 +110,9 @@ variable "clickhouse_node_group" {
     Configuration for the dedicated single-AZ ClickHouse node group.
 
     The dedicated CH NG is auto-created when helm.deploy_charts = true AND
-    cluster.create = true. When that pair holds, the module creates a
+    cluster.create = true, and managed while
+    manage_legacy_clickhouse_node_group = true (the retirement gate for the
+    clustered/HA migration). When those conditions hold, the module creates a
     single-node EKS managed node group pinned to availability_zone, tainted
     dedicated=clickhouse:NoSchedule, and wires the matching nodeSelector +
     toleration onto the chart's ClickHouse pod template automatically. The
@@ -208,6 +210,10 @@ variable "clickhouse_availability_zones" {
     Empty (default) creates no per-AZ CH node groups: the module keeps only the legacy
     single ClickHouse node group. Set this (e.g. 2 AZs for RF=2) to stand up the HA
     topology. The list length is the ceiling for clickhouse_replica_count.
+
+    Only applies to module-created clusters: when cluster.create = false no per-AZ
+    node groups are created. For existing clusters, attach tainted single-AZ node
+    groups out-of-band (see the README's "Clustered / HA topology" section).
   EOT
   type        = list(string)
   default     = []
@@ -235,6 +241,11 @@ variable "keeper_availability_zones" {
     single source of truth for BOTH the number of keeper node groups AND the
     keeper.replicaCount passed to the chart — so voter count and node capacity cannot
     drift.
+
+    Requires cluster.create = true: the keeper node groups are only created for
+    module-created clusters, so on an existing cluster the chart's keeper node
+    selector would match no nodes — a plan-time precondition on the Helm release
+    rejects that combination.
   EOT
   type        = list(string)
   default     = []

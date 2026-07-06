@@ -79,7 +79,7 @@ module "ao_data_platform" {
   # (use_latest_ami_release_version defaults to false); set ami_release_version to
   # record a specific build and to perform deliberate AMI updates. The build's
   # minor must match kubernetes_version. See the module README section
-  # "ClickHouse node group AMI" for the bump cadence and how to find the current
+  # "Pinned node group AMIs" for the bump cadence and how to find the current
   # recommended build.
   # clickhouse_node_group = {
   #   ami_release_version = "1.35.5-20260527"

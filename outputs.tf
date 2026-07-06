@@ -116,7 +116,9 @@ output "clickhouse_node_group" {
     fields.
 
     The node group is auto-created when helm.deploy_charts = true AND
-    cluster.create = true. Output is null when either is false.
+    cluster.create = true, and managed while
+    manage_legacy_clickhouse_node_group = true. Output is null when any
+    of the three is false.
 
     The availability_zone field reflects the resolved AZ — either an
     explicit override via var.clickhouse_node_group.availability_zone, or (when null)
@@ -136,7 +138,7 @@ output "clickhouse_node_group" {
     so consumers driving the helm release through this module do not need
     to plumb these values themselves.
   EOT
-  value = local.clickhouse_node_placement_enabled ? {
+  value = (local.clickhouse_node_placement_enabled && var.manage_legacy_clickhouse_node_group) ? {
     availability_zone = local.clickhouse_az_resolved
     instance_type     = var.clickhouse_node_group.instance_type
     size              = 1
