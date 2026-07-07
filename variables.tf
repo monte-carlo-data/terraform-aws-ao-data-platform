@@ -241,7 +241,7 @@ variable "keeper_availability_zones" {
 
     Empty (default) creates no keeper node groups. When set, this list's length is the
     single source of truth for BOTH the number of keeper node groups AND the
-    keeper.replicaCount passed to the chart — so voter count and node capacity cannot
+    keeper.replicasCount passed to the chart — so voter count and node capacity cannot
     drift.
 
     Requires cluster.create = true: the keeper node groups are only created for
@@ -328,7 +328,7 @@ variable "keeper_node_group" {
     One node group (one voter) is created per keeper_availability_zones entry; there is
     intentionally NO replica_count field here — the voter count is derived from
     length(keeper_availability_zones) so the node groups and the chart's
-    keeper.replicaCount cannot drift.
+    keeper.replicasCount cannot drift.
 
     instance_type defaults to m6i.large (non-burstable: a throttled quorum voter risks
     spurious leader elections; 2 vCPU is the non-burstable floor).

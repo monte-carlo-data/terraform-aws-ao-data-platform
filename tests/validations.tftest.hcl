@@ -841,7 +841,7 @@ run "ha_topology_inert_by_default" {
 # no module.eks or subnet data required (the per-AZ subnet data source is
 # gated on placement, which deploy_charts = false disables). One run with 3
 # keeper AZs and 2 ClickHouse AZs (one zone overlapping) pins both contracts:
-# keeper.replicaCount derives from the keeper AZ-list length (voters and node
+# keeper.replicasCount derives from the keeper AZ-list length (voters and node
 # capacity cannot drift), and ha_node_group_azs is the deduplicated union of
 # the two lists that drives the per-AZ subnet fan-out.
 
@@ -858,8 +858,8 @@ run "ha_locals_derive_from_az_lists" {
     keeper_availability_zones     = ["us-east-1a", "us-east-1b", "us-east-1c"]
   }
   assert {
-    condition     = local.helm_keeper_block.keeper.replicaCount == 3
-    error_message = "keeper.replicaCount must equal length(keeper_availability_zones)."
+    condition     = local.helm_keeper_block.keeper.replicasCount == 3
+    error_message = "keeper.replicasCount must equal length(keeper_availability_zones)."
   }
   assert {
     condition     = local.helm_keeper_block.keeper.nodeSelector["dedicated"] == "keeper"

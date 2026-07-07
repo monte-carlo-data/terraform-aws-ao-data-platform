@@ -7,7 +7,7 @@ locals {
   # Dedicated per-AZ ClickHouse Keeper node groups (one voter per AZ), merged
   # into the module's eks_managed_node_groups below. Keyed keeper-<az>; the count
   # is length(keeper_availability_zones) — the same list that drives the chart's
-  # keeper.replicaCount, so voters and node capacity cannot drift. Each is a
+  # keeper.replicasCount, so voters and node capacity cannot drift. Each is a
   # single-AZ, tainted (dedicated=keeper) group so only Keeper pods (which carry
   # the matching toleration, wired in helm.tf) schedule here, kept off the
   # ClickHouse nodes so a CH node failure can't also drop a voter.
