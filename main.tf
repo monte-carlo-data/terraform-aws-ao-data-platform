@@ -221,9 +221,10 @@ locals {
 
   # Keeper values, merged into the ao-data-platform release at the top level.
   # Emitted only when keeper_availability_zones is set — opting into the keeper
-  # topology implies a keeper-capable chart (chart >= the version exposing
-  # keeper.*; see the chart_version note in helm.tf). replicaCount is derived
-  # from the AZ-list length so it cannot drift from the keeper node-group count.
+  # topology implies a keeper-capable chart (>= 2.2.0, the first version
+  # exposing keeper.*; see the chart_version notes on var.helm in variables.tf).
+  # replicaCount is derived from the AZ-list length so it cannot drift from the
+  # keeper node-group count.
   helm_keeper_block = length(var.keeper_availability_zones) > 0 ? {
     keeper = {
       replicaCount = length(var.keeper_availability_zones)

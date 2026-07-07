@@ -217,8 +217,8 @@ resource "helm_release" "ao_data_platform" {
         # TF-owned replica count, held at 1 until every existing table has been
         # converted to a replicated engine (see README: Clustered / HA
         # topology), so bumping chart_version never silently scales replicas
-        # against not-yet-converted tables (the chart's own default becomes 2
-        # at its replicated-SQL version).
+        # against not-yet-converted tables, whatever the chart's own default
+        # is or becomes.
         replicasCount = var.clickhouse_replica_count
         # otel ESO wiring is dual-pathed across the 2.0.0 chart migration: chart
         # < 2.0.0 reads clickhouse.externalSecret; chart >= 2.0.0 reads
@@ -331,6 +331,30 @@ resource "helm_release" "ao_data_platform" {
     precondition {
       condition     = length(var.keeper_availability_zones) == 0 || var.cluster.create
       error_message = "keeper_availability_zones requires cluster.create = true — the per-AZ Keeper node groups are only created for module-created clusters, so on an existing cluster the chart's keeper nodeSelector (dedicated=keeper) would match no nodes and every Keeper voter would stay Pending. For an existing cluster, attach tainted dedicated=keeper node groups out-of-band and wire keeper scheduling via your own helm values."
+    }
+
+    # Retiring the legacy CH node group is only safe once a per-AZ replacement
+    # exists: the chart's ClickHouse nodeSelector (dedicated=clickhouse) is
+    # emitted whenever placement is enabled, so dropping the legacy node group
+    # with no clickhouse_availability_zones set would destroy the only node
+    # group carrying that label while the chart keeps demanding it — the
+    # ClickHouse pod goes Pending with plan and apply both succeeding silently.
+    precondition {
+      condition     = !local.clickhouse_node_placement_enabled || var.manage_legacy_clickhouse_node_group || length(var.clickhouse_availability_zones) > 0
+      error_message = "manage_legacy_clickhouse_node_group = false requires clickhouse_availability_zones to be non-empty — retiring the legacy ClickHouse node group with no per-AZ replacement would remove every node carrying the dedicated=clickhouse label while the chart's ClickHouse nodeSelector still requires it, leaving the ClickHouse pod Pending. Set clickhouse_availability_zones (and complete the migration) before retiring the legacy node group."
+    }
+
+    # The in-place HA migration relocates the running ClickHouse pod onto
+    # clickhouse-<element-0> and reattaches its existing AZ-locked EBS volume,
+    # so element 0 must be the AZ that volume lives in (the AZ
+    # clickhouse_node_group.availability_zone resolves to). A mismatch strands
+    # the volume and leaves the pod Pending with no other plan-time signal.
+    # enforce_clickhouse_volume_az_match = false is the escape hatch for
+    # topologies with no existing volume to preserve (fresh HA stand-up, or a
+    # deliberate re-ingest migration).
+    precondition {
+      condition     = !local.clickhouse_node_placement_enabled || !var.enforce_clickhouse_volume_az_match || length(var.clickhouse_availability_zones) == 0 || var.clickhouse_availability_zones[0] == local.clickhouse_az_resolved
+      error_message = "clickhouse_availability_zones[0] (${length(var.clickhouse_availability_zones) > 0 ? var.clickhouse_availability_zones[0] : "unset"}) must be the AZ of the existing single-instance ClickHouse volume (${local.clickhouse_az_resolved}, resolved from clickhouse_node_group.availability_zone) — the migrating pod reattaches that AZ-locked volume on clickhouse-<element-0>, and a mismatch strands the volume, leaving the pod Pending. Reorder the list (or set clickhouse_node_group.availability_zone). If there is genuinely no existing volume to preserve — a fresh HA stand-up or a deliberate re-ingest — set enforce_clickhouse_volume_az_match = false."
     }
   }
 

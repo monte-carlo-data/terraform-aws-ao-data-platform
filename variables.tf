@@ -201,7 +201,9 @@ variable "clickhouse_availability_zones" {
     (the AZ that var.clickhouse_node_group.availability_zone resolves to). During the
     in-place migration the running ClickHouse pod relocates onto clickhouse-<element-0>
     and reattaches its existing AZ-locked volume; a mismatch strands that volume and
-    leaves the pod Pending.
+    leaves the pod Pending. A plan-time precondition on the Helm release enforces the
+    match; set enforce_clickhouse_volume_az_match = false to skip it when there is no
+    existing volume to preserve (fresh HA stand-up or deliberate re-ingest).
 
     When create_vpc = true, entries must be a subset of the AZs the module's private
     subnets were placed in (the first N of the available-AZ data source) — otherwise
@@ -354,6 +356,26 @@ variable "keeper_node_group" {
     condition     = !(var.keeper_node_group.use_latest_ami_release_version && var.keeper_node_group.ami_release_version != null)
     error_message = "keeper_node_group.ami_release_version is ignored when use_latest_ami_release_version = true. Set use_latest_ami_release_version = false to pin to ami_release_version, or clear ami_release_version to track the latest AMI."
   }
+}
+
+variable "enforce_clickhouse_volume_az_match" {
+  description = <<-EOT
+    Whether a plan-time precondition on the Helm release requires element 0 of
+    clickhouse_availability_zones to match the AZ of the existing single-instance
+    ClickHouse volume (the AZ clickhouse_node_group.availability_zone resolves to).
+    Defaults to true: during the in-place HA migration the running ClickHouse pod
+    relocates onto clickhouse-<element-0> and reattaches its AZ-locked EBS volume,
+    so a mismatch strands the volume and leaves the pod Pending — with no other
+    plan-time signal.
+
+    Set to false only when there is genuinely no existing volume to preserve: a
+    fresh HA stand-up (no single-instance deployment preceded it) or a deliberate
+    re-ingest migration that abandons the old volume. Has no effect when
+    clickhouse_availability_zones is empty or on existing (non-module-created)
+    clusters, where the module creates no per-AZ node groups.
+  EOT
+  type        = bool
+  default     = true
 }
 
 variable "manage_legacy_clickhouse_node_group" {
@@ -521,6 +543,15 @@ variable "helm" {
     ClickHouse node group this module creates (see clickhouse_node_group).
     Nothing in the module gates this at apply time; a 1.2.x caller will apply
     cleanly and hit the original scheduler deadlock at runtime.
+
+    The clustered/HA Keeper topology (keeper_availability_zones) requires
+    chart_version >= "2.2.0" — the first chart version exposing the keeper.*
+    values; an older chart ignores them, leaving the keeper node groups empty.
+    The converse also matters: on chart >= 2.2.0 Keeper is intrinsic and renders
+    on every install, so bumping chart_version alone — without setting
+    keeper_availability_zones — deploys the chart's default 3-voter Keeper
+    ensemble onto the main node pool. Bump the chart version and set the
+    topology variables together.
 
     The module wires the chart's least-privilege ClickHouse user model
     (schema_owner / llm_worker / monte_carlo ExternalSecrets + otel.restrictGrants),

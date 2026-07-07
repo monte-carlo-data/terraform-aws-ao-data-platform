@@ -16,13 +16,19 @@
 //     matching per-AZ ha_node_group_az_subnets postcondition (AZ must match a
 //     private subnet) — also requires real-or-mocked subnet data. Exercised by
 //     every apply.
-//   - The clustered/HA ENABLED-path shapes: keeper node-group count = AZ count,
-//     one ClickHouse node group per AZ (all desired = 1), clickhouse.replicasCount
-//     rendering, and the clickhouse_replica_count <= AZ-count precondition on
-//     the Helm release. All need module.eks + subnet data in the plan (the same
-//     brittle surface as above), so they are exercised by real applies + code
-//     review. The DISABLED path (no AZ lists) is asserted by
-//     ha_topology_inert_by_default below.
+//   - The clustered/HA ENABLED-path node-group shapes: keeper node-group count
+//     = AZ count, one ClickHouse node group per AZ (all desired = 1). These
+//     need module.eks + subnet data in the plan (the same brittle surface as
+//     above), so they are exercised by real applies + code review. Likewise the
+//     placement-gated Helm-release preconditions (legacy node-group retirement
+//     guard, volume-AZ match guard): their failing path requires cluster.create
+//     = true, which drags module.eks into the plan. The rest of the HA surface
+//     IS covered below: the DISABLED path by ha_topology_inert_by_default, the
+//     clickhouse_replica_count <= AZ-count precondition by
+//     replica_count_exceeding_az_count_rejected (it reads only variables, so
+//     the keeper-precondition technique reaches it), and the pure
+//     variable-derived locals (helm_keeper_block, ha_node_group_azs, the
+//     pause-ingest replica overrides) by the enabled-path runs at the end.
 //   - The resolution locals (clickhouse_az_resolved,
 //     main_node_group_size_resolved) — simple coalesce chains; regressions
 //     would show up in plan diffs during code review.
@@ -650,6 +656,40 @@ run "clickhouse_azs_duplicate_rejected" {
   expect_failures = [var.clickhouse_availability_zones]
 }
 
+# Entries must be AZ names (lowercase letters, digits, hyphens). Uppercase is
+# the likely typo — AZ ids ("use1-az1") and region-only values still match the
+# character class, so the regex is a lint, not a full AZ-name parser.
+
+run "clickhouse_azs_invalid_name_rejected" {
+  command = plan
+  variables {
+    cluster = {
+      create                = false
+      name                  = "test-cluster"
+      existing_cluster_name = "test-cluster"
+    }
+    helm                          = { deploy_charts = false }
+    clickhouse_availability_zones = ["US-EAST-1B"]
+  }
+  expect_failures = [var.clickhouse_availability_zones]
+}
+
+# Single element: odd length and no duplicates, so the name regex is the only
+# validation that can fail.
+run "keeper_azs_invalid_name_rejected" {
+  command = plan
+  variables {
+    cluster = {
+      create                = false
+      name                  = "test-cluster"
+      existing_cluster_name = "test-cluster"
+    }
+    helm                      = { deploy_charts = false }
+    keeper_availability_zones = ["US-EAST-1A"]
+  }
+  expect_failures = [var.keeper_availability_zones]
+}
+
 run "clickhouse_replica_count_below_one_rejected" {
   command = plan
   variables {
@@ -722,7 +762,39 @@ run "keeper_azs_require_module_created_cluster_rejected" {
     helm = {
       deploy_charts  = true
       chart_registry = "oci://123456789012.dkr.ecr.us-east-1.amazonaws.com"
-      chart_version  = "2.0.0"
+      chart_version  = "2.2.0"
+    }
+  }
+  expect_failures = [helm_release.ao_data_platform]
+}
+
+# --- clickhouse_replica_count must not exceed the per-AZ node-group count ---
+#
+# Cross-variable precondition on the Helm release: you cannot request more
+# replicas than there are per-AZ ClickHouse node groups to place them on (with
+# no AZ list, only 1 replica is valid). The condition reads only the two
+# variables, so the same technique as the keeper run above reaches it:
+# cluster.create = false keeps module.eks and every subnet data source out of
+# the plan, deploy_charts = true makes the Helm release exist so its
+# preconditions evaluate, and every sibling precondition passes (domains set,
+# keeper AZs empty, placement disabled) — the replica ceiling is the only
+# check that can fail.
+
+run "replica_count_exceeding_az_count_rejected" {
+  command = plan
+  variables {
+    cluster = {
+      create                = false
+      name                  = "test-cluster"
+      existing_cluster_name = "test-cluster"
+    }
+    clickhouse_domain        = "clickhouse.example.com"
+    otel_collector_domain    = "otel.example.com"
+    clickhouse_replica_count = 2
+    helm = {
+      deploy_charts  = true
+      chart_registry = "oci://123456789012.dkr.ecr.us-east-1.amazonaws.com"
+      chart_version  = "2.2.0"
     }
   }
   expect_failures = [helm_release.ao_data_platform]
@@ -733,10 +805,11 @@ run "keeper_azs_require_module_created_cluster_rejected" {
 # With no AZ lists set (and charts off), the module creates no keeper or per-AZ
 # ClickHouse node groups and emits no keeper helm values — single-instance
 # behavior is unchanged. Asserts the gating locals collapse to empty. (The
-# enabled-path shapes — keeper NG count = AZ count, one CH NG per AZ (desired=1),
-# the replicasCount rendering, and the clickhouse_replica_count <= AZ-count
-# precondition — need module.eks + real/mocked subnet data to plan and are
-# exercised by real applies + code review, per this file's scope note above.)
+# enabled-path node-group shapes — keeper NG count = AZ count, one CH NG per AZ
+# (desired=1) — need module.eks + real/mocked subnet data to plan and are
+# exercised by real applies + code review, per this file's scope note above.
+# The enabled-path helm-values locals are pure variable expressions and are
+# asserted by ha_locals_derive_from_az_lists below.)
 
 run "ha_topology_inert_by_default" {
   command = plan
@@ -759,5 +832,97 @@ run "ha_topology_inert_by_default" {
   assert {
     condition     = length(local.helm_keeper_block) == 0
     error_message = "helm_keeper_block must be empty when keeper_availability_zones is unset."
+  }
+}
+
+# --- enabled-path HA locals derive purely from the AZ lists ---
+#
+# helm_keeper_block and ha_node_group_azs read only variables and constants —
+# no module.eks or subnet data required (the per-AZ subnet data source is
+# gated on placement, which deploy_charts = false disables). One run with 3
+# keeper AZs and 2 ClickHouse AZs (one zone overlapping) pins both contracts:
+# keeper.replicaCount derives from the keeper AZ-list length (voters and node
+# capacity cannot drift), and ha_node_group_azs is the deduplicated union of
+# the two lists that drives the per-AZ subnet fan-out.
+
+run "ha_locals_derive_from_az_lists" {
+  command = plan
+  variables {
+    cluster = {
+      create                = false
+      name                  = "test-cluster"
+      existing_cluster_name = "test-cluster"
+    }
+    helm                          = { deploy_charts = false }
+    clickhouse_availability_zones = ["us-east-1a", "us-east-1b"]
+    keeper_availability_zones     = ["us-east-1a", "us-east-1b", "us-east-1c"]
+  }
+  assert {
+    condition     = local.helm_keeper_block.keeper.replicaCount == 3
+    error_message = "keeper.replicaCount must equal length(keeper_availability_zones)."
+  }
+  assert {
+    condition     = local.helm_keeper_block.keeper.nodeSelector["dedicated"] == "keeper"
+    error_message = "The keeper helm block must pin pods to the dedicated=keeper node groups."
+  }
+  assert {
+    condition     = length(local.ha_node_group_azs) == 3 && toset(local.ha_node_group_azs) == toset(["us-east-1a", "us-east-1b", "us-east-1c"])
+    error_message = "ha_node_group_azs must be the deduplicated union of the ClickHouse and keeper AZ lists."
+  }
+}
+
+# --- pause-ingest replica overrides: null omits the key, 0 renders 0 ---
+#
+# The collector and llm-worker replica_count overrides are the pause-ingest
+# lever for the HA migration window: null (the default) must OMIT replicaCount
+# so the chart controls the count, while an explicit 0 must render
+# replicaCount = 0 (paused). A truthiness regression that treats 0 as unset
+# would silently no-op the documented pause procedure. Pure locals, so both
+# directions are plan-assertable with charts off; one run per workload, each
+# also pinning the other workload's null-omission.
+
+run "otel_replica_override_zero_renders" {
+  command = plan
+  variables {
+    cluster = {
+      create                = false
+      name                  = "test-cluster"
+      existing_cluster_name = "test-cluster"
+    }
+    helm = {
+      deploy_charts           = false
+      opentelemetry_collector = { replica_count = 0 }
+    }
+  }
+  assert {
+    condition     = local.helm_otel_replica_block.replicaCount == 0
+    error_message = "helm_otel_replica_block must render replicaCount = 0 when opentelemetry_collector.replica_count = 0."
+  }
+  assert {
+    condition     = length(local.helm_llm_worker_replica_block) == 0
+    error_message = "helm_llm_worker_replica_block must omit replicaCount when llm_worker.replica_count is null."
+  }
+}
+
+run "llm_worker_replica_override_zero_renders" {
+  command = plan
+  variables {
+    cluster = {
+      create                = false
+      name                  = "test-cluster"
+      existing_cluster_name = "test-cluster"
+    }
+    helm = {
+      deploy_charts = false
+      llm_worker    = { replica_count = 0 }
+    }
+  }
+  assert {
+    condition     = local.helm_llm_worker_replica_block.replicaCount == 0
+    error_message = "helm_llm_worker_replica_block must render replicaCount = 0 when llm_worker.replica_count = 0."
+  }
+  assert {
+    condition     = length(local.helm_otel_replica_block) == 0
+    error_message = "helm_otel_replica_block must omit replicaCount when opentelemetry_collector.replica_count is null."
   }
 }
