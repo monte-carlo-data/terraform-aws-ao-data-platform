@@ -272,10 +272,16 @@ variable "clickhouse_replica_count" {
   description = <<-EOT
     Number of ClickHouse replicas, passed to the chart as clickhouse.replicasCount.
     TF-owned and defaulted to 1 so that bumping helm.chart_version — to a chart
-    whose own default is or becomes 2 — never silently scales replicas against
-    not-yet-converted tables. Raise to 2 deliberately, only after every existing
-    table has been converted to a replicated engine (see the README section
-    "Clustered / HA topology").
+    whose own default is or becomes 2 (it is 2 from chart 2.4.0) — never silently
+    scales replicas against not-yet-converted tables.
+
+    Raising above 1 requires chart_version >= "2.4.0", the replicated-schema
+    release. On clusters with pre-existing data that is necessary but not
+    sufficient: every existing table must additionally have been converted to a
+    replicated engine first — raising the count against unconverted tables
+    starts an empty second replica instead of a copy. See the chart's
+    migration-ordering guidance and the README section "Clustered / HA
+    topology".
 
     Must not exceed the number of per-AZ ClickHouse node groups available to place
     replicas on (max(length(clickhouse_availability_zones), 1)). That ceiling is
@@ -545,13 +551,15 @@ variable "helm" {
     cleanly and hit the original scheduler deadlock at runtime.
 
     The clustered/HA Keeper topology (keeper_availability_zones) requires
-    chart_version >= "2.2.0" — the first chart version exposing the keeper.*
+    chart_version >= "2.3.0" — the first chart version exposing the keeper.*
     values; an older chart ignores them, leaving the keeper node groups empty.
-    The converse also matters: on chart >= 2.2.0 Keeper is intrinsic and renders
+    The converse also matters: on chart >= 2.3.0 Keeper is intrinsic and renders
     on every install, so bumping chart_version alone — without setting
     keeper_availability_zones — deploys the chart's default 3-voter Keeper
     ensemble onto the main node pool. Bump the chart version and set the
-    topology variables together.
+    topology variables together. The replicated table schema ships at chart
+    2.4.0 — required before raising clickhouse_replica_count above 1 (see that
+    variable for the full conditions).
 
     The module wires the chart's least-privilege ClickHouse user model
     (schema_owner / llm_worker / monte_carlo ExternalSecrets + otel.restrictGrants),

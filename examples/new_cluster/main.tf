@@ -95,8 +95,9 @@ module "ao_data_platform" {
   # (the default), the listed AZs must be among the first
   # length(networking.private_subnet_cidrs) of the region's available AZs, which
   # is where the module places private subnets (3 by default) — so 3 keeper AZs +
-  # 2 ClickHouse AZs need no networking change. Requires chart_version >= 2.2.0
-  # (the first chart version with Keeper support). Element 0 of
+  # 2 ClickHouse AZs need no networking change. Requires chart_version >= 2.3.0
+  # (the first chart version with Keeper support); clickhouse_replica_count = 2
+  # additionally requires >= 2.4.0 (the replicated-schema release). Element 0 of
   # clickhouse_availability_zones must be the AZ of the existing ClickHouse
   # volume, if any (enforced at plan time; set enforce_clickhouse_volume_az_match
   # = false for a fresh stand-up with no volume to preserve). See the module

@@ -762,7 +762,7 @@ run "keeper_azs_require_module_created_cluster_rejected" {
     helm = {
       deploy_charts  = true
       chart_registry = "oci://123456789012.dkr.ecr.us-east-1.amazonaws.com"
-      chart_version  = "2.2.0"
+      chart_version  = "2.3.0"
     }
   }
   expect_failures = [helm_release.ao_data_platform]
@@ -794,7 +794,7 @@ run "replica_count_exceeding_az_count_rejected" {
     helm = {
       deploy_charts  = true
       chart_registry = "oci://123456789012.dkr.ecr.us-east-1.amazonaws.com"
-      chart_version  = "2.2.0"
+      chart_version  = "2.4.0"
     }
   }
   expect_failures = [helm_release.ao_data_platform]

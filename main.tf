@@ -221,7 +221,7 @@ locals {
 
   # Keeper values, merged into the ao-data-platform release at the top level.
   # Emitted only when keeper_availability_zones is set — opting into the keeper
-  # topology implies a keeper-capable chart (>= 2.2.0, the first version
+  # topology implies a keeper-capable chart (>= 2.3.0, the first version
   # exposing keeper.*; see the chart_version notes on var.helm in variables.tf).
   # replicasCount is derived from the AZ-list length so it cannot drift from the
   # keeper node-group count.
@@ -230,8 +230,8 @@ locals {
       # Plural key: chart >= 2.3.0 renamed keeper.replicaCount -> keeper.replicasCount
       # (matching the CHK CRD field and clickhouse.replicasCount).
       replicasCount = length(var.keeper_availability_zones)
-      storageClass = var.keeper_node_group.storage_class
-      storageSize  = var.keeper_node_group.storage_size
+      storageClass  = var.keeper_node_group.storage_class
+      storageSize   = var.keeper_node_group.storage_size
       nodeSelector = {
         (local.keeper_node_label_key) = local.keeper_node_label_value
       }
