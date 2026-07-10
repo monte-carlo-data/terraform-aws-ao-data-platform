@@ -272,10 +272,10 @@ variable "clickhouse_replica_count" {
   description = <<-EOT
     Number of ClickHouse replicas, passed to the chart as clickhouse.replicasCount.
     TF-owned and defaulted to 1 so that bumping helm.chart_version — to a chart
-    whose own default is or becomes 2 (it is 2 from chart 2.4.0) — never silently
+    whose own default is or becomes 2 (it is 2 from chart 3.0.0) — never silently
     scales replicas against not-yet-converted tables.
 
-    Raising above 1 requires chart_version >= "2.4.0", the replicated-schema
+    Raising above 1 requires chart_version >= "3.0.0", the replicated-schema
     release. On clusters with pre-existing data that is necessary but not
     sufficient: every existing table must additionally have been converted to a
     replicated engine first — raising the count against unconverted tables
@@ -558,7 +558,7 @@ variable "helm" {
     keeper_availability_zones — deploys the chart's default 3-voter Keeper
     ensemble onto the main node pool. Bump the chart version and set the
     topology variables together. The replicated table schema ships at chart
-    2.4.0 — required before raising clickhouse_replica_count above 1 (see that
+    3.0.0 — required before raising clickhouse_replica_count above 1 (see that
     variable for the full conditions).
 
     The module wires the chart's least-privilege ClickHouse user model
