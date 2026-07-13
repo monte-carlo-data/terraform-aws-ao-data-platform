@@ -926,3 +926,82 @@ run "llm_worker_replica_override_zero_renders" {
     error_message = "helm_otel_replica_block must omit replicaCount when opentelemetry_collector.replica_count is null."
   }
 }
+
+# --- networking.control_plane_subnet_ids: guards + control-plane/node split ---
+#
+# The input pins the cluster's control-plane ENI subnets independently of node
+# topology (a cluster's control-plane AZ set is immutable after creation). Its
+# load-bearing invariant is that it influences ONLY the cluster's vpc_config —
+# node-group subnet resolution must keep reading existing_private_subnet_ids
+# unchanged. The node side of that invariant is asserted below on
+# local.effective_private_subnet_ids; the cluster side is a direct passthrough
+# to the upstream module's control_plane_subnet_ids (which coalesces to
+# subnet_ids when empty, so the unset default is byte-identical to the
+# pre-input behavior) — asserting on it would need module.eks in the plan,
+# which this file's scope note excludes.
+
+run "control_plane_subnets_single_entry_rejected" {
+  command = plan
+  variables {
+    # create = false keeps module.eks out of the plan (same technique as the
+    # storage-validation runs): the expected failure is on var.networking,
+    # which doesn't gate module.eks's count, so the baseline create = true
+    # would drag the EKS module's resources into the plan past the failure.
+    cluster = {
+      create                = false
+      name                  = "test-cluster"
+      existing_cluster_name = "test-cluster"
+    }
+    networking = {
+      create_vpc                  = false
+      existing_vpc_id             = "vpc-12345678"
+      existing_private_subnet_ids = ["subnet-aaaa1111", "subnet-bbbb2222"]
+      control_plane_subnet_ids    = ["subnet-aaaa1111"]
+    }
+  }
+  expect_failures = [var.networking]
+}
+
+run "control_plane_subnets_with_created_vpc_rejected" {
+  command = plan
+  variables {
+    # create = false for the same module.eks-avoidance reason as above.
+    cluster = {
+      create                = false
+      name                  = "test-cluster"
+      existing_cluster_name = "test-cluster"
+    }
+    networking = {
+      create_vpc               = true
+      control_plane_subnet_ids = ["subnet-aaaa1111", "subnet-bbbb2222"]
+    }
+  }
+  expect_failures = [var.networking]
+}
+
+# The migration shape: existing_private_subnet_ids widened past the
+# creation-time subnets, control_plane_subnet_ids pinned to them. Node-group
+# subnet resolution must be exactly the widened list — the pin never narrows
+# it, and the node-only subnet never leaks out of it.
+
+run "control_plane_subnets_never_reach_node_resolution" {
+  command = plan
+  variables {
+    cluster = {
+      create                = false
+      name                  = "test-cluster"
+      existing_cluster_name = "test-cluster"
+    }
+    helm = { deploy_charts = false }
+    networking = {
+      create_vpc                  = false
+      existing_vpc_id             = "vpc-12345678"
+      existing_private_subnet_ids = ["subnet-aaaa1111", "subnet-bbbb2222", "subnet-cccc3333"]
+      control_plane_subnet_ids    = ["subnet-aaaa1111", "subnet-bbbb2222"]
+    }
+  }
+  assert {
+    condition     = local.effective_private_subnet_ids == tolist(["subnet-aaaa1111", "subnet-bbbb2222", "subnet-cccc3333"])
+    error_message = "Node-group subnet resolution (effective_private_subnet_ids) must be exactly existing_private_subnet_ids — control_plane_subnet_ids must never narrow or widen it."
+  }
+}

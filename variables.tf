@@ -408,6 +408,17 @@ variable "networking" {
     When create_vpc = true, a new VPC with public and private subnets is created.
     When create_vpc = false, provide existing_vpc_id and existing_private_subnet_ids.
     At least two private subnets in different AZs are required for the managed node group.
+
+    control_plane_subnet_ids mirrors the upstream EKS module input of the same name:
+    when set, it alone populates the cluster's vpc_config (control-plane ENI
+    placement), while existing_private_subnet_ids keeps driving node-group subnet
+    resolution. An EKS cluster's control-plane AZ set is immutable after creation —
+    AWS rejects a vpc_config update whose subnets span a different AZ set, and
+    Terraform only surfaces that at apply time. Worker nodes have no such
+    restriction, so to add node capacity in an AZ the cluster wasn't created in,
+    append the new subnet to existing_private_subnet_ids and pin
+    control_plane_subnet_ids to the creation-time subnets. Empty (default) leaves
+    behavior unchanged: the control plane uses existing_private_subnet_ids.
   EOT
   type = object({
     create_vpc                  = optional(bool, true)
@@ -416,6 +427,7 @@ variable "networking" {
     public_subnet_cidrs         = optional(list(string), ["10.18.4.0/24", "10.18.5.0/24", "10.18.6.0/24"])
     existing_vpc_id             = optional(string, null)
     existing_private_subnet_ids = optional(list(string), [])
+    control_plane_subnet_ids    = optional(list(string), [])
   })
   default = {}
 
@@ -427,6 +439,16 @@ variable "networking" {
   validation {
     condition     = var.networking.create_vpc || length(var.networking.existing_private_subnet_ids) >= 2
     error_message = "At least two existing_private_subnet_ids are required when create_vpc = false."
+  }
+
+  validation {
+    condition     = length(var.networking.control_plane_subnet_ids) == 0 || !var.networking.create_vpc
+    error_message = "control_plane_subnet_ids requires create_vpc = false. When the module creates the VPC, its subnet IDs are unknown until apply, so any value here would reference foreign subnets; module-created clusters place the control plane in every private subnet at creation."
+  }
+
+  validation {
+    condition     = length(var.networking.control_plane_subnet_ids) == 0 || length(var.networking.control_plane_subnet_ids) >= 2
+    error_message = "At least two control_plane_subnet_ids (in different AZs) are required when set — EKS requires the control plane to span at least two AZs."
   }
 }
 

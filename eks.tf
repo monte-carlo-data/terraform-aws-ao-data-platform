@@ -267,6 +267,18 @@ module "eks" {
   vpc_id     = local.effective_vpc_id
   subnet_ids = local.effective_private_subnet_ids
 
+  # Control-plane ENI placement ONLY — node groups read subnet_ids above (main
+  # NG) or the per-AZ locals (CH/keeper NGs), never this. The split exists
+  # because a cluster's control-plane AZ set is immutable after creation: AWS
+  # rejects a vpc_config update spanning a different AZ set (an
+  # InvalidParameterException Terraform only surfaces at apply), while worker
+  # nodes may run in any routed subnet. Widening node topology to a new AZ
+  # therefore appends the subnet to existing_private_subnet_ids and pins this
+  # to the creation-time subnets. Empty (default) falls back to subnet_ids
+  # inside the upstream module (coalescelist) — identical to the behavior
+  # before this input existed.
+  control_plane_subnet_ids = var.networking.control_plane_subnet_ids
+
   tags = var.tags
 }
 
