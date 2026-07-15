@@ -635,9 +635,14 @@ variable "helm" {
     opentelemetry_collector.replica_count and llm_worker.replica_count optionally
     override the replica count of those workloads (default null = the chart controls
     it). Because the collector and llm-worker share this release with ClickHouse, a
-    plain `terraform apply` re-renders and would reset a manually-scaled Deployment;
-    setting these to 0 lets ingest be paused as config that survives an apply (used
-    during the HA migration window), and back to null/non-zero to resume.
+    plain `terraform apply` re-renders and would reset a manually-scaled Deployment.
+    llm_worker.replica_count = 0 pauses the worker as config that survives an apply
+    (set back to null/non-zero to resume). opentelemetry_collector.replica_count = 0
+    is NOT honored by the chart: the module renders replicaCount = 0 into the values,
+    but the chart's collector template treats 0 as unset and deploys its default
+    count. To stop ingest for a maintenance window, act upstream of the collector
+    instead — e.g. deny consumption on the SQS queue feeding the awss3 receiver, or
+    pause OTLP senders. Non-zero collector overrides work as expected.
 
     opentelemetry_collector.awss3_receiver optionally enables the OTel Collector's
     awss3 receiver to ingest OTLP traces from S3 via SQS notifications. When set

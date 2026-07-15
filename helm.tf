@@ -252,6 +252,11 @@ resource "helm_release" "ao_data_platform" {
             "service.beta.kubernetes.io/aws-load-balancer-healthcheck-port"     = "8443"
             "service.beta.kubernetes.io/aws-load-balancer-healthcheck-protocol" = "HTTPS"
             "service.beta.kubernetes.io/aws-load-balancer-healthcheck-path"     = "/ping"
+            # Cross-zone routing: NLBs default it off, and an NLB ENI in an AZ
+            # with no healthy targets black-holes clients that resolve to it —
+            # with one replica per AZ, any single-replica event would become an
+            # external outage. Applied in place by the LB controller.
+            "service.beta.kubernetes.io/aws-load-balancer-attributes" = "load_balancing.cross_zone.enabled=true"
             # Restrict NLB source ranges when configured. Uses the controller
             # annotation rather than spec.loadBalancerSourceRanges (which the
             # chart Service doesn't set, and which would override this if it did).
@@ -278,7 +283,12 @@ resource "helm_release" "ao_data_platform" {
             "service.beta.kubernetes.io/aws-load-balancer-healthcheck-port"     = "13133"
             "service.beta.kubernetes.io/aws-load-balancer-healthcheck-protocol" = "HTTP"
             "service.beta.kubernetes.io/aws-load-balancer-healthcheck-path"     = "/"
-            "external-dns.alpha.kubernetes.io/hostname"                         = var.otel_collector_domain
+            # Cross-zone routing: NLBs default it off, and the collector runs a
+            # single-replica Deployment — without cross-zone, every NLB ENI
+            # outside the pod's AZ is permanently targetless and black-holes
+            # clients that resolve to it. Applied in place by the LB controller.
+            "service.beta.kubernetes.io/aws-load-balancer-attributes" = "load_balancing.cross_zone.enabled=true"
+            "external-dns.alpha.kubernetes.io/hostname"               = var.otel_collector_domain
             # Restrict NLB source ranges when configured. Uses the controller
             # annotation rather than spec.loadBalancerSourceRanges (which the
             # chart Service doesn't set, and which would override this if it did).

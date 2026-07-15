@@ -871,15 +871,18 @@ run "ha_locals_derive_from_az_lists" {
   }
 }
 
-# --- pause-ingest replica overrides: null omits the key, 0 renders 0 ---
+# --- replica overrides: null omits the key, 0 renders 0 ---
 #
-# The collector and llm-worker replica_count overrides are the pause-ingest
-# lever for the HA migration window: null (the default) must OMIT replicaCount
-# so the chart controls the count, while an explicit 0 must render
-# replicaCount = 0 (paused). A truthiness regression that treats 0 as unset
-# would silently no-op the documented pause procedure. Pure locals, so both
-# directions are plan-assertable with charts off; one run per workload, each
-# also pinning the other workload's null-omission.
+# The collector and llm-worker replica_count overrides must render faithfully:
+# null (the default) must OMIT replicaCount so the chart controls the count,
+# while an explicit 0 must render replicaCount = 0. A truthiness regression
+# that treats 0 as unset would silently no-op the llm-worker pause lever.
+# Note the end-to-end behavior differs by workload even though the module-side
+# rendering asserted here is correct for both: the chart's collector template
+# itself treats 0 as unset (deploying its default count), so the collector
+# zero renders but does not pause ingest — see the helm variable docs. Pure
+# locals, so both directions are plan-assertable with charts off; one run per
+# workload, each also pinning the other workload's null-omission.
 
 run "otel_replica_override_zero_renders" {
   command = plan
