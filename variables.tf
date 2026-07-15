@@ -409,6 +409,15 @@ variable "networking" {
     When create_vpc = false, provide existing_vpc_id and existing_private_subnet_ids.
     At least two private subnets in different AZs are required for the managed node group.
 
+    The private subnets (module-created, or existing_private_subnet_ids) also pin
+    NLB placement: the module renders them into the aws-load-balancer-subnets
+    annotation on both LoadBalancer Services, so the LB controller places NLB ENIs
+    there instead of auto-discovering subnets — in a VPC without
+    kubernetes.io/role/internal-elb subnet tags, discovery falls back to a
+    lexicographic per-AZ pick that can land ENIs in unrelated subnets sharing the
+    VPC. The controller accepts at most one subnet per AZ in that annotation, so
+    keep existing_private_subnet_ids to one subnet per AZ.
+
     control_plane_subnet_ids mirrors the upstream EKS module input of the same name:
     when set, it alone populates the cluster's vpc_config (control-plane ENI
     placement), while existing_private_subnet_ids keeps driving node-group subnet

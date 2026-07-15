@@ -257,6 +257,13 @@ resource "helm_release" "ao_data_platform" {
             # with one replica per AZ, any single-replica event would become an
             # external outage. Applied in place by the LB controller.
             "service.beta.kubernetes.io/aws-load-balancer-attributes" = "load_balancing.cross_zone.enabled=true"
+            # Explicit subnet placement: without it the controller auto-discovers
+            # subnets, and in a VPC with no kubernetes.io/role/internal-elb tags
+            # the fallback picks the lexicographically-lowest subnet ID per AZ —
+            # a lottery that can drop NLB ENIs into unrelated subnets sharing
+            # the VPC. Pinning to the module's own private subnets is
+            # deterministic. The controller allows at most one subnet per AZ.
+            "service.beta.kubernetes.io/aws-load-balancer-subnets" = join(",", local.effective_private_subnet_ids)
             # Restrict NLB source ranges when configured. Uses the controller
             # annotation rather than spec.loadBalancerSourceRanges (which the
             # chart Service doesn't set, and which would override this if it did).
@@ -288,7 +295,14 @@ resource "helm_release" "ao_data_platform" {
             # outside the pod's AZ is permanently targetless and black-holes
             # clients that resolve to it. Applied in place by the LB controller.
             "service.beta.kubernetes.io/aws-load-balancer-attributes" = "load_balancing.cross_zone.enabled=true"
-            "external-dns.alpha.kubernetes.io/hostname"               = var.otel_collector_domain
+            # Explicit subnet placement: without it the controller auto-discovers
+            # subnets, and in a VPC with no kubernetes.io/role/internal-elb tags
+            # the fallback picks the lexicographically-lowest subnet ID per AZ —
+            # a lottery that can drop NLB ENIs into unrelated subnets sharing
+            # the VPC. Pinning to the module's own private subnets is
+            # deterministic. The controller allows at most one subnet per AZ.
+            "service.beta.kubernetes.io/aws-load-balancer-subnets" = join(",", local.effective_private_subnet_ids)
+            "external-dns.alpha.kubernetes.io/hostname"            = var.otel_collector_domain
             # Restrict NLB source ranges when configured. Uses the controller
             # annotation rather than spec.loadBalancerSourceRanges (which the
             # chart Service doesn't set, and which would override this if it did).
