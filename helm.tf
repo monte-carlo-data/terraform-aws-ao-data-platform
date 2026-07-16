@@ -208,12 +208,18 @@ resource "helm_release" "ao_data_platform" {
   wait_for_jobs    = true
 
   values = [
-    yamlencode({
+    yamlencode(merge({
       clickhouse = merge({
         hostname     = var.clickhouse_domain
         storageSize  = var.helm.clickhouse.storage_size
         storageClass = var.clickhouse_storage_class
         ttlDays      = var.clickhouse_ttl_days
+        # TF-owned replica count, held at 1 until every existing table has been
+        # converted to a replicated engine (see README: Clustered / HA
+        # topology), so bumping chart_version never silently scales replicas
+        # against not-yet-converted tables, whatever the chart's own default
+        # is or becomes.
+        replicasCount = var.clickhouse_replica_count
         # otel ESO wiring is dual-pathed across the 2.0.0 chart migration: chart
         # < 2.0.0 reads clickhouse.externalSecret; chart >= 2.0.0 reads
         # clickhouse.otel.externalSecret. Both resolve to the same Secrets Manager
@@ -246,6 +252,18 @@ resource "helm_release" "ao_data_platform" {
             "service.beta.kubernetes.io/aws-load-balancer-healthcheck-port"     = "8443"
             "service.beta.kubernetes.io/aws-load-balancer-healthcheck-protocol" = "HTTPS"
             "service.beta.kubernetes.io/aws-load-balancer-healthcheck-path"     = "/ping"
+            # Cross-zone routing: NLBs default it off, and an NLB ENI in an AZ
+            # with no healthy targets black-holes clients that resolve to it —
+            # with one replica per AZ, any single-replica event would become an
+            # external outage. Applied in place by the LB controller.
+            "service.beta.kubernetes.io/aws-load-balancer-attributes" = "load_balancing.cross_zone.enabled=true"
+            # Explicit subnet placement: without it the controller auto-discovers
+            # subnets, and in a VPC with no kubernetes.io/role/internal-elb tags
+            # the fallback picks the lexicographically-lowest subnet ID per AZ —
+            # a lottery that can drop NLB ENIs into unrelated subnets sharing
+            # the VPC. Pinning to the module's own private subnets is
+            # deterministic. The controller allows at most one subnet per AZ.
+            "service.beta.kubernetes.io/aws-load-balancer-subnets" = join(",", local.effective_private_subnet_ids)
             # Restrict NLB source ranges when configured. Uses the controller
             # annotation rather than spec.loadBalancerSourceRanges (which the
             # chart Service doesn't set, and which would override this if it did).
@@ -272,7 +290,19 @@ resource "helm_release" "ao_data_platform" {
             "service.beta.kubernetes.io/aws-load-balancer-healthcheck-port"     = "13133"
             "service.beta.kubernetes.io/aws-load-balancer-healthcheck-protocol" = "HTTP"
             "service.beta.kubernetes.io/aws-load-balancer-healthcheck-path"     = "/"
-            "external-dns.alpha.kubernetes.io/hostname"                         = var.otel_collector_domain
+            # Cross-zone routing: NLBs default it off, and the collector runs a
+            # single-replica Deployment — without cross-zone, every NLB ENI
+            # outside the pod's AZ is permanently targetless and black-holes
+            # clients that resolve to it. Applied in place by the LB controller.
+            "service.beta.kubernetes.io/aws-load-balancer-attributes" = "load_balancing.cross_zone.enabled=true"
+            # Explicit subnet placement: without it the controller auto-discovers
+            # subnets, and in a VPC with no kubernetes.io/role/internal-elb tags
+            # the fallback picks the lexicographically-lowest subnet ID per AZ —
+            # a lottery that can drop NLB ENIs into unrelated subnets sharing
+            # the VPC. Pinning to the module's own private subnets is
+            # deterministic. The controller allows at most one subnet per AZ.
+            "service.beta.kubernetes.io/aws-load-balancer-subnets" = join(",", local.effective_private_subnet_ids)
+            "external-dns.alpha.kubernetes.io/hostname"            = var.otel_collector_domain
             # Restrict NLB source ranges when configured. Uses the controller
             # annotation rather than spec.loadBalancerSourceRanges (which the
             # chart Service doesn't set, and which would override this if it did).
@@ -280,7 +310,7 @@ resource "helm_release" "ao_data_platform" {
             "service.beta.kubernetes.io/load-balancer-source-ranges" = join(",", local.otel_collector_nlb_source_ranges)
           } : {})
         }
-      }, local.helm_otel_resources_block, local.helm_otel_awss3_block)
+      }, local.helm_otel_resources_block, local.helm_otel_awss3_block, local.helm_otel_replica_block)
       llmWorker = merge({
         image = {
           repository = local.llm_worker_image_repository
@@ -294,14 +324,61 @@ resource "helm_release" "ao_data_platform" {
             "eks.amazonaws.com/role-arn" = aws_iam_role.llm_worker.arn
           }
         }
-      }, local.helm_llm_worker_resources_block)
-    })
+      }, local.helm_llm_worker_resources_block, local.helm_llm_worker_replica_block)
+    }, local.helm_keeper_block))
   ]
 
   lifecycle {
     precondition {
       condition     = var.clickhouse_domain != null && var.otel_collector_domain != null
       error_message = "clickhouse_domain and otel_collector_domain are required when helm.deploy_charts = true."
+    }
+
+    # Cross-variable check enforced here rather than as a variable validation:
+    # referencing another variable inside a validation block requires Terraform
+    # >= 1.9, and this module supports >= 1.3. You cannot request more ClickHouse
+    # replicas than there are per-AZ node groups to place them on.
+    precondition {
+      condition     = var.clickhouse_replica_count <= max(length(var.clickhouse_availability_zones), 1)
+      error_message = "clickhouse_replica_count (${var.clickhouse_replica_count}) must not exceed the number of clickhouse_availability_zones (${length(var.clickhouse_availability_zones)}). You cannot place more replicas than there are single-AZ node groups; with no clickhouse_availability_zones set, only 1 replica is valid."
+    }
+
+    # Keeper node groups are only created for module-created clusters
+    # (clickhouse_node_placement_enabled = deploy_charts && cluster.create), but
+    # the keeper helm block (nodeSelector = dedicated=keeper) is emitted whenever
+    # keeper_availability_zones is set. On an existing cluster (create = false) that
+    # pairing would schedule every Keeper voter onto nodes that never exist. Cross-
+    # variable, so a precondition (not a variable validation) for the same >= 1.3
+    # reason as above. (clickhouse_availability_zones has no equivalent trap: on an
+    # existing cluster its scheduling values are gated off via
+    # clickhouse_node_placement_enabled, so the chart gets no CH nodeSelector.)
+    precondition {
+      condition     = length(var.keeper_availability_zones) == 0 || var.cluster.create
+      error_message = "keeper_availability_zones requires cluster.create = true — the per-AZ Keeper node groups are only created for module-created clusters, so on an existing cluster the chart's keeper nodeSelector (dedicated=keeper) would match no nodes and every Keeper voter would stay Pending. For an existing cluster, attach tainted dedicated=keeper node groups out-of-band and wire keeper scheduling via your own helm values."
+    }
+
+    # Retiring the legacy CH node group is only safe once a per-AZ replacement
+    # exists: the chart's ClickHouse nodeSelector (dedicated=clickhouse) is
+    # emitted whenever placement is enabled, so dropping the legacy node group
+    # with no clickhouse_availability_zones set would destroy the only node
+    # group carrying that label while the chart keeps demanding it — the
+    # ClickHouse pod goes Pending with plan and apply both succeeding silently.
+    precondition {
+      condition     = !local.clickhouse_node_placement_enabled || var.manage_legacy_clickhouse_node_group || length(var.clickhouse_availability_zones) > 0
+      error_message = "manage_legacy_clickhouse_node_group = false requires clickhouse_availability_zones to be non-empty — retiring the legacy ClickHouse node group with no per-AZ replacement would remove every node carrying the dedicated=clickhouse label while the chart's ClickHouse nodeSelector still requires it, leaving the ClickHouse pod Pending. Set clickhouse_availability_zones (and complete the migration) before retiring the legacy node group."
+    }
+
+    # The in-place HA migration relocates the running ClickHouse pod onto
+    # clickhouse-<element-0> and reattaches its existing AZ-locked EBS volume,
+    # so element 0 must be the AZ that volume lives in (the AZ
+    # clickhouse_node_group.availability_zone resolves to). A mismatch strands
+    # the volume and leaves the pod Pending with no other plan-time signal.
+    # enforce_clickhouse_volume_az_match = false is the escape hatch for
+    # topologies with no existing volume to preserve (fresh HA stand-up, or a
+    # deliberate re-ingest migration).
+    precondition {
+      condition     = !local.clickhouse_node_placement_enabled || !var.enforce_clickhouse_volume_az_match || length(var.clickhouse_availability_zones) == 0 || var.clickhouse_availability_zones[0] == local.clickhouse_az_resolved
+      error_message = "clickhouse_availability_zones[0] (${length(var.clickhouse_availability_zones) > 0 ? var.clickhouse_availability_zones[0] : "unset"}) must be the AZ of the existing single-instance ClickHouse volume (${local.clickhouse_az_resolved}, resolved from clickhouse_node_group.availability_zone) — the migrating pod reattaches that AZ-locked volume on clickhouse-<element-0>, and a mismatch strands the volume, leaving the pod Pending. Reorder the list (or set clickhouse_node_group.availability_zone). If there is genuinely no existing volume to preserve — a fresh HA stand-up or a deliberate re-ingest — set enforce_clickhouse_volume_az_match = false."
     }
   }
 

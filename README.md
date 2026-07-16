@@ -316,7 +316,7 @@ module "ao_data_platform" {
 
 ### Dedicated ClickHouse node group
 
-The module auto-creates a dedicated single-AZ EKS managed node group for ClickHouse whenever `helm.deploy_charts = true` and `cluster.create = true`. No explicit toggle. This module expects `helm.chart_version >= "1.3.0"` — older chart versions bundle their own OTel/CH anti-affinity rule and structurally don't use the dedicated NG. Nothing in the module gates this at apply time; a 1.2.x caller will apply cleanly and hit the original scheduler deadlock at runtime. When both conditions hold, the module:
+The module auto-creates a dedicated single-AZ EKS managed node group for ClickHouse whenever `helm.deploy_charts = true` and `cluster.create = true`, gated by `manage_legacy_clickhouse_node_group` (default `true`; the flag exists so a migration to the clustered/HA topology can retire this node group via config — see "Clustered / HA topology"). This module expects `helm.chart_version >= "1.3.0"` — older chart versions bundle their own OTel/CH anti-affinity rule and structurally don't use the dedicated NG. Nothing in the module gates this at apply time; a 1.2.x caller will apply cleanly and hit the original scheduler deadlock at runtime. When both conditions hold, the module:
 
 - Creates a second managed node group (one node, single-AZ) pinned to `var.clickhouse_node_group.availability_zone` (or, when null, the first AZ from `data.aws_availability_zones.available`).
 - Applies a `dedicated=clickhouse:NoSchedule` taint to the node group so only pods that tolerate it can land there.
@@ -329,7 +329,7 @@ This pattern enforces scheduling separation between ClickHouse and the controlle
 
 **Upgrade impact from chart < 1.3.0.** Bumping `helm.chart_version` from a 1.2.x release to `>= "1.3.0"` enables this module's dedicated CH NG behavior — the apply creates the dedicated CH NG alongside the existing main NG (main NG stays at its default size of 2; total cluster grows by one node). To opt into a cost-shrunk single-node main pool instead, set `cluster.main_node_group_size = 1` explicitly. **For existing deployments with ClickHouse data to preserve:** set `clickhouse_node_group.availability_zone` to the existing CH PV's AZ before applying, so the dedicated NG lands in the same AZ and the StatefulSet re-attaches the existing EBS volume in place. EBS volumes are AZ-locked and cannot follow the StatefulSet — if the resolved dedicated-NG AZ doesn't match the PV's AZ, the CH pod stays `Pending` and the only forward path is deleting the PVC out-of-band (re-ingest required).
 
-**Operational note — single-replica ClickHouse on a 1-node NG has no HA.** The CH StatefulSet runs as a single replica on the dedicated single-AZ node, with no surge headroom (a maxSurge replica can't land on a different node since the EBS PV is AZ-locked, and the dedicated NG has only one node). The chart's PodDisruptionBudget (`minAvailable: 1`) blocks voluntary `kubectl drain` evictions, but doesn't help during node replacement (EKS AMI rolls bypass PDBs after a grace period; the only replica is evicted with no replacement available). Node-drain operations — including routine EKS AMI rolls of the dedicated NG, node-group resizing, or manual draining — therefore incur ClickHouse downtime for the duration of the pod restart (~30-90s on a healthy node). This is a documented limitation of the single-AZ, single-replica design. Hardening beyond it (CH replication via the operator, or multi-replica with shared storage) is out of scope for this module.
+**Operational note — single-replica ClickHouse on a 1-node NG has no HA.** The CH StatefulSet runs as a single replica on the dedicated single-AZ node, with no surge headroom (a maxSurge replica can't land on a different node since the EBS PV is AZ-locked, and the dedicated NG has only one node). A PodDisruptionBudget cannot protect a single replica: node replacement (EKS AMI rolls force-terminate past PDBs after a grace period) and voluntary drains alike leave the only replica evicted with no standby to serve. Node-drain operations — including routine EKS AMI rolls of the dedicated NG, node-group resizing, or manual draining — therefore incur ClickHouse downtime for the duration of the pod restart (~30-90s on a healthy node). This is a documented limitation of the single-AZ, single-replica design; the clustered/HA topology (see "Clustered / HA topology" below) removes it by running multiple replicas across AZs.
 
 For existing clusters (`cluster.create = false`), the module does not manage the dedicated NG — attach a tainted (`dedicated=clickhouse:NoSchedule`) single-AZ node group to the cluster out-of-band, and pass matching `clickhouse.nodeSelector` + `clickhouse.tolerations` to the chart's ClickHouse pod template via your own helm release values. The `clickhouse_node_group` variable has no effect on this path.
 
@@ -352,6 +352,56 @@ module "ao_data_platform" {
   helm = {
     chart_registry = "oci://123456789012.dkr.ecr.us-east-1.amazonaws.com"
     chart_version  = "1.5.0"
+  }
+}
+```
+
+### Clustered / HA topology
+
+By default the module runs a single ClickHouse instance on one dedicated node group (above). To run ClickHouse in a clustered, highly-available configuration — multiple replicas backed by a ClickHouse Keeper ensemble, spread across availability zones — set the per-AZ topology variables. This requires `helm.chart_version >= "2.3.0"`, the first chart version with Keeper support (an older chart simply ignores the Keeper values, leaving the Keeper node groups empty); the replicated table schema — required to run more than one replica — ships at chart 3.0.0. The converse also matters: on chart >= 2.3.0 Keeper is intrinsic and renders on every install, so **bumping `helm.chart_version` alone — without setting `keeper_availability_zones` — deploys the chart's default 3-voter Keeper ensemble onto the main node pool**; bump the chart version and set the topology variables together. **The topology applies only to module-created clusters (`cluster.create = true`):** on an existing cluster, `keeper_availability_zones` is rejected by a plan-time precondition (the Keeper pods' node selector would match no nodes), and `clickhouse_availability_zones` creates no node groups. For existing clusters, attach tainted per-AZ node groups out-of-band — the same pattern as the dedicated node group above — and wire the scheduling values through your own helm release values.
+
+**Node groups are per-AZ and AZ-pinned.** Each ClickHouse replica and each Keeper voter is a stateful pod backed by an EBS volume, and EBS volumes are AZ-locked — a volume cannot move between zones. So every replica and voter needs a single-AZ node group in its own zone, and placement is driven by **explicit AZ names**, not a positional index into the available-AZ list (which can silently remap "the first AZ" to a different physical zone across applies and strand a volume).
+
+- `clickhouse_availability_zones` — one node group (`clickhouse-<az>`) per entry; the list length is the ceiling for `clickhouse_replica_count`. **Element 0 must be the AZ of the existing ClickHouse volume**, since that is the AZ the running pod stays pinned to. A plan-time precondition enforces the match; when there is genuinely no existing volume to preserve (a fresh HA stand-up, or a deliberate re-ingest migration), set `enforce_clickhouse_volume_az_match = false`.
+- `keeper_availability_zones` — one voter node group (`keeper-<az>`) per entry. Keeper quorum requires an **odd** number of voters across distinct zones: 3 tolerates the loss of one AZ (2 of 3 remain); 1 for dev. The keeper voter count and the chart's `keeper.replicasCount` are both derived from this list, so they cannot drift.
+- `clickhouse_replica_count` — replicas requested from the chart (`clickhouse.replicasCount`). Defaults to `1` and is validated (via a Helm-release precondition) to never exceed the number of `clickhouse_availability_zones`. Raising above `1` requires chart >= 3.0.0 and — on clusters with pre-existing data — tables already converted to replicated engines; against unconverted tables the second replica starts empty instead of as a copy.
+
+**Three AZs is Keeper-driven.** ClickHouse itself needs only two AZs for two replicas; the third exists so the Keeper quorum spans three failure domains. The VPC created by this module already spans three AZs by default (`networking.private_subnet_cidrs` provisions three private subnets), so a 3-AZ Keeper + 2-AZ ClickHouse layout needs no networking change.
+
+**Adding an AZ on an existing VPC: the cluster's AZ set is immutable.** On `create_vpc = false` deployments whose cluster was created with subnets in fewer AZs than the HA topology needs, the extra AZ cannot simply be appended to `networking.existing_private_subnet_ids`: that list also populates the cluster's `vpc_config`, and EKS pins the control-plane AZ set at cluster creation — a later update whose subnets span a different AZ set is rejected (`InvalidParameterException: Provided subnets belong to the AZs 'a,b,c'. But they should belong to the exact set of AZs 'a,b' in which subnets were provided during cluster creation`), and Terraform plans the change as a legal in-place update, only surfacing the error at apply. Worker nodes have no such restriction — a node group can run in any VPC subnet with routing; only control-plane ENI placement is pinned. So widen the node topology instead: append the new AZ's subnet to `existing_private_subnet_ids` **and** set `networking.control_plane_subnet_ids` to the cluster's creation-time subnets, which pins `vpc_config` while the wider list drives node placement. Side effects to expect: widening `existing_private_subnet_ids` **replaces the main node group** (a managed node group's subnet list is immutable, and the replacement is create-before-destroy), while single-AZ node groups — the dedicated ClickHouse node group and the per-AZ HA groups — are unaffected by subnets outside their AZ. It also **extends both NLBs into the new AZ**: the `aws-load-balancer-subnets` annotation renders from the same list, and the LB controller adds the new AZ's ENI in place.
+
+**No autoscaler — capacity is pre-provisioned.** This module does not install a cluster autoscaler, so every AZ a stateful pod lands in must have a node group standing by. When `create_vpc = true`, the AZs you list must be among the first `length(networking.private_subnet_cidrs)` of the region's available AZs — that is where the module places private subnets. A plan-time postcondition rejects any listed AZ that has no matching private subnet.
+
+**Staged, additive rollout.** The topology is designed to be introduced without disrupting a running single instance:
+
+- The per-AZ ClickHouse node groups are created **active** (one node per AZ) as soon as the AZ list is set, symmetric with the Keeper node groups. They come up **empty** — no ClickHouse replica lands on them until `clickhouse_replica_count` is raised — so standing them up ahead of time validates capacity, subnets, AMI, and CSI outside any maintenance window, at the cost of a few idle nodes. (They are not created parked and scaled up later: the underlying EKS managed-node-group module ignores post-creation `desired_size` changes, so a later scale-up would be a silent no-op.)
+- The chart upgrade itself is two-staged: first to 2.3.0 (Keeper support) in the same apply that sets the topology variables, then — with ingest stopped for the window (see the pause note below) — to 3.0.0, whose schema is replicated, before `clickhouse_replica_count` is raised. A running cluster can rest between the two stages indefinitely: chart 2.3.0 with the Keeper ensemble up and a single replica on the existing tables is a fully supported state.
+- `clickhouse_replica_count` stays TF-owned at `1` until you deliberately raise it — this is the sole control over how many replicas run; bumping the chart version alone never scales replicas.
+- `manage_legacy_clickhouse_node_group` (default `true`) keeps the original single-instance node group in place; it is flipped to `false` in a final apply to retire that node group once the replica has moved onto a per-AZ node group. A plan-time precondition rejects the flip while `clickhouse_availability_zones` is empty — that would remove every node carrying the `dedicated=clickhouse` label while the chart's ClickHouse node selector still requires it, leaving the pod `Pending`.
+- `llm_worker.replica_count` (on the `helm` variable) lets the worker be paused as configuration (scaled to `0`) during a maintenance window and resumed afterward, surviving intervening applies. The collector's `opentelemetry_collector.replica_count = 0` is **not** honored by the chart — its template treats `0` as unset and deploys the default count — so stop ingest upstream of the collector instead: deny consumption on the SQS queue feeding the awss3 receiver, or pause OTLP senders.
+
+**Cross-zone NLB routing is enabled** on both the ClickHouse and OTel Collector NLBs (via the `aws-load-balancer-attributes` Service annotation, in every topology). NLBs default cross-zone routing off, in which case an NLB ENI in an AZ with no healthy targets black-holes clients that resolve to it — with one replica per AZ, that turns every routine single-replica event (pod restart, node drain, AMI roll) into a multi-minute external degradation, and for the single-replica collector Deployment it leaves every out-of-AZ ENI permanently targetless. With cross-zone enabled, every ENI forwards to healthy targets in any AZ. Standard AWS inter-AZ data-transfer charges apply to cross-zone-routed connections (negligible at typical telemetry volumes).
+
+**NLB subnet placement is explicit.** Both LoadBalancer Services also carry the `aws-load-balancer-subnets` annotation, pinning NLB ENIs to the module's private subnets (the module-created ones, or `networking.existing_private_subnet_ids`). Without it, the LB controller auto-discovers subnets — and in a VPC with no `kubernetes.io/role/internal-elb` subnet tags, discovery falls back to route-table classification and picks one subnet per AZ by lexicographically-lowest subnet ID: a lottery that can place ENIs in unrelated subnets sharing the VPC and expand the NLB into every AZ the VPC touches. Explicit placement is deterministic and keeps ENIs in subnets the platform owns. The controller accepts **at most one subnet per AZ** in this list. On existing deployments, upgrading to a module version with this annotation makes the controller re-set each NLB's subnets to the annotated list in place; removing an AZ deletes that AZ's ENI and terminates active connections through it — a brief, one-time blip, best scheduled in a quiet window.
+
+```hcl
+module "ao_data_platform" {
+  source  = "monte-carlo-data/ao-data-platform/aws"
+  version = "~> 2.0"
+
+  region                = "us-east-1"
+  otel_collector_domain = "otel.acme.com"
+  clickhouse_domain     = "clickhouse.acme.com"
+
+  # Two ClickHouse replicas across two AZs, backed by a 3-node Keeper ensemble.
+  # Element 0 of clickhouse_availability_zones is the AZ of the existing volume.
+  clickhouse_availability_zones = ["us-east-1a", "us-east-1b"]
+  keeper_availability_zones     = ["us-east-1a", "us-east-1b", "us-east-1c"]
+  clickhouse_replica_count      = 2
+
+  helm = {
+    chart_registry = "oci://123456789012.dkr.ecr.us-east-1.amazonaws.com"
+    chart_version  = "3.0.0" # replicated-schema release (Keeper support arrived in 2.3.0)
   }
 }
 ```
@@ -386,13 +436,21 @@ To use a StorageClass you manage outside this module, set `clickhouse_storage_cl
 | `cluster.endpoint_public_access` | `bool` | `true` | Whether the EKS API server keeps its public endpoint. The private endpoint is always enabled. Set `false` for a private-only control plane — every machine running Terraform/kubectl (CI included) must then reach the API over a private path. See "Restricting the EKS API endpoint". Only applies when `cluster.create = true`. |
 | `cluster.endpoint_public_access_cidrs` | `list(string)` | `["0.0.0.0/0"]` | CIDR blocks allowed to reach the public API endpoint. Include the egress CIDRs of every machine that runs Terraform or kubectl against the cluster. See "Restricting the EKS API endpoint". Only applies when `cluster.create = true`. |
 | `cluster.main_node_group_size` | `number` | `null` (resolves to 2) | Optional explicit size (desired + min) for the main EKS managed node group. When `null` (default), resolves to `2` — keeps a 2-node HA floor on the stateless tier even when the dedicated CH NG is active. Set explicitly to `1` to opt into a cost-shrunk single-node main pool. Validated to the range `[1, 10]` when set; `max_size` stays at 10 for autoscaling burst. |
-| `clickhouse_node_group` | `object` | `{}` (all defaults) | Configuration for the dedicated single-AZ ClickHouse node group. Shape: `{ availability_zone = optional(string), instance_type = optional(string, "r5.xlarge"), use_latest_ami_release_version = optional(bool, false), ami_release_version = optional(string) }`. The dedicated NG is auto-created when `helm.deploy_charts = true` AND `cluster.create = true` — see the "Dedicated ClickHouse node group" section. `availability_zone`: when null, defaults to the first AZ from `data.aws_availability_zones.available` (alphabetical) — override when the ClickHouse PV is in a different AZ (EBS volumes are AZ-locked). `instance_type`: EC2 instance type for the dedicated node; defaults to `r5.xlarge`. `use_latest_ami_release_version`: defaults to `false` — the CH NG is no-drift pinned, so its AMI won't change on an unrelated apply (see "ClickHouse node group AMI"). `ami_release_version`: optional explicit AMI build to pin to (e.g. `"1.35.5-20260527"`); `null` (default) still prevents drift but records no specific build. Has no effect when `cluster.create = false`. |
+| `clickhouse_node_group` | `object` | `{}` (all defaults) | Configuration for the dedicated single-AZ ClickHouse node group. Shape: `{ availability_zone = optional(string), instance_type = optional(string, "r5.xlarge"), use_latest_ami_release_version = optional(bool, false), ami_release_version = optional(string) }`. The dedicated NG is auto-created when `helm.deploy_charts = true` AND `cluster.create = true`, and managed while `manage_legacy_clickhouse_node_group = true` — see the "Dedicated ClickHouse node group" section. `availability_zone`: when null, defaults to the first AZ from `data.aws_availability_zones.available` (alphabetical) — override when the ClickHouse PV is in a different AZ (EBS volumes are AZ-locked). `instance_type`: EC2 instance type for the dedicated node; defaults to `r5.xlarge`. `use_latest_ami_release_version`: defaults to `false` — the CH NG is no-drift pinned, so its AMI won't change on an unrelated apply (see "Pinned node group AMIs"). `ami_release_version`: optional explicit AMI build to pin to (e.g. `"1.35.5-20260527"`); `null` (default) still prevents drift but records no specific build. Has no effect when `cluster.create = false`. |
+| `clickhouse_availability_zones` | `list(string)` | `[]` | Explicit AZ names for the per-AZ ClickHouse node groups of the clustered/HA topology (one `clickhouse-<az>` node group per entry). Empty (default) keeps the single-instance layout. Element 0 must be the AZ of the existing ClickHouse volume (enforced by a plan-time precondition; see `enforce_clickhouse_volume_az_match`). When `create_vpc = true`, entries must be among the first `length(networking.private_subnet_cidrs)` of the region's available AZs. Requires `cluster.create = true` (no node groups are created for existing clusters). See "Clustered / HA topology". |
+| `keeper_availability_zones` | `list(string)` | `[]` | Explicit AZ names for the per-AZ ClickHouse Keeper node groups (one voter per entry). Must be an **odd** count across distinct AZs for quorum (3 typical, 1 for dev). Empty (default) creates no Keeper node groups. The list length is the single source of truth for both the voter node-group count and the chart's `keeper.replicasCount`. Requires `cluster.create = true` — rejected by a plan-time precondition on existing clusters. See "Clustered / HA topology". |
+| `clickhouse_replica_count` | `number` | `1` | ClickHouse replicas requested from the chart (`clickhouse.replicasCount`). TF-owned and defaulted to `1` so a chart-version bump alone never scales replicas; the sole control over replica count. Enforced (via a Helm-release precondition) to be `<= max(length(clickhouse_availability_zones), 1)`. Raising above `1` requires chart >= 3.0.0 and prior conversion of existing tables to replicated engines. |
+| `clickhouse_ha_node_group` | `object` | `{}` (all defaults) | Configuration for the per-AZ ClickHouse node groups (created active, one per `clickhouse_availability_zones` entry). Shape: `{ instance_type = optional(string, "r6i.xlarge"), use_latest_ami_release_version = optional(bool, false), ami_release_version = optional(string) }`. Kept separate from `clickhouse_node_group` so the go-forward instance type differs from the legacy node group without re-typing it (which would roll the running pod). AMI pinning behaves like `clickhouse_node_group`. |
+| `keeper_node_group` | `object` | `{}` (all defaults) | Configuration for the per-AZ Keeper node groups. Shape: `{ instance_type = optional(string, "m6i.large"), storage_size = optional(string, "10Gi"), storage_class = optional(string, "gp3"), use_latest_ami_release_version = optional(bool, false), ami_release_version = optional(string) }`. No `replica_count` field — the voter count is derived from `keeper_availability_zones`. `storage_size`/`storage_class` configure the Keeper PVC (via chart values), not the node root disk. AMI pinned by default. |
+| `enforce_clickhouse_volume_az_match` | `bool` | `true` | Whether a plan-time precondition requires `clickhouse_availability_zones[0]` to match the AZ of the existing single-instance ClickHouse volume (the AZ `clickhouse_node_group.availability_zone` resolves to) — a mismatch would strand the AZ-locked volume during the in-place migration. Set to `false` only when there is no existing volume to preserve (fresh HA stand-up, or a deliberate re-ingest migration). No effect when `clickhouse_availability_zones` is empty or on existing clusters. |
+| `manage_legacy_clickhouse_node_group` | `bool` | `true` | Whether the module manages the legacy single-instance ClickHouse node group. Defaults to `true` (unchanged behavior). Flip to `false` in a post-migration apply to retire the legacy node group via config once the ClickHouse pod has relocated onto a per-AZ node group. Only has an effect when the dedicated CH node group would otherwise be created. A plan-time precondition rejects `false` while `clickhouse_availability_zones` is empty (the ClickHouse pod would be left with no schedulable node). |
 | `networking.create_vpc` | `bool` | `true` | Create a new VPC or use an existing one |
 | `networking.vpc_cidr` | `string` | `"10.18.0.0/16"` | CIDR block for the created VPC. The default is a placeholder meant to be overridden — pick a range that doesn't collide with your existing networks (peering or VPN into a colliding range is painful to retrofit). Only applies when `create_vpc = true` |
 | `networking.private_subnet_cidrs` | `list(string)` | `["10.18.1.0/24", "10.18.2.0/24", "10.18.3.0/24"]` | Private subnet CIDRs for the created VPC; must sit inside `vpc_cidr`. Override together with it |
 | `networking.public_subnet_cidrs` | `list(string)` | `["10.18.4.0/24", "10.18.5.0/24", "10.18.6.0/24"]` | Public subnet CIDRs for the created VPC; must sit inside `vpc_cidr`. Override together with it |
 | `networking.existing_vpc_id` | `string` | `null` | Required when `create_vpc = false` |
-| `networking.existing_private_subnet_ids` | `list(string)` | `[]` | Required when `create_vpc = false` (min 2 subnets in different AZs) |
+| `networking.existing_private_subnet_ids` | `list(string)` | `[]` | Required when `create_vpc = false` (min 2 subnets in different AZs). Drives node-group subnet resolution — and, unless `control_plane_subnet_ids` is set, the cluster's control-plane subnets too. Also rendered into the `aws-load-balancer-subnets` annotation on both LoadBalancer Services, pinning NLB ENI placement; the LB controller accepts at most one subnet per AZ, so keep the list to one subnet per AZ. |
+| `networking.control_plane_subnet_ids` | `list(string)` | `[]` | Subnets for the EKS control-plane ENIs (the cluster's `vpc_config`), passed through to the underlying EKS module's input of the same name. Never influences node-group placement. Empty (default): the control plane uses `existing_private_subnet_ids`, unchanged behavior. Set it to the cluster's creation-time subnets when widening `existing_private_subnet_ids` into a new AZ — a cluster's control-plane AZ set is immutable after creation, so node-only subnets must stay out of `vpc_config`. Requires `create_vpc = false`; min 2 subnets when set. See "Adding an AZ on an existing VPC" under "Clustered / HA topology" |
 | `otel_collector_domain` | `string` | `null` | Domain for the OTel Collector HTTPS NLB endpoint |
 | `clickhouse_domain` | `string` | `null` | Domain for the ClickHouse TCP+TLS NLB endpoint |
 | `clickhouse_nlb_allowed_source_ranges` | `list(string)` | `null` | CIDR ranges permitted to reach the internal ClickHouse NLB. `null` (default) = no restriction (any source that can reach the NLB); `[]` = restricted to the VPC CIDR block(s) only; `["x.x.x.x/n", …]` = VPC CIDR block(s) **plus** the listed ranges. The VPC CIDR is always folded in when a restriction is in effect, so enabling one never locks out in-VPC clients. Enforced via the AWS Load Balancer Controller `load-balancer-source-ranges` annotation. The NLB is internal-scheme, so a listed range is only reachable if a private network path into the VPC already exists (VPN, peering, Transit Gateway, subnet router); adding a CIDR does not by itself create reachability. |
@@ -411,12 +469,14 @@ To use a StorageClass you manage outside this module, set `clickhouse_storage_cl
 | `helm.llm_worker.bedrock_region` | `string` | `null` | AWS region the in-cluster LLM worker targets for Bedrock; defaults to `var.region` when unset |
 | `helm.llm_worker.image_repository` | `string` | `null` | LLM-worker container image repo override. Defaults to deriving from `chart_registry` (same ECR account/region, repo `ao-llm-worker`). |
 | `helm.llm_worker.image_tag` | `string` | `"latest"` | LLM-worker container image tag. |
+| `helm.llm_worker.replica_count` | `number` | `null` | Optional override for the llm-worker replica count. `null` (default) lets the chart control it; set to `0` to pause the worker as configuration that survives an apply (used during a maintenance window). |
 | `helm.clickhouse.resources` | `object` | `null` | Kubernetes resource requests/limits for the ClickHouse pods. Shape: `{ requests = map(string), limits = map(string) }`. Omit to use chart defaults. |
 | `helm.clickhouse.otel.restrict_grants` | `bool` | `false` | Forwards `clickhouse.otel.restrictGrants` to the chart. When `true`, the `otel` ingest user is restricted to `INSERT` on the telemetry source tables only; `false` keeps it broad. **Requires chart version >= 2.0.0** (ignored by older charts). Flip to `true` only after external readers have moved to the `monte_carlo` user. |
 | `helm.clickhouse.admin` | `object` | `null` | Optionally provisions the gated break-glass superuser (`admin`). Shape: `{ enabled = bool }`. When `enabled = true`, a Secrets Manager secret + ExternalSecret pipeline is created and the chart's admin user is enabled (loopback-only by default — reachable only via pod-exec); the password comes from `clickhouse_passwords.admin` (or is auto-generated). When disabled (default), no admin secret is created. **Requires chart version >= 2.0.0.** Omit (or `null`) to disable. |
 | `helm.clickhouse.readonly_user` | `object` | `null` | Optionally provisions a second SELECT-only ClickHouse user (`readonly_user`, profile `readonly`). Shape: `{ enabled = bool }`. When `enabled = true`, a Secrets Manager secret + ExternalSecret pipeline mirroring the otel user is created and the toggle is forwarded to the chart; the password comes from `clickhouse_passwords.readonly_user` (or is auto-generated). **Requires chart version >= 1.2.0.** Omit (or `null`) to disable. |
 | `clickhouse_passwords` | `object` (sensitive) | `{}` (all auto-generated) | Passwords for the ClickHouse SQL users. Shape: `{ admin = optional(string), otel = optional(string), monte_carlo = optional(string), schema_owner = optional(string), llm_worker = optional(string), readonly_user = optional(string) }`. Any field left null is auto-generated. Marked `sensitive`, so caller-supplied values are redacted in plan/apply output and CI logs — supply via a `.tfvars` file or `TF_VAR_clickhouse_passwords`. Stored in Secrets Manager and synced into the cluster by ESO; never passed through Helm values. Values remain readable in Terraform state — protect state accordingly. |
 | `helm.opentelemetry_collector.resources` | `object` | `null` | Kubernetes resource requests/limits for the OTel Collector pods. Same shape as `helm.clickhouse.resources`. Omit to use chart defaults. |
+| `helm.opentelemetry_collector.replica_count` | `number` | `null` | Optional override for the OTel Collector replica count. `null` (default) lets the chart control it. **`0` is not honored by the chart** — its collector template treats `0` as unset and deploys the default count; to stop ingest for a maintenance window, act upstream (deny consumption on the SQS queue feeding the awss3 receiver, or pause OTLP senders). Non-zero overrides work as expected. |
 | `helm.opentelemetry_collector.awss3_receiver` | `object` | `null` | Optional awss3 receiver config for the OTel Collector. When set with `enabled = true`, emits chart values that activate the receiver and appends `awss3` to the trace pipeline, and attaches SQS + S3 read permissions to the otel-collector IRSA role. Shape: `{ enabled = bool, sqs_queue_arn = string, sqs_queue_url = string, sqs_region = optional(string), s3_bucket = string, s3_region = optional(string), s3_prefix = optional(string, "") }`. Omit (or leave `null`) to disable. |
 | `helm.llm_worker.resources` | `object` | `null` | Kubernetes resource requests/limits for the LLM-worker pods. Same shape as `helm.clickhouse.resources`. Omit to use chart defaults. |
 
@@ -440,7 +500,7 @@ To use a StorageClass you manage outside this module, set `clickhouse_storage_cl
 | `clickhouse_schema_owner_credentials_secret_arn` | Secrets Manager ARN for the ClickHouse schema_owner user password |
 | `clickhouse_llm_worker_credentials_secret_arn` | Secrets Manager ARN for the ClickHouse llm_worker user password |
 | `clickhouse_readonly_user_credentials_secret_arn` | Secrets Manager ARN for the password of the ClickHouse SQL user `readonly_user` (profile: readonly, SELECT-only). Null when `helm.clickhouse.readonly_user` is disabled. |
-| `clickhouse_node_group` | Identity of the dedicated ClickHouse node group when active: `{ availability_zone, instance_type, size, label = { key, value }, taint = { key, value, effect } }`. Null when not active. Useful for verifying the resolved AZ during plan/apply review. |
+| `clickhouse_node_group` | Identity of the dedicated ClickHouse node group when active: `{ availability_zone, instance_type, size, label = { key, value }, taint = { key, value, effect } }`. Null when not active (`helm.deploy_charts = false`, `cluster.create = false`, or `manage_legacy_clickhouse_node_group = false`). Useful for verifying the resolved AZ during plan/apply review. |
 
 ## After Deployment
 
@@ -503,45 +563,52 @@ unrelated apply.
    docs for the currently supported list.
 2. Confirm the add-on versions below and your own workloads support the target,
    then bump `kubernetes_version` and apply. The control plane upgrades first;
-   the managed node groups then roll to a matching AMI. The pinned ClickHouse
-   node group is the exception — its AMI must be bumped in the same apply (see
-   [ClickHouse node group AMI](#clickhouse-node-group-ami) below).
+   the managed node groups then roll to a matching AMI. The pinned stateful
+   node groups (ClickHouse and Keeper) are the exception — their AMIs must be
+   bumped in the same apply (see [Pinned node group AMIs](#pinned-node-group-amis)
+   below).
 3. Upgrade on a regular cadence. AWS provides standard support for each minor
    version for a limited window before it moves to (paid) extended support and
    is eventually force-upgraded, so staying within a minor or two of the latest
    avoids a rushed jump.
 
-### ClickHouse node group AMI
+### Pinned node group AMIs
 
-The dedicated ClickHouse node group pins its AMI, while the main node group
-tracks the latest EKS-optimized AMI. This split is deliberate:
+Every stateful node group pins its AMI — the dedicated ClickHouse node group,
+the per-AZ ClickHouse node groups, and the Keeper node groups — while the main
+node group tracks the latest EKS-optimized AMI. This split is deliberate:
 
-- **ClickHouse node group — pinned (`use_latest_ami_release_version = false`, the
-  default).** ClickHouse runs as a single-replica, AZ-locked StatefulSet, so
-  replacing its node is a brief outage — the EBS volume detaches, a new node
-  boots, and the pod reattaches, roughly a couple of minutes with no standby to
-  fail over to. With the upstream EKS default (`use_latest = true`), Terraform
-  re-resolves the node group's AMI to AWS's latest recommended build on *every*
-  apply, so any apply — even one for an unrelated change — can replace the
-  ClickHouse node the moment AWS publishes a new AMI. Pinning removes that
-  trigger: the AMI changes only when you change it.
+- **Stateful node groups — pinned (`use_latest_ami_release_version = false`,
+  the default on `clickhouse_node_group`, `clickhouse_ha_node_group`, and
+  `keeper_node_group`).** These host AZ-locked StatefulSet pods (ClickHouse
+  replicas, Keeper voters), so replacing a node means detaching an EBS volume,
+  booting a node, and reattaching — a disruption to schedule, not to discover.
+  With the upstream EKS default (`use_latest = true`), Terraform re-resolves
+  the node group's AMI to AWS's latest recommended build on *every* apply, so
+  any apply — even one for an unrelated change — could replace these nodes the
+  moment AWS publishes a new AMI; on the clustered topology that could roll
+  every Keeper voter or ClickHouse replica from a single unrelated apply.
+  Pinning removes that trigger: the AMI changes only when you change it.
 - **Main node group — latest (unpinned).** It hosts only stateless workloads,
   which reschedule without downtime, so it keeps AWS's free security
   auto-patching.
 
-`clickhouse_node_group.ami_release_version` is the explicit build to pin to (e.g.
-`"1.35.5-20260527"`). Leaving it `null` (the default) still prevents drift — the
-node keeps whatever AMI it already runs — but records no specific version. Set an
-explicit build to make the pin auditable and to perform deliberate updates.
+`ami_release_version` on each of those variables is the explicit build to pin
+to (e.g. `"1.35.5-20260527"`). Leaving it `null` (the default) still prevents
+drift — nodes keep whatever AMI they already run — but records no specific
+version. Set an explicit build to make the pin auditable and to perform
+deliberate updates.
 
 **Pinning makes AMI patching your responsibility.** AWS will not patch a pinned
 node for you, so:
 
 1. **Update on a schedule** — monthly is a good default, quarterly a sensible
    floor — to pick up kernel / OS / container-runtime security fixes, and
-   out-of-band for a critical node-level CVE. Each update replaces the ClickHouse
-   node once (~2 min), so run it in a maintenance window. The point of pinning is
-   to control *when* that bounce happens, not to patch less often.
+   out-of-band for a critical node-level CVE. Each update replaces the affected
+   nodes (a ~2 min bounce for a single-replica ClickHouse; rolling and
+   availability-preserving on the clustered topology — see below), so run it in
+   a maintenance window. The point of pinning is to control *when* that bounce
+   happens, not to patch less often.
 2. **Don't let the pin go stale.** AWS eventually deprecates and then disables old
    AMI builds; a very old pin can become unlaunchable, which would break node
    replacement and scale-out. A monthly/quarterly cadence keeps you clear of that.
@@ -552,19 +619,36 @@ node for you, so:
      --query Parameter.Value --output text
    ```
 
-To update the AMI, set `clickhouse_node_group.ami_release_version` and apply. The
-node is replaced exactly once and the apply completes even though ClickHouse is a
-single replica behind a PodDisruptionBudget — the module sets
-`force_update_version = true` on this node group for that reason.
+To update an AMI, set the corresponding `ami_release_version` and apply. The
+update mechanics differ deliberately between the node-group classes:
 
-**Kubernetes minor upgrades with a pinned node group.** A node group's Kubernetes
+- **Dedicated (single-instance) ClickHouse node group**
+  (`clickhouse_node_group.ami_release_version`): the node is replaced exactly
+  once, and the apply completes even with a single ClickHouse replica — the
+  module sets `force_update_version = true` on this node group, so the update
+  proceeds past any disruption budget. This is the single-replica downtime
+  documented in the "Dedicated ClickHouse node group" section.
+- **Keeper and per-AZ ClickHouse node groups**
+  (`keeper_node_group.ami_release_version`,
+  `clickhouse_ha_node_group.ami_release_version`): these set
+  `force_update_version = false` — updates evict pods through the eviction API,
+  governed by the operator-created PodDisruptionBudgets (`maxUnavailable: 1`),
+  never force-terminating. Each field covers every node group of its class, so
+  one bump updates (for example) all three Keeper node groups in a single
+  apply; the disruption budget serializes the evictions so at most one voter
+  (or one ClickHouse replica) is down at any moment — the other node-group
+  updates wait and retry rather than proceeding in parallel. Keeper quorum and
+  ClickHouse availability hold throughout.
+
+**Kubernetes minor upgrades with pinned node groups.** A node group's Kubernetes
 version and its AMI build must share a minor — EKS rejects, for example, a
 `1.35.x` AMI on a `1.36` node group. So when you bump `kubernetes_version`, bump
-`clickhouse_node_group.ami_release_version` to a matching-minor build **in the
-same apply**. Do not raise `kubernetes_version` while leaving the ClickHouse pin
-on the old minor — the apply will fail. The module does not expose a per-node-group
-Kubernetes version, so the control plane and the ClickHouse node move together;
-coupling both values in one apply replaces the ClickHouse node once.
+**every pinned `ami_release_version` in use** — `clickhouse_node_group`, and on
+the clustered topology also `clickhouse_ha_node_group` and `keeper_node_group` —
+to a matching-minor build **in the same apply**. Leaving any pinned node group
+on the old minor fails the apply. The module does not expose a per-node-group
+Kubernetes version, so the control plane and all pinned node groups move
+together; coupling the values in one apply replaces each node once.
 
 ### EKS add-ons
 

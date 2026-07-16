@@ -3,6 +3,116 @@ data "aws_eks_cluster" "existing" {
   name  = var.cluster.existing_cluster_name
 }
 
+locals {
+  # Dedicated per-AZ ClickHouse Keeper node groups (one voter per AZ), merged
+  # into the module's eks_managed_node_groups below. Keyed keeper-<az>; the count
+  # is length(keeper_availability_zones) — the same list that drives the chart's
+  # keeper.replicasCount, so voters and node capacity cannot drift. Each is a
+  # single-AZ, tainted (dedicated=keeper) group so only Keeper pods (which carry
+  # the matching toleration, wired in helm.tf) schedule here, kept off the
+  # ClickHouse nodes so a CH node failure can't also drop a voter.
+  keeper_node_groups = local.clickhouse_node_placement_enabled ? {
+    for az in var.keeper_availability_zones : "keeper-${az}" => {
+      instance_types = [var.keeper_node_group.instance_type]
+      min_size       = 1
+      max_size       = 1
+      desired_size   = 1
+      subnet_ids     = local.keeper_subnet_ids_by_az[az]
+
+      # Pin the AMI (no per-apply SSM "latest" lookup), same rationale as the
+      # ClickHouse node group: with N single-AZ voters, an uncontrolled AMI
+      # drift could try to roll all of them at once and lose quorum. Bump
+      # deliberately, one at a time, via keeper_node_group.ami_release_version.
+      use_latest_ami_release_version = var.keeper_node_group.use_latest_ami_release_version
+      ami_release_version            = var.keeper_node_group.ami_release_version
+
+      # force_update_version stays false (the module default): a keeper voter is
+      # part of an HA quorum, so its node drains gracefully behind the chart's
+      # PDB. force = true would force-terminate past the drain timeout, ignoring
+      # the PDB and risking multiple voters down at once — the opposite of what
+      # the legacy single-replica ClickHouse node group needs it for.
+      force_update_version = false
+
+      labels = {
+        (local.keeper_node_label_key) = local.keeper_node_label_value
+      }
+      taints = {
+        dedicated = {
+          key    = local.keeper_node_label_key
+          value  = local.keeper_node_label_value
+          effect = "NO_SCHEDULE"
+        }
+      }
+
+      # Hop limit 1: Keeper calls no AWS APIs (no IRSA), and the EKS-managed
+      # DaemonSets that land here reach IMDS via hostNetwork. Matches the
+      # ClickHouse node group.
+      metadata_options = {
+        http_endpoint               = "enabled"
+        http_tokens                 = "required"
+        http_put_response_hop_limit = 1
+      }
+    }
+  } : {}
+
+  # Dedicated per-AZ ClickHouse node groups for the clustered/HA topology, one
+  # per clickhouse_availability_zones entry (keyed clickhouse-<az>), merged into
+  # eks_managed_node_groups below. They share the SAME dedicated=clickhouse
+  # taint/label as the legacy node group, so at migration a ClickHouse pod
+  # evicted off the legacy node schedules straight onto the matching per-AZ node.
+  #
+  # Created ACTIVE (desired=1), symmetric with the keeper node groups: setting
+  # clickhouse_availability_zones brings the nodes up. They come up EMPTY — no CH
+  # replica lands until clickhouse_replica_count is raised at migration — and sit
+  # idle until then. Set the AZ list shortly before raising the replica count to
+  # bound the idle-node cost; standing the nodes up ahead of the cutover moves
+  # all provisioning risk (capacity, subnets, AMI, EBS CSI) OUTSIDE the
+  # maintenance window. We deliberately do NOT park at desired=0 and scale up on
+  # migration day: the EKS managed-node-group submodule sets
+  # ignore_changes = [scaling_config[0].desired_size], so a later desired_size
+  # bump yields no plan diff and no node — the failure would surface mid-window
+  # with ingest already stopped.
+  #
+  # Instance type comes from clickhouse_ha_node_group (r6i.xlarge) — deliberately
+  # NOT clickhouse_node_group.instance_type, so the legacy node group's type is
+  # never changed (which would roll the live pod).
+  #
+  # AMI pinned like the legacy/keeper node groups; force_update_version stays
+  # false — at RF>=2 a replica drains gracefully behind the PDB, and force would
+  # force-terminate past the drain timeout (ignoring the PDB) and could roll both
+  # single-AZ replicas at once.
+  clickhouse_ha_node_groups = local.clickhouse_node_placement_enabled ? {
+    for az in var.clickhouse_availability_zones : "clickhouse-${az}" => {
+      instance_types = [var.clickhouse_ha_node_group.instance_type]
+      min_size       = 1
+      max_size       = 1
+      desired_size   = 1
+      subnet_ids     = local.clickhouse_subnet_ids_by_az[az]
+
+      use_latest_ami_release_version = var.clickhouse_ha_node_group.use_latest_ami_release_version
+      ami_release_version            = var.clickhouse_ha_node_group.ami_release_version
+      force_update_version           = false
+
+      labels = {
+        (local.clickhouse_node_label_key) = local.clickhouse_node_label_value
+      }
+      taints = {
+        dedicated = {
+          key    = local.clickhouse_node_label_key
+          value  = local.clickhouse_node_label_value
+          effect = "NO_SCHEDULE"
+        }
+      }
+
+      metadata_options = {
+        http_endpoint               = "enabled"
+        http_tokens                 = "required"
+        http_put_response_hop_limit = 1
+      }
+    }
+  } : {}
+}
+
 # -----------------------------------------------------------------------------
 # EKS Cluster (conditional)
 # Creates a new cluster with a managed node group, standard add-ons, and OIDC.
@@ -81,11 +191,18 @@ module "eks" {
         }
       }
     },
-    local.clickhouse_node_placement_enabled ? {
-      # Dedicated single-AZ node group for ClickHouse. The taint blocks any
+    (local.clickhouse_node_placement_enabled && var.manage_legacy_clickhouse_node_group) ? {
+      # Legacy single-AZ node group for ClickHouse. The taint blocks any
       # pod without a matching toleration from scheduling here; the matching
       # toleration is wired into the ClickHouse pod template automatically
       # via the helm_release values block below.
+      #
+      # Gated on manage_legacy_clickhouse_node_group (default true) so it can be
+      # retired via config once the HA migration has relocated the ClickHouse pod
+      # onto a per-AZ clickhouse-<az> node group — no module release needed to
+      # remove it. Otherwise left byte-identical (same r5.xlarge instance type):
+      # re-typing a managed node group replaces its instances, rolling the live
+      # ClickHouse pod, so the go-forward r6i.xlarge lives on the new NGs only.
       clickhouse = {
         instance_types = [var.clickhouse_node_group.instance_type]
         min_size       = 1
@@ -142,11 +259,25 @@ module "eks" {
           http_put_response_hop_limit = 1
         }
       }
-    } : {}
+    } : {},
+    local.keeper_node_groups,
+    local.clickhouse_ha_node_groups,
   )
 
   vpc_id     = local.effective_vpc_id
   subnet_ids = local.effective_private_subnet_ids
+
+  # Control-plane ENI placement ONLY — node groups read subnet_ids above (main
+  # NG) or the per-AZ locals (CH/keeper NGs), never this. The split exists
+  # because a cluster's control-plane AZ set is immutable after creation: AWS
+  # rejects a vpc_config update spanning a different AZ set (an
+  # InvalidParameterException Terraform only surfaces at apply), while worker
+  # nodes may run in any routed subnet. Widening node topology to a new AZ
+  # therefore appends the subnet to existing_private_subnet_ids and pins this
+  # to the creation-time subnets. Empty (default) falls back to subnet_ids
+  # inside the upstream module (coalescelist) — identical to the behavior
+  # before this input existed.
+  control_plane_subnet_ids = var.networking.control_plane_subnet_ids
 
   tags = var.tags
 }

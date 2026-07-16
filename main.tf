@@ -21,6 +21,13 @@ locals {
   clickhouse_node_label_key         = "dedicated"
   clickhouse_node_label_value       = "clickhouse"
 
+  # Keeper node-group label/taint. Mirrors the ClickHouse constants above so the
+  # keeper node groups and the chart's keeper nodeSelector/tolerations cannot
+  # drift. Same "dedicated" key, distinct value → a separate scheduling tenant,
+  # so a ClickHouse node failure can't also remove a Keeper voter.
+  keeper_node_label_key   = "dedicated"
+  keeper_node_label_value = "keeper"
+
   # Resolved AZ for the dedicated CH NG: explicit override, else first
   # AZ from data.aws_availability_zones.available (alphabetical — typically
   # "-1a" for the region).
@@ -45,6 +52,29 @@ locals {
     toset(data.aws_subnets.ch_node_group_az_subnets[0].ids),
     toset(local.effective_private_subnet_ids)
   ))) : []
+
+  # Union of the explicit CH + keeper AZ names — the set of AZs the HA topology
+  # needs a single-AZ subnet for. Drives the per-AZ data.aws_subnets fan-out in
+  # vpc.tf. Empty (no HA node groups) when neither list is set.
+  ha_node_group_azs = distinct(concat(var.clickhouse_availability_zones, var.keeper_availability_zones))
+
+  # Per-AZ subnet lists for the HA node groups, keyed by AZ name. Each is the
+  # AZ's subnets intersected with the cluster's private subnets (excludes any
+  # public subnet in the same AZ). nonsensitive() for the same reason as
+  # clickhouse_node_group_subnet_ids above — the values feed the EKS module's
+  # for_each over node-group subnet_ids. Empty maps when placement is disabled.
+  clickhouse_subnet_ids_by_az = local.clickhouse_node_placement_enabled ? {
+    for az in var.clickhouse_availability_zones : az => nonsensitive(tolist(setintersection(
+      toset(data.aws_subnets.ha_node_group_az_subnets[az].ids),
+      toset(local.effective_private_subnet_ids)
+    )))
+  } : {}
+  keeper_subnet_ids_by_az = local.clickhouse_node_placement_enabled ? {
+    for az in var.keeper_availability_zones : az => nonsensitive(tolist(setintersection(
+      toset(data.aws_subnets.ha_node_group_az_subnets[az].ids),
+      toset(local.effective_private_subnet_ids)
+    )))
+  } : {}
 
   cluster_endpoint       = var.cluster.create ? module.eks[0].cluster_endpoint : data.aws_eks_cluster.existing[0].endpoint
   cluster_ca_certificate = base64decode(var.cluster.create ? module.eks[0].cluster_certificate_authority_data : data.aws_eks_cluster.existing[0].certificate_authority[0].data)
@@ -187,6 +217,43 @@ locals {
       value    = local.clickhouse_node_label_value
       effect   = "NoSchedule"
     }]
+  } : {}
+
+  # Keeper values, merged into the ao-data-platform release at the top level.
+  # Emitted only when keeper_availability_zones is set — opting into the keeper
+  # topology implies a keeper-capable chart (>= 2.3.0, the first version
+  # exposing keeper.*; see the chart_version notes on var.helm in variables.tf).
+  # replicasCount is derived from the AZ-list length so it cannot drift from the
+  # keeper node-group count.
+  helm_keeper_block = length(var.keeper_availability_zones) > 0 ? {
+    keeper = {
+      # Plural key: chart >= 2.3.0 renamed keeper.replicaCount -> keeper.replicasCount
+      # (matching the CHK CRD field and clickhouse.replicasCount).
+      replicasCount = length(var.keeper_availability_zones)
+      storageClass  = var.keeper_node_group.storage_class
+      storageSize   = var.keeper_node_group.storage_size
+      nodeSelector = {
+        (local.keeper_node_label_key) = local.keeper_node_label_value
+      }
+      tolerations = [{
+        key      = local.keeper_node_label_key
+        operator = "Equal"
+        value    = local.keeper_node_label_value
+        effect   = "NoSchedule"
+      }]
+    }
+  } : {}
+
+  # Optional replica-count overrides for the collector and llm-worker. null
+  # (default) omits the key so the chart controls the count; setting it (e.g. 0)
+  # pins the count as config that survives a `helm upgrade` — used to pause and
+  # resume ingest during the HA migration window without a manual kubectl scale
+  # being reset by the next apply.
+  helm_otel_replica_block = var.helm.opentelemetry_collector.replica_count != null ? {
+    replicaCount = var.helm.opentelemetry_collector.replica_count
+  } : {}
+  helm_llm_worker_replica_block = var.helm.llm_worker.replica_count != null ? {
+    replicaCount = var.helm.llm_worker.replica_count
   } : {}
 
   # NLB source-range restriction. Each NLB is restricted only when its
