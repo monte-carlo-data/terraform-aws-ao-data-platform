@@ -63,8 +63,13 @@ resource "aws_iam_role" "otel_collector" {
   }
 }
 
+# One inline policy spans every enabled awss3 receiver (from
+# local.otel_awss3_receivers): resource lists are sorted for plan stability
+# and deduplicated (two receivers may share a bucket — never a queue, which
+# the helm variable validation rejects). With a single enabled receiver the
+# rendered JSON is identical to the policy this module has always attached.
 resource "aws_iam_role_policy" "otel_collector_awss3_receiver" {
-  count = try(var.helm.opentelemetry_collector.awss3_receiver.enabled, false) ? 1 : 0
+  count = length(local.otel_awss3_receivers) > 0 ? 1 : 0
   name  = "awss3-receiver"
   role  = aws_iam_role.otel_collector.id
   policy = jsonencode({
@@ -78,18 +83,18 @@ resource "aws_iam_role_policy" "otel_collector_awss3_receiver" {
           "sqs:GetQueueAttributes",
           "sqs:GetQueueUrl",
         ]
-        Resource = [var.helm.opentelemetry_collector.awss3_receiver.sqs_queue_arn]
+        Resource = sort([for r in values(local.otel_awss3_receivers) : r.sqs_queue_arn])
       },
       {
         Effect   = "Allow"
         Action   = ["s3:GetObject"]
-        Resource = ["arn:aws:s3:::${var.helm.opentelemetry_collector.awss3_receiver.s3_bucket}/${local.awss3_s3_prefix_normalized}*"]
+        Resource = sort(distinct([for r in values(local.otel_awss3_receivers) : "arn:aws:s3:::${r.s3_bucket}/${r.s3_prefix}*"]))
       },
       {
         # Some collector versions probe the bucket region.
         Effect   = "Allow"
         Action   = ["s3:GetBucketLocation"]
-        Resource = ["arn:aws:s3:::${var.helm.opentelemetry_collector.awss3_receiver.s3_bucket}"]
+        Resource = sort(distinct([for r in values(local.otel_awss3_receivers) : "arn:aws:s3:::${r.s3_bucket}"]))
       },
     ]
   })

@@ -1050,6 +1050,37 @@ run "awss3_singular_renders_identically" {
     })
     error_message = "The singular awss3_receiver must render exactly the pre-awss3_receivers shape: bare \"awss3\" component ID, regions coalesced to var.region, prefix normalized to one trailing \"/\", pipeline [\"otlp\", \"awss3\"]."
   }
+  # Same zero-diff contract for IAM: with one enabled receiver the generalized
+  # policy must render byte-identically to the single-receiver policy this
+  # module has always attached (same statement order, single-element lists).
+  assert {
+    condition = aws_iam_role_policy.otel_collector_awss3_receiver[0].policy == jsonencode({
+      Version = "2012-10-17"
+      Statement = [
+        {
+          Effect = "Allow"
+          Action = [
+            "sqs:ReceiveMessage",
+            "sqs:DeleteMessage",
+            "sqs:GetQueueAttributes",
+            "sqs:GetQueueUrl",
+          ]
+          Resource = ["arn:aws:sqs:us-east-1:123456789012:queue-one"]
+        },
+        {
+          Effect   = "Allow"
+          Action   = ["s3:GetObject"]
+          Resource = ["arn:aws:s3:::bucket-one/traces/*"]
+        },
+        {
+          Effect   = "Allow"
+          Action   = ["s3:GetBucketLocation"]
+          Resource = ["arn:aws:s3:::bucket-one"]
+        },
+      ]
+    })
+    error_message = "With a single enabled receiver, the awss3-receiver IAM policy must render byte-identically to the pre-awss3_receivers policy (SQS on the queue ARN, GetObject on <bucket>/<normalized prefix>*, GetBucketLocation on the bucket)."
+  }
 }
 
 run "awss3_map_renders_component_ids" {
@@ -1100,6 +1131,30 @@ run "awss3_map_renders_component_ids" {
   assert {
     condition     = local.helm_otel_awss3_block.config.receivers["awss3/alpha"].s3downloader.s3_prefix == ""
     error_message = "An omitted s3_prefix must render as the empty string (whole-bucket receiver)."
+  }
+  # The single awss3-receiver IAM policy spans every enabled receiver, with
+  # each statement's resource list sorted for plan stability. An empty
+  # normalized prefix must yield a whole-bucket GetObject ARN (<bucket>/*).
+  assert {
+    condition = jsonencode(jsondecode(aws_iam_role_policy.otel_collector_awss3_receiver[0].policy).Statement[0].Resource) == jsonencode([
+      "arn:aws:sqs:us-east-1:123456789012:queue-bravo",
+      "arn:aws:sqs:us-west-2:123456789012:queue-alpha",
+    ])
+    error_message = "The awss3-receiver policy's SQS statement must cover every enabled receiver's queue ARN, sorted."
+  }
+  assert {
+    condition = jsonencode(jsondecode(aws_iam_role_policy.otel_collector_awss3_receiver[0].policy).Statement[1].Resource) == jsonencode([
+      "arn:aws:s3:::bucket-alpha/*",
+      "arn:aws:s3:::bucket-bravo/traces/*",
+    ])
+    error_message = "The awss3-receiver policy's GetObject statement must cover every enabled receiver's <bucket>/<normalized prefix>* ARN, sorted."
+  }
+  assert {
+    condition = jsonencode(jsondecode(aws_iam_role_policy.otel_collector_awss3_receiver[0].policy).Statement[2].Resource) == jsonencode([
+      "arn:aws:s3:::bucket-alpha",
+      "arn:aws:s3:::bucket-bravo",
+    ])
+    error_message = "The awss3-receiver policy's GetBucketLocation statement must cover every enabled receiver's bucket ARN, sorted."
   }
 }
 
@@ -1180,6 +1235,10 @@ run "awss3_disabled_receivers_render_nothing" {
   assert {
     condition     = length(local.helm_otel_awss3_block) == 0
     error_message = "helm_otel_awss3_block must be empty when every awss3 receiver is disabled, so the chart's own collector config is left untouched."
+  }
+  assert {
+    condition     = length(aws_iam_role_policy.otel_collector_awss3_receiver) == 0
+    error_message = "The awss3-receiver IAM policy must not be created when every awss3 receiver is disabled."
   }
 }
 

@@ -119,21 +119,16 @@ locals {
   helm_otel_resources_block = var.helm.opentelemetry_collector.resources != null ? {
     resources = { for k, v in var.helm.opentelemetry_collector.resources : k => v if v != null }
   } : {}
-  # Normalized awss3 S3 prefix: empty string stays empty; any non-empty value
-  # gets exactly one trailing "/". Consumed by both the receiver config and the
-  # IAM resource ARN below — keeps "traces" and "traces/" equivalent, and stops
-  # a bare prefix from over-matching sibling keys (e.g. "traces*" matching
-  # "tracesfoo") in the GetObject resource ARN.
-  awss3_s3_prefix_normalized = try(var.helm.opentelemetry_collector.awss3_receiver.enabled, false) ? (
-    var.helm.opentelemetry_collector.awss3_receiver.s3_prefix == "" ? "" : "${trimsuffix(var.helm.opentelemetry_collector.awss3_receiver.s3_prefix, "/")}/"
-  ) : ""
   # Enabled awss3 receivers normalized into one map keyed by OTel component ID:
   # the deprecated singular form renders under the bare "awss3" ID — identical
   # to how it always rendered — and each awss3_receivers entry under
-  # "awss3/<key>". Regions coalesce to var.region and each S3 prefix gets the
-  # same trailing-"/" normalization as awss3_s3_prefix_normalized above. Single
-  # source of truth for the rendered receiver config, the trace-pipeline
-  # receiver list, and the awss3-receiver IAM policy.
+  # "awss3/<key>". Regions coalesce to var.region. S3 prefixes are normalized —
+  # an empty string stays empty; any non-empty value gets exactly one trailing
+  # "/" — keeping "traces" and "traces/" equivalent, and stopping a bare prefix
+  # from over-matching sibling keys (e.g. "traces*" matching "tracesfoo") in
+  # the IAM GetObject resource ARN. Single source of truth for the rendered
+  # receiver config, the trace-pipeline receiver list, and the awss3-receiver
+  # IAM policy.
   otel_awss3_receivers = {
     for id, r in merge(
       try(var.helm.opentelemetry_collector.awss3_receiver.enabled, false) ? { "awss3" = var.helm.opentelemetry_collector.awss3_receiver } : {},
