@@ -993,6 +993,196 @@ run "awss3_receivers_duplicate_queue_rejected" {
   expect_failures = [var.helm]
 }
 
+# --- awss3 receivers: rendering (pure locals, charts off) ---
+#
+# The normalized receivers map and the rendered helm block read only variables,
+# so the whole rendering contract is plan-assertable with deploy_charts = false
+# (same technique as the replica-override runs above).
+#
+# Back-compat is the acceptance test: the deprecated singular form must render
+# under the bare "awss3" component ID with a ["otlp", "awss3"] pipeline —
+# byte-identical to what the module rendered before awss3_receivers existed —
+# so existing single-receiver deployments see a zero diff on upgrade.
+
+run "awss3_singular_renders_identically" {
+  command = plan
+  variables {
+    cluster = {
+      create                = false
+      name                  = "test-cluster"
+      existing_cluster_name = "test-cluster"
+    }
+    helm = {
+      deploy_charts = false
+      opentelemetry_collector = {
+        awss3_receiver = {
+          enabled       = true
+          sqs_queue_arn = "arn:aws:sqs:us-east-1:123456789012:queue-one"
+          sqs_queue_url = "https://sqs.us-east-1.amazonaws.com/123456789012/queue-one"
+          s3_bucket     = "bucket-one"
+          s3_prefix     = "traces"
+        }
+      }
+    }
+  }
+  assert {
+    # jsonencode on both sides: == on complex values demands exact type match,
+    # and the block local's type reflects its conditional-to-{} construction.
+    # Key order is deterministic (lexical) in jsonencode, so this is a
+    # byte-identical comparison of the rendered structure.
+    condition = jsonencode(local.helm_otel_awss3_block) == jsonencode({
+      config = {
+        receivers = {
+          awss3 = {
+            sqs = {
+              queue_url = "https://sqs.us-east-1.amazonaws.com/123456789012/queue-one"
+              region    = "us-east-1"
+            }
+            s3downloader = {
+              region    = "us-east-1"
+              s3_bucket = "bucket-one"
+              s3_prefix = "traces/"
+            }
+          }
+        }
+        service = { pipelines = { traces = { receivers = ["otlp", "awss3"] } } }
+      }
+    })
+    error_message = "The singular awss3_receiver must render exactly the pre-awss3_receivers shape: bare \"awss3\" component ID, regions coalesced to var.region, prefix normalized to one trailing \"/\", pipeline [\"otlp\", \"awss3\"]."
+  }
+}
+
+run "awss3_map_renders_component_ids" {
+  command = plan
+  variables {
+    cluster = {
+      create                = false
+      name                  = "test-cluster"
+      existing_cluster_name = "test-cluster"
+    }
+    helm = {
+      deploy_charts = false
+      opentelemetry_collector = {
+        awss3_receivers = {
+          bravo = {
+            sqs_queue_arn = "arn:aws:sqs:us-east-1:123456789012:queue-bravo"
+            sqs_queue_url = "https://sqs.us-east-1.amazonaws.com/123456789012/queue-bravo"
+            s3_bucket     = "bucket-bravo"
+            s3_prefix     = "traces/"
+          }
+          alpha = {
+            sqs_queue_arn = "arn:aws:sqs:us-west-2:123456789012:queue-alpha"
+            sqs_queue_url = "https://sqs.us-west-2.amazonaws.com/123456789012/queue-alpha"
+            sqs_region    = "us-west-2"
+            s3_bucket     = "bucket-alpha"
+            s3_region     = "us-west-2"
+          }
+        }
+      }
+    }
+  }
+  assert {
+    condition     = jsonencode(keys(local.helm_otel_awss3_block.config.receivers)) == jsonencode(["awss3/alpha", "awss3/bravo"])
+    error_message = "Each awss3_receivers entry must render under component ID awss3/<key>."
+  }
+  assert {
+    condition     = jsonencode(local.helm_otel_awss3_block.config.service.pipelines.traces.receivers) == jsonencode(["otlp", "awss3/alpha", "awss3/bravo"])
+    error_message = "The traces pipeline must be [\"otlp\"] plus the sorted awss3 component IDs."
+  }
+  assert {
+    condition     = local.helm_otel_awss3_block.config.receivers["awss3/alpha"].sqs.region == "us-west-2" && local.helm_otel_awss3_block.config.receivers["awss3/alpha"].s3downloader.region == "us-west-2"
+    error_message = "Explicit sqs_region / s3_region must render as given (not coalesced to var.region)."
+  }
+  assert {
+    condition     = local.helm_otel_awss3_block.config.receivers["awss3/bravo"].sqs.region == "us-east-1" && local.helm_otel_awss3_block.config.receivers["awss3/bravo"].s3downloader.s3_prefix == "traces/"
+    error_message = "Omitted regions must coalesce to var.region, and an already-slashed prefix must keep exactly one trailing \"/\"."
+  }
+  assert {
+    condition     = local.helm_otel_awss3_block.config.receivers["awss3/alpha"].s3downloader.s3_prefix == ""
+    error_message = "An omitted s3_prefix must render as the empty string (whole-bucket receiver)."
+  }
+}
+
+# Both forms together: the singular keeps its legacy bare ID alongside the
+# map's namespaced IDs — combining them must not rename (and thus restart)
+# the existing receiver.
+
+run "awss3_singular_and_map_render_together" {
+  command = plan
+  variables {
+    cluster = {
+      create                = false
+      name                  = "test-cluster"
+      existing_cluster_name = "test-cluster"
+    }
+    helm = {
+      deploy_charts = false
+      opentelemetry_collector = {
+        awss3_receiver = {
+          enabled       = true
+          sqs_queue_arn = "arn:aws:sqs:us-east-1:123456789012:queue-one"
+          sqs_queue_url = "https://sqs.us-east-1.amazonaws.com/123456789012/queue-one"
+          s3_bucket     = "bucket-one"
+        }
+        awss3_receivers = {
+          charlie = {
+            sqs_queue_arn = "arn:aws:sqs:us-east-1:123456789012:queue-charlie"
+            sqs_queue_url = "https://sqs.us-east-1.amazonaws.com/123456789012/queue-charlie"
+            s3_bucket     = "bucket-charlie"
+            s3_prefix     = "pipelines/otel/traces/"
+          }
+        }
+      }
+    }
+  }
+  assert {
+    condition     = jsonencode(keys(local.helm_otel_awss3_block.config.receivers)) == jsonencode(["awss3", "awss3/charlie"])
+    error_message = "Singular + map must render both receivers: the legacy bare \"awss3\" ID and the namespaced map entry."
+  }
+  assert {
+    condition     = jsonencode(local.helm_otel_awss3_block.config.service.pipelines.traces.receivers) == jsonencode(["otlp", "awss3", "awss3/charlie"])
+    error_message = "The traces pipeline must contain otlp plus both awss3 component IDs, sorted."
+  }
+}
+
+run "awss3_disabled_receivers_render_nothing" {
+  command = plan
+  variables {
+    cluster = {
+      create                = false
+      name                  = "test-cluster"
+      existing_cluster_name = "test-cluster"
+    }
+    helm = {
+      deploy_charts = false
+      opentelemetry_collector = {
+        awss3_receiver = {
+          enabled       = false
+          sqs_queue_arn = "arn:aws:sqs:us-east-1:123456789012:queue-one"
+          sqs_queue_url = "https://sqs.us-east-1.amazonaws.com/123456789012/queue-one"
+          s3_bucket     = "bucket-one"
+        }
+        awss3_receivers = {
+          off = {
+            enabled       = false
+            sqs_queue_arn = "arn:aws:sqs:us-east-1:123456789012:queue-off"
+            sqs_queue_url = "https://sqs.us-east-1.amazonaws.com/123456789012/queue-off"
+            s3_bucket     = "bucket-off"
+          }
+        }
+      }
+    }
+  }
+  assert {
+    condition     = length(local.otel_awss3_receivers) == 0
+    error_message = "Disabled receivers (singular and map entries) must be filtered out of the normalized map."
+  }
+  assert {
+    condition     = length(local.helm_otel_awss3_block) == 0
+    error_message = "helm_otel_awss3_block must be empty when every awss3 receiver is disabled, so the chart's own collector config is left untouched."
+  }
+}
+
 # The dedicated-queue guard also spans the deprecated singular form: a map
 # entry reusing the singular receiver's queue is the same data-loss shape.
 
