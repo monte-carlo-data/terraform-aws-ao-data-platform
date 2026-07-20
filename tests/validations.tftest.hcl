@@ -930,6 +930,102 @@ run "llm_worker_replica_override_zero_renders" {
   }
 }
 
+# --- awss3 receivers: map-key and dedicated-queue validations ---
+#
+# awss3_receivers map keys become OTel component IDs ("awss3/<key>"), so the
+# charset is restricted to alphanumerics, hyphens, and underscores. And every
+# enabled receiver (the deprecated singular included) must consume its own
+# dedicated SQS queue: in SQS mode a receiver deletes messages whose S3
+# records it filtered out, so receivers sharing a queue silently lose
+# notifications — duplicates are rejected at plan time. cluster.create = false
+# keeps module.eks out of the plan (same technique as the runs above).
+
+run "awss3_receivers_invalid_key_rejected" {
+  command = plan
+  variables {
+    cluster = {
+      create                = false
+      name                  = "test-cluster"
+      existing_cluster_name = "test-cluster"
+    }
+    helm = {
+      deploy_charts = false
+      opentelemetry_collector = {
+        awss3_receivers = {
+          "bad/key" = {
+            sqs_queue_arn = "arn:aws:sqs:us-east-1:123456789012:queue-one"
+            sqs_queue_url = "https://sqs.us-east-1.amazonaws.com/123456789012/queue-one"
+            s3_bucket     = "bucket-one"
+          }
+        }
+      }
+    }
+  }
+  expect_failures = [var.helm]
+}
+
+run "awss3_receivers_duplicate_queue_rejected" {
+  command = plan
+  variables {
+    cluster = {
+      create                = false
+      name                  = "test-cluster"
+      existing_cluster_name = "test-cluster"
+    }
+    helm = {
+      deploy_charts = false
+      opentelemetry_collector = {
+        awss3_receivers = {
+          one = {
+            sqs_queue_arn = "arn:aws:sqs:us-east-1:123456789012:shared-queue"
+            sqs_queue_url = "https://sqs.us-east-1.amazonaws.com/123456789012/shared-queue"
+            s3_bucket     = "bucket-one"
+          }
+          two = {
+            sqs_queue_arn = "arn:aws:sqs:us-east-1:123456789012:shared-queue"
+            sqs_queue_url = "https://sqs.us-east-1.amazonaws.com/123456789012/shared-queue"
+            s3_bucket     = "bucket-two"
+          }
+        }
+      }
+    }
+  }
+  expect_failures = [var.helm]
+}
+
+# The dedicated-queue guard also spans the deprecated singular form: a map
+# entry reusing the singular receiver's queue is the same data-loss shape.
+
+run "awss3_singular_and_map_duplicate_queue_rejected" {
+  command = plan
+  variables {
+    cluster = {
+      create                = false
+      name                  = "test-cluster"
+      existing_cluster_name = "test-cluster"
+    }
+    helm = {
+      deploy_charts = false
+      opentelemetry_collector = {
+        awss3_receiver = {
+          enabled       = true
+          sqs_queue_arn = "arn:aws:sqs:us-east-1:123456789012:shared-queue"
+          sqs_queue_url = "https://sqs.us-east-1.amazonaws.com/123456789012/shared-queue"
+          s3_bucket     = "bucket-one"
+        }
+        awss3_receivers = {
+          two = {
+            sqs_queue_arn = "arn:aws:sqs:us-east-1:123456789012:shared-queue"
+            sqs_queue_url = "https://sqs.us-east-1.amazonaws.com/123456789012/shared-queue"
+            s3_bucket     = "bucket-two"
+          }
+        }
+      }
+    }
+  }
+  expect_failures = [var.helm]
+}
+
 # --- networking.control_plane_subnet_ids: guards + control-plane/node split ---
 #
 # The input pins the cluster's control-plane ENI subnets independently of node
