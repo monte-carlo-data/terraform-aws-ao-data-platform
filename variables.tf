@@ -650,7 +650,7 @@ variable "helm" {
     is NOT honored by the chart: the module renders replicaCount = 0 into the values,
     but the chart's collector template treats 0 as unset and deploys its default
     count. To stop ingest for a maintenance window, act upstream of the collector
-    instead — e.g. deny consumption on the SQS queue feeding the awss3 receiver, or
+    instead — e.g. deny consumption on the SQS queues feeding the awss3 receivers, or
     pause OTLP senders. Non-zero collector overrides work as expected.
 
     opentelemetry_collector.awss3_receivers configures OTel Collector awss3

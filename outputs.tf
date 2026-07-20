@@ -35,7 +35,7 @@ output "otel_collector_irsa_role_arn" {
     Pass as the eks.amazonaws.com/role-arn service account annotation when deploying
     the ao-data-platform chart manually (i.e. when helm.deploy_charts = false).
     The role carries no permissions by default; optional inline policies (e.g. SQS +
-    S3 read for the awss3 receiver) are attached when the corresponding helm
+    S3 read for the awss3 receivers) are attached when the corresponding helm
     options are enabled.
   EOT
   value       = aws_iam_role.otel_collector.arn

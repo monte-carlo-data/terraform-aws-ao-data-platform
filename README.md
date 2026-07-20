@@ -191,14 +191,18 @@ module "ao_data_platform" {
 
 `requests` and `limits` are maps keyed by Kubernetes resource name, so any name the chart accepts works (`cpu`, `memory`, `ephemeral-storage`, hugepages, GPUs, etc.). Either map can be omitted independently.
 
-### AWS S3 receiver for the OTel Collector
+### AWS S3 receivers for the OTel Collector
 
-Set `helm.opentelemetry_collector.awss3_receiver` to have the OTel Collector ingest OTLP traces from objects in an S3 bucket, notified via an SQS queue. When `enabled = true`, the module:
+Set `helm.opentelemetry_collector.awss3_receivers` to have the OTel Collector ingest OTLP traces from objects in one or more S3 buckets, each notified via its own SQS queue — one map entry per queue/bucket pair. For every enabled entry, the module:
 
-- Overrides the chart's `awss3` receiver block with the supplied SQS URL/region and S3 bucket/region/prefix, and appends `awss3` to the trace pipeline so the receiver is actually wired up.
-- Attaches an inline policy to the `otel-collector` IRSA role granting `sqs:ReceiveMessage`/`DeleteMessage`/`GetQueueAttributes`/`GetQueueUrl` on the queue and `s3:GetObject`/`GetBucketLocation` on the bucket.
+- Renders an `awss3` receiver with component ID `awss3/<key>`, configured with the supplied SQS URL/region and S3 bucket/region/prefix, and appends it to the trace pipeline so the receiver is actually wired up.
+- Attaches an inline policy to the `otel-collector` IRSA role granting `sqs:ReceiveMessage`/`DeleteMessage`/`GetQueueAttributes`/`GetQueueUrl` on every receiver's queue and `s3:GetObject`/`GetBucketLocation` on every receiver's bucket.
 
-`sqs_region` and `s3_region` default to `var.region` when omitted; `s3_prefix` defaults to `""` (any object in the bucket) and is normalized internally to include a single trailing `/` when non-empty (so `"traces"` and `"traces/"` behave identically). Leave `awss3_receiver` unset (or `null`) to keep the receiver disabled — existing deployments are unaffected.
+**Give each receiver its own dedicated SQS queue — never share a queue.** In SQS mode a receiver fetches whatever object each notification names but filters the records against its own configured bucket/prefix, and it deletes messages whose records were all filtered out — so two receivers sharing one queue destroy each other's notifications. Duplicate `sqs_queue_arn` values across enabled receivers are rejected at plan time. To feed several consumers from one bucket's events, fan the bucket notification out via SNS with a queue per consumer.
+
+Per entry: `enabled` defaults to `true` (set `false` to keep the entry without rendering it); `sqs_region` and `s3_region` default to `var.region`; `s3_prefix` defaults to `""` (any object in the bucket) and is normalized internally to include a single trailing `/` when non-empty (so `"traces"` and `"traces/"` behave identically).
+
+Note: adding, changing, or removing a receiver changes the collector's rendered config, which rolling-restarts the collector Deployment on apply.
 
 ```hcl
 module "ao_data_platform" {
@@ -215,18 +219,22 @@ module "ao_data_platform" {
     chart_version  = "1.5.0"
 
     opentelemetry_collector = {
-      awss3_receiver = {
-        enabled       = true
-        sqs_queue_arn = "arn:aws:sqs:us-east-1:123456789012:otel-traces"
-        sqs_queue_url = "https://sqs.us-east-1.amazonaws.com/123456789012/otel-traces"
-        s3_bucket     = "acme-otel-traces"
-        # sqs_region / s3_region default to var.region
-        # s3_prefix defaults to ""
+      awss3_receivers = {
+        traces = {
+          sqs_queue_arn = "arn:aws:sqs:us-east-1:123456789012:otel-traces"
+          sqs_queue_url = "https://sqs.us-east-1.amazonaws.com/123456789012/otel-traces"
+          s3_bucket     = "acme-otel-traces"
+          # enabled defaults to true
+          # sqs_region / s3_region default to var.region
+          # s3_prefix defaults to ""
+        }
       }
     }
   }
 }
 ```
+
+`helm.opentelemetry_collector.awss3_receiver` (singular) is the **deprecated** single-receiver form: use `awss3_receivers` for new configuration. It continues to work throughout v2.x and renders identically to before — under the bare `awss3` component ID, so existing deployments upgrading the module see a zero diff — and it may be combined with `awss3_receivers` entries. It will only be removed in a future major version.
 
 ### Least-privilege ClickHouse users
 
@@ -378,7 +386,7 @@ By default the module runs a single ClickHouse instance on one dedicated node gr
 - The chart upgrade itself is two-staged: first to 2.3.0 (Keeper support) in the same apply that sets the topology variables, then — with ingest stopped for the window (see the pause note below) — to 3.0.0, whose schema is replicated, before `clickhouse_replica_count` is raised. A running cluster can rest between the two stages indefinitely: chart 2.3.0 with the Keeper ensemble up and a single replica on the existing tables is a fully supported state.
 - `clickhouse_replica_count` stays TF-owned at `1` until you deliberately raise it — this is the sole control over how many replicas run; bumping the chart version alone never scales replicas.
 - `manage_legacy_clickhouse_node_group` (default `true`) keeps the original single-instance node group in place; it is flipped to `false` in a final apply to retire that node group once the replica has moved onto a per-AZ node group. A plan-time precondition rejects the flip while `clickhouse_availability_zones` is empty — that would remove every node carrying the `dedicated=clickhouse` label while the chart's ClickHouse node selector still requires it, leaving the pod `Pending`.
-- `llm_worker.replica_count` (on the `helm` variable) lets the worker be paused as configuration (scaled to `0`) during a maintenance window and resumed afterward, surviving intervening applies. The collector's `opentelemetry_collector.replica_count = 0` is **not** honored by the chart — its template treats `0` as unset and deploys the default count — so stop ingest upstream of the collector instead: deny consumption on the SQS queue feeding the awss3 receiver, or pause OTLP senders.
+- `llm_worker.replica_count` (on the `helm` variable) lets the worker be paused as configuration (scaled to `0`) during a maintenance window and resumed afterward, surviving intervening applies. The collector's `opentelemetry_collector.replica_count = 0` is **not** honored by the chart — its template treats `0` as unset and deploys the default count — so stop ingest upstream of the collector instead: deny consumption on the SQS queues feeding the awss3 receivers, or pause OTLP senders.
 
 **Cross-zone NLB routing is enabled** on both the ClickHouse and OTel Collector NLBs (via the `aws-load-balancer-attributes` Service annotation, in every topology). NLBs default cross-zone routing off, in which case an NLB ENI in an AZ with no healthy targets black-holes clients that resolve to it — with one replica per AZ, that turns every routine single-replica event (pod restart, node drain, AMI roll) into a multi-minute external degradation, and for the single-replica collector Deployment it leaves every out-of-AZ ENI permanently targetless. With cross-zone enabled, every ENI forwards to healthy targets in any AZ. Standard AWS inter-AZ data-transfer charges apply to cross-zone-routed connections (negligible at typical telemetry volumes).
 
@@ -476,8 +484,9 @@ To use a StorageClass you manage outside this module, set `clickhouse_storage_cl
 | `helm.clickhouse.readonly_user` | `object` | `null` | Optionally provisions a second SELECT-only ClickHouse user (`readonly_user`, profile `readonly`). Shape: `{ enabled = bool }`. When `enabled = true`, a Secrets Manager secret + ExternalSecret pipeline mirroring the otel user is created and the toggle is forwarded to the chart; the password comes from `clickhouse_passwords.readonly_user` (or is auto-generated). **Requires chart version >= 1.2.0.** Omit (or `null`) to disable. |
 | `clickhouse_passwords` | `object` (sensitive) | `{}` (all auto-generated) | Passwords for the ClickHouse SQL users. Shape: `{ admin = optional(string), otel = optional(string), monte_carlo = optional(string), schema_owner = optional(string), llm_worker = optional(string), readonly_user = optional(string) }`. Any field left null is auto-generated. Marked `sensitive`, so caller-supplied values are redacted in plan/apply output and CI logs — supply via a `.tfvars` file or `TF_VAR_clickhouse_passwords`. Stored in Secrets Manager and synced into the cluster by ESO; never passed through Helm values. Values remain readable in Terraform state — protect state accordingly. |
 | `helm.opentelemetry_collector.resources` | `object` | `null` | Kubernetes resource requests/limits for the OTel Collector pods. Same shape as `helm.clickhouse.resources`. Omit to use chart defaults. |
-| `helm.opentelemetry_collector.replica_count` | `number` | `null` | Optional override for the OTel Collector replica count. `null` (default) lets the chart control it. **`0` is not honored by the chart** — its collector template treats `0` as unset and deploys the default count; to stop ingest for a maintenance window, act upstream (deny consumption on the SQS queue feeding the awss3 receiver, or pause OTLP senders). Non-zero overrides work as expected. |
-| `helm.opentelemetry_collector.awss3_receiver` | `object` | `null` | Optional awss3 receiver config for the OTel Collector. When set with `enabled = true`, emits chart values that activate the receiver and appends `awss3` to the trace pipeline, and attaches SQS + S3 read permissions to the otel-collector IRSA role. Shape: `{ enabled = bool, sqs_queue_arn = string, sqs_queue_url = string, sqs_region = optional(string), s3_bucket = string, s3_region = optional(string), s3_prefix = optional(string, "") }`. Omit (or leave `null`) to disable. |
+| `helm.opentelemetry_collector.replica_count` | `number` | `null` | Optional override for the OTel Collector replica count. `null` (default) lets the chart control it. **`0` is not honored by the chart** — its collector template treats `0` as unset and deploys the default count; to stop ingest for a maintenance window, act upstream (deny consumption on the SQS queues feeding the awss3 receivers, or pause OTLP senders). Non-zero overrides work as expected. |
+| `helm.opentelemetry_collector.awss3_receivers` | `map(object)` | `{}` | awss3 receivers for the OTel Collector, one entry per SQS-queue/S3-bucket pair. Each enabled entry renders a receiver with component ID `awss3/<key>` appended to the trace pipeline, and the otel-collector IRSA role gets SQS + S3 read permissions covering every enabled receiver. Entry shape: `{ enabled = optional(bool, true), sqs_queue_arn = string, sqs_queue_url = string, sqs_region = optional(string), s3_bucket = string, s3_region = optional(string), s3_prefix = optional(string, "") }`. Keys are restricted to `[a-zA-Z0-9_-]`; every receiver needs its own dedicated queue (duplicate `sqs_queue_arn` values are rejected — see [AWS S3 receivers](#aws-s3-receivers-for-the-otel-collector)). |
+| `helm.opentelemetry_collector.awss3_receiver` | `object` | `null` | **Deprecated** — use `awss3_receivers`. Single-receiver form; keeps working throughout v2.x and renders identically to before (bare `awss3` component ID), may be combined with `awss3_receivers` entries, and will only be removed in a future major version. Shape: as an `awss3_receivers` entry, but `enabled` is required. Omit (or leave `null`) to disable. |
 | `helm.llm_worker.resources` | `object` | `null` | Kubernetes resource requests/limits for the LLM-worker pods. Same shape as `helm.clickhouse.resources`. Omit to use chart defaults. |
 
 ## Outputs
