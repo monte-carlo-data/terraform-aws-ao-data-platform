@@ -664,9 +664,10 @@ variable "helm" {
     internally to include a single trailing "/" when non-empty. Every receiver
     must consume its own dedicated SQS queue: in SQS mode a receiver deletes
     messages whose S3 records it filtered out (bucket/prefix mismatch), so
-    receivers sharing a queue silently lose notifications — give each bucket
-    its own queue and subscribe both to the bucket's notifications (e.g. via
-    SNS fan-out).
+    receivers sharing a queue silently lose notifications — give each receiver
+    its own dedicated queue; to feed several receivers from one bucket's
+    events, fan the bucket's notifications out via SNS with a separate queue
+    per receiver.
 
     opentelemetry_collector.awss3_receiver (singular) is the deprecated
     single-receiver form: use awss3_receivers instead. It continues to work
