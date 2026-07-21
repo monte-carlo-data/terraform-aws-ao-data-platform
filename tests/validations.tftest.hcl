@@ -930,6 +930,351 @@ run "llm_worker_replica_override_zero_renders" {
   }
 }
 
+# --- awss3 receivers: map-key and dedicated-queue validations ---
+#
+# awss3_receivers map keys become OTel component IDs ("awss3/<key>"), so the
+# charset is restricted to alphanumerics, hyphens, and underscores. And every
+# enabled receiver (the deprecated singular included) must consume its own
+# dedicated SQS queue: in SQS mode a receiver deletes messages whose S3
+# records it filtered out, so receivers sharing a queue silently lose
+# notifications — duplicates are rejected at plan time. cluster.create = false
+# keeps module.eks out of the plan (same technique as the runs above).
+
+run "awss3_receivers_invalid_key_rejected" {
+  command = plan
+  variables {
+    cluster = {
+      create                = false
+      name                  = "test-cluster"
+      existing_cluster_name = "test-cluster"
+    }
+    helm = {
+      deploy_charts = false
+      opentelemetry_collector = {
+        awss3_receivers = {
+          "bad/key" = {
+            sqs_queue_arn = "arn:aws:sqs:us-east-1:123456789012:queue-one"
+            sqs_queue_url = "https://sqs.us-east-1.amazonaws.com/123456789012/queue-one"
+            s3_bucket     = "bucket-one"
+          }
+        }
+      }
+    }
+  }
+  expect_failures = [var.helm]
+}
+
+run "awss3_receivers_duplicate_queue_rejected" {
+  command = plan
+  variables {
+    cluster = {
+      create                = false
+      name                  = "test-cluster"
+      existing_cluster_name = "test-cluster"
+    }
+    helm = {
+      deploy_charts = false
+      opentelemetry_collector = {
+        awss3_receivers = {
+          one = {
+            sqs_queue_arn = "arn:aws:sqs:us-east-1:123456789012:shared-queue"
+            sqs_queue_url = "https://sqs.us-east-1.amazonaws.com/123456789012/shared-queue"
+            s3_bucket     = "bucket-one"
+          }
+          two = {
+            sqs_queue_arn = "arn:aws:sqs:us-east-1:123456789012:shared-queue"
+            sqs_queue_url = "https://sqs.us-east-1.amazonaws.com/123456789012/shared-queue"
+            s3_bucket     = "bucket-two"
+          }
+        }
+      }
+    }
+  }
+  expect_failures = [var.helm]
+}
+
+# --- awss3 receivers: rendering (pure locals, charts off) ---
+#
+# The normalized receivers map and the rendered helm block read only variables,
+# so the whole rendering contract is plan-assertable with deploy_charts = false
+# (same technique as the replica-override runs above).
+#
+# Back-compat is the acceptance test: the deprecated singular form must render
+# under the bare "awss3" component ID with a ["otlp", "awss3"] pipeline —
+# byte-identical to what the module rendered before awss3_receivers existed —
+# so existing single-receiver deployments see a zero diff on upgrade.
+
+run "awss3_singular_renders_identically" {
+  command = plan
+  variables {
+    cluster = {
+      create                = false
+      name                  = "test-cluster"
+      existing_cluster_name = "test-cluster"
+    }
+    helm = {
+      deploy_charts = false
+      opentelemetry_collector = {
+        awss3_receiver = {
+          enabled       = true
+          sqs_queue_arn = "arn:aws:sqs:us-east-1:123456789012:queue-one"
+          sqs_queue_url = "https://sqs.us-east-1.amazonaws.com/123456789012/queue-one"
+          s3_bucket     = "bucket-one"
+          s3_prefix     = "traces"
+        }
+      }
+    }
+  }
+  assert {
+    # jsonencode on both sides: == on complex values demands exact type match,
+    # and the block local's type reflects its conditional-to-{} construction.
+    # Key order is deterministic (lexical) in jsonencode, so this is a
+    # byte-identical comparison of the rendered structure.
+    condition = jsonencode(local.helm_otel_awss3_block) == jsonencode({
+      config = {
+        receivers = {
+          awss3 = {
+            sqs = {
+              queue_url = "https://sqs.us-east-1.amazonaws.com/123456789012/queue-one"
+              region    = "us-east-1"
+            }
+            s3downloader = {
+              region    = "us-east-1"
+              s3_bucket = "bucket-one"
+              s3_prefix = "traces/"
+            }
+          }
+        }
+        service = { pipelines = { traces = { receivers = ["otlp", "awss3"] } } }
+      }
+    })
+    error_message = "The singular awss3_receiver must render exactly the pre-awss3_receivers shape: bare \"awss3\" component ID, regions coalesced to var.region, prefix normalized to one trailing \"/\", pipeline [\"otlp\", \"awss3\"]."
+  }
+  # Same zero-diff contract for IAM: with one enabled receiver the generalized
+  # policy must render byte-identically to the single-receiver policy this
+  # module has always attached (same statement order, single-element lists).
+  assert {
+    condition = aws_iam_role_policy.otel_collector_awss3_receiver[0].policy == jsonencode({
+      Version = "2012-10-17"
+      Statement = [
+        {
+          Effect = "Allow"
+          Action = [
+            "sqs:ReceiveMessage",
+            "sqs:DeleteMessage",
+            "sqs:GetQueueAttributes",
+            "sqs:GetQueueUrl",
+          ]
+          Resource = ["arn:aws:sqs:us-east-1:123456789012:queue-one"]
+        },
+        {
+          Effect   = "Allow"
+          Action   = ["s3:GetObject"]
+          Resource = ["arn:aws:s3:::bucket-one/traces/*"]
+        },
+        {
+          Effect   = "Allow"
+          Action   = ["s3:GetBucketLocation"]
+          Resource = ["arn:aws:s3:::bucket-one"]
+        },
+      ]
+    })
+    error_message = "With a single enabled receiver, the awss3-receiver IAM policy must render byte-identically to the pre-awss3_receivers policy (SQS on the queue ARN, GetObject on <bucket>/<normalized prefix>*, GetBucketLocation on the bucket)."
+  }
+}
+
+run "awss3_map_renders_component_ids" {
+  command = plan
+  variables {
+    cluster = {
+      create                = false
+      name                  = "test-cluster"
+      existing_cluster_name = "test-cluster"
+    }
+    helm = {
+      deploy_charts = false
+      opentelemetry_collector = {
+        awss3_receivers = {
+          bravo = {
+            sqs_queue_arn = "arn:aws:sqs:us-east-1:123456789012:queue-bravo"
+            sqs_queue_url = "https://sqs.us-east-1.amazonaws.com/123456789012/queue-bravo"
+            s3_bucket     = "bucket-bravo"
+            s3_prefix     = "traces/"
+          }
+          alpha = {
+            sqs_queue_arn = "arn:aws:sqs:us-west-2:123456789012:queue-alpha"
+            sqs_queue_url = "https://sqs.us-west-2.amazonaws.com/123456789012/queue-alpha"
+            sqs_region    = "us-west-2"
+            s3_bucket     = "bucket-alpha"
+            s3_region     = "us-west-2"
+          }
+        }
+      }
+    }
+  }
+  assert {
+    condition     = jsonencode(keys(local.helm_otel_awss3_block.config.receivers)) == jsonencode(["awss3/alpha", "awss3/bravo"])
+    error_message = "Each awss3_receivers entry must render under component ID awss3/<key>."
+  }
+  assert {
+    condition     = jsonencode(local.helm_otel_awss3_block.config.service.pipelines.traces.receivers) == jsonencode(["otlp", "awss3/alpha", "awss3/bravo"])
+    error_message = "The traces pipeline must be [\"otlp\"] plus the sorted awss3 component IDs."
+  }
+  assert {
+    condition     = local.helm_otel_awss3_block.config.receivers["awss3/alpha"].sqs.region == "us-west-2" && local.helm_otel_awss3_block.config.receivers["awss3/alpha"].s3downloader.region == "us-west-2"
+    error_message = "Explicit sqs_region / s3_region must render as given (not coalesced to var.region)."
+  }
+  assert {
+    condition     = local.helm_otel_awss3_block.config.receivers["awss3/bravo"].sqs.region == "us-east-1" && local.helm_otel_awss3_block.config.receivers["awss3/bravo"].s3downloader.s3_prefix == "traces/"
+    error_message = "Omitted regions must coalesce to var.region, and an already-slashed prefix must keep exactly one trailing \"/\"."
+  }
+  assert {
+    condition     = local.helm_otel_awss3_block.config.receivers["awss3/alpha"].s3downloader.s3_prefix == ""
+    error_message = "An omitted s3_prefix must render as the empty string (whole-bucket receiver)."
+  }
+  # The single awss3-receiver IAM policy spans every enabled receiver, with
+  # each statement's resource list sorted for plan stability. An empty
+  # normalized prefix must yield a whole-bucket GetObject ARN (<bucket>/*).
+  assert {
+    condition = jsonencode(jsondecode(aws_iam_role_policy.otel_collector_awss3_receiver[0].policy).Statement[0].Resource) == jsonencode([
+      "arn:aws:sqs:us-east-1:123456789012:queue-bravo",
+      "arn:aws:sqs:us-west-2:123456789012:queue-alpha",
+    ])
+    error_message = "The awss3-receiver policy's SQS statement must cover every enabled receiver's queue ARN, sorted."
+  }
+  assert {
+    condition = jsonencode(jsondecode(aws_iam_role_policy.otel_collector_awss3_receiver[0].policy).Statement[1].Resource) == jsonencode([
+      "arn:aws:s3:::bucket-alpha/*",
+      "arn:aws:s3:::bucket-bravo/traces/*",
+    ])
+    error_message = "The awss3-receiver policy's GetObject statement must cover every enabled receiver's <bucket>/<normalized prefix>* ARN, sorted."
+  }
+  assert {
+    condition = jsonencode(jsondecode(aws_iam_role_policy.otel_collector_awss3_receiver[0].policy).Statement[2].Resource) == jsonencode([
+      "arn:aws:s3:::bucket-alpha",
+      "arn:aws:s3:::bucket-bravo",
+    ])
+    error_message = "The awss3-receiver policy's GetBucketLocation statement must cover every enabled receiver's bucket ARN, sorted."
+  }
+}
+
+# Both forms together: the singular keeps its legacy bare ID alongside the
+# map's namespaced IDs — combining them must not rename (and thus restart)
+# the existing receiver.
+
+run "awss3_singular_and_map_render_together" {
+  command = plan
+  variables {
+    cluster = {
+      create                = false
+      name                  = "test-cluster"
+      existing_cluster_name = "test-cluster"
+    }
+    helm = {
+      deploy_charts = false
+      opentelemetry_collector = {
+        awss3_receiver = {
+          enabled       = true
+          sqs_queue_arn = "arn:aws:sqs:us-east-1:123456789012:queue-one"
+          sqs_queue_url = "https://sqs.us-east-1.amazonaws.com/123456789012/queue-one"
+          s3_bucket     = "bucket-one"
+        }
+        awss3_receivers = {
+          charlie = {
+            sqs_queue_arn = "arn:aws:sqs:us-east-1:123456789012:queue-charlie"
+            sqs_queue_url = "https://sqs.us-east-1.amazonaws.com/123456789012/queue-charlie"
+            s3_bucket     = "bucket-charlie"
+            s3_prefix     = "pipelines/otel/traces/"
+          }
+        }
+      }
+    }
+  }
+  assert {
+    condition     = jsonencode(keys(local.helm_otel_awss3_block.config.receivers)) == jsonencode(["awss3", "awss3/charlie"])
+    error_message = "Singular + map must render both receivers: the legacy bare \"awss3\" ID and the namespaced map entry."
+  }
+  assert {
+    condition     = jsonencode(local.helm_otel_awss3_block.config.service.pipelines.traces.receivers) == jsonencode(["otlp", "awss3", "awss3/charlie"])
+    error_message = "The traces pipeline must contain otlp plus both awss3 component IDs, sorted."
+  }
+}
+
+run "awss3_disabled_receivers_render_nothing" {
+  command = plan
+  variables {
+    cluster = {
+      create                = false
+      name                  = "test-cluster"
+      existing_cluster_name = "test-cluster"
+    }
+    helm = {
+      deploy_charts = false
+      opentelemetry_collector = {
+        awss3_receiver = {
+          enabled       = false
+          sqs_queue_arn = "arn:aws:sqs:us-east-1:123456789012:queue-one"
+          sqs_queue_url = "https://sqs.us-east-1.amazonaws.com/123456789012/queue-one"
+          s3_bucket     = "bucket-one"
+        }
+        awss3_receivers = {
+          off = {
+            enabled       = false
+            sqs_queue_arn = "arn:aws:sqs:us-east-1:123456789012:queue-off"
+            sqs_queue_url = "https://sqs.us-east-1.amazonaws.com/123456789012/queue-off"
+            s3_bucket     = "bucket-off"
+          }
+        }
+      }
+    }
+  }
+  assert {
+    condition     = length(local.otel_awss3_receivers) == 0
+    error_message = "Disabled receivers (singular and map entries) must be filtered out of the normalized map."
+  }
+  assert {
+    condition     = length(local.helm_otel_awss3_block) == 0
+    error_message = "helm_otel_awss3_block must be empty when every awss3 receiver is disabled, so the chart's own collector config is left untouched."
+  }
+  assert {
+    condition     = length(aws_iam_role_policy.otel_collector_awss3_receiver) == 0
+    error_message = "The awss3-receiver IAM policy must not be created when every awss3 receiver is disabled."
+  }
+}
+
+# The dedicated-queue guard also spans the deprecated singular form: a map
+# entry reusing the singular receiver's queue is the same data-loss shape.
+
+run "awss3_singular_and_map_duplicate_queue_rejected" {
+  command = plan
+  variables {
+    cluster = {
+      create                = false
+      name                  = "test-cluster"
+      existing_cluster_name = "test-cluster"
+    }
+    helm = {
+      deploy_charts = false
+      opentelemetry_collector = {
+        awss3_receiver = {
+          enabled       = true
+          sqs_queue_arn = "arn:aws:sqs:us-east-1:123456789012:shared-queue"
+          sqs_queue_url = "https://sqs.us-east-1.amazonaws.com/123456789012/shared-queue"
+          s3_bucket     = "bucket-one"
+        }
+        awss3_receivers = {
+          two = {
+            sqs_queue_arn = "arn:aws:sqs:us-east-1:123456789012:shared-queue"
+            sqs_queue_url = "https://sqs.us-east-1.amazonaws.com/123456789012/shared-queue"
+            s3_bucket     = "bucket-two"
+          }
+        }
+      }
+    }
+  }
+  expect_failures = [var.helm]
+}
+
 # --- networking.control_plane_subnet_ids: guards + control-plane/node split ---
 #
 # The input pins the cluster's control-plane ENI subnets independently of node

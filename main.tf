@@ -119,35 +119,50 @@ locals {
   helm_otel_resources_block = var.helm.opentelemetry_collector.resources != null ? {
     resources = { for k, v in var.helm.opentelemetry_collector.resources : k => v if v != null }
   } : {}
-  # Normalized awss3 S3 prefix: empty string stays empty; any non-empty value
-  # gets exactly one trailing "/". Consumed by both the receiver config and the
-  # IAM resource ARN below — keeps "traces" and "traces/" equivalent, and stops
-  # a bare prefix from over-matching sibling keys (e.g. "traces*" matching
-  # "tracesfoo") in the GetObject resource ARN.
-  awss3_s3_prefix_normalized = try(var.helm.opentelemetry_collector.awss3_receiver.enabled, false) ? (
-    var.helm.opentelemetry_collector.awss3_receiver.s3_prefix == "" ? "" : "${trimsuffix(var.helm.opentelemetry_collector.awss3_receiver.s3_prefix, "/")}/"
-  ) : ""
-  # awss3 receiver override. Empty when disabled; helm-merged into the chart's
-  # opentelemetry-collector values when enabled. The pipelines.traces.receivers
-  # list MUST mirror the chart's default list plus "awss3" — helm replaces lists
-  # wholesale. If the chart adds a third trace receiver in a future version,
-  # update this list.
-  helm_otel_awss3_block = try(var.helm.opentelemetry_collector.awss3_receiver.enabled, false) ? {
+  # Enabled awss3 receivers normalized into one map keyed by OTel component ID:
+  # the deprecated singular form renders under the bare "awss3" ID — identical
+  # to how it always rendered — and each awss3_receivers entry under
+  # "awss3/<key>". Regions coalesce to var.region. S3 prefixes are normalized —
+  # an empty string stays empty; any non-empty value gets exactly one trailing
+  # "/" — keeping "traces" and "traces/" equivalent, and stopping a bare prefix
+  # from over-matching sibling keys (e.g. "traces*" matching "tracesfoo") in
+  # the IAM GetObject resource ARN. Single source of truth for the rendered
+  # receiver config, the trace-pipeline receiver list, and the awss3-receiver
+  # IAM policy.
+  otel_awss3_receivers = {
+    for id, r in merge(
+      try(var.helm.opentelemetry_collector.awss3_receiver.enabled, false) ? { "awss3" = var.helm.opentelemetry_collector.awss3_receiver } : {},
+      { for name, m in var.helm.opentelemetry_collector.awss3_receivers : "awss3/${name}" => m if m.enabled },
+      ) : id => {
+      sqs_queue_arn = r.sqs_queue_arn
+      sqs_queue_url = r.sqs_queue_url
+      sqs_region    = coalesce(r.sqs_region, var.region)
+      s3_bucket     = r.s3_bucket
+      s3_region     = coalesce(r.s3_region, var.region)
+      s3_prefix     = r.s3_prefix == "" ? "" : "${trimsuffix(r.s3_prefix, "/")}/"
+    }
+  }
+  # awss3 receivers override. Empty when no receiver is enabled; helm-merged
+  # into the chart's opentelemetry-collector values otherwise. The
+  # pipelines.traces.receivers list MUST mirror the chart's default list plus
+  # our awss3 component IDs — helm replaces lists wholesale. If the chart adds
+  # another default trace receiver in a future version, update this list.
+  helm_otel_awss3_block = length(local.otel_awss3_receivers) > 0 ? {
     config = {
       receivers = {
-        awss3 = {
+        for id, r in local.otel_awss3_receivers : id => {
           sqs = {
-            queue_url = var.helm.opentelemetry_collector.awss3_receiver.sqs_queue_url
-            region    = coalesce(var.helm.opentelemetry_collector.awss3_receiver.sqs_region, var.region)
+            queue_url = r.sqs_queue_url
+            region    = r.sqs_region
           }
           s3downloader = {
-            region    = coalesce(var.helm.opentelemetry_collector.awss3_receiver.s3_region, var.region)
-            s3_bucket = var.helm.opentelemetry_collector.awss3_receiver.s3_bucket
-            s3_prefix = local.awss3_s3_prefix_normalized
+            region    = r.s3_region
+            s3_bucket = r.s3_bucket
+            s3_prefix = r.s3_prefix
           }
         }
       }
-      service = { pipelines = { traces = { receivers = ["otlp", "awss3"] } } }
+      service = { pipelines = { traces = { receivers = concat(["otlp"], sort(keys(local.otel_awss3_receivers))) } } }
     }
   } : {}
   helm_llm_worker_resources_block = var.helm.llm_worker.resources != null ? {

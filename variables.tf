@@ -650,17 +650,31 @@ variable "helm" {
     is NOT honored by the chart: the module renders replicaCount = 0 into the values,
     but the chart's collector template treats 0 as unset and deploys its default
     count. To stop ingest for a maintenance window, act upstream of the collector
-    instead — e.g. deny consumption on the SQS queue feeding the awss3 receiver, or
+    instead — e.g. deny consumption on the SQS queues feeding the awss3 receivers, or
     pause OTLP senders. Non-zero collector overrides work as expected.
 
-    opentelemetry_collector.awss3_receiver optionally enables the OTel Collector's
-    awss3 receiver to ingest OTLP traces from S3 via SQS notifications. When set
-    with enabled = true, the module overrides the chart's awss3 receiver config
-    with the supplied SQS/S3 values, appends "awss3" to the trace pipeline, and
-    attaches an inline SQS + S3 read policy to the otel-collector IRSA role.
-    sqs_region and s3_region default to var.region; s3_prefix defaults to ""
-    and is normalized internally to include a single trailing "/" when non-empty.
-    Leave null (or omit) to keep the receiver disabled.
+    opentelemetry_collector.awss3_receivers configures OTel Collector awss3
+    receivers that ingest OTLP traces from S3 via SQS notifications — one map
+    entry per SQS-queue/S3-bucket pair. Each entry renders a receiver with
+    component ID "awss3/<key>" appended to the trace pipeline, and the module
+    attaches an inline SQS + S3 read policy covering every enabled receiver to
+    the otel-collector IRSA role. Per entry: enabled defaults to true (set
+    false to keep the entry without rendering it); sqs_region and s3_region
+    default to var.region; s3_prefix defaults to "" and is normalized
+    internally to include a single trailing "/" when non-empty. Every receiver
+    must consume its own dedicated SQS queue: in SQS mode a receiver deletes
+    messages whose S3 records it filtered out (bucket/prefix mismatch), so
+    receivers sharing a queue silently lose notifications — give each receiver
+    its own dedicated queue; to feed several receivers from one bucket's
+    events, fan the bucket's notifications out via SNS with a separate queue
+    per receiver.
+
+    opentelemetry_collector.awss3_receiver (singular) is the deprecated
+    single-receiver form: use awss3_receivers instead. It continues to work
+    throughout v2.x and renders identically to before — under the bare "awss3"
+    component ID — and may be combined with awss3_receivers entries; it will
+    only be removed in a future major version. Unlike map entries, its enabled
+    flag is required. Leave null (or omit) to keep it disabled.
   EOT
   type = object({
     deploy_charts                        = optional(bool, true)
@@ -703,6 +717,15 @@ variable "helm" {
         s3_region     = optional(string, null)
         s3_prefix     = optional(string, "")
       }), null)
+      awss3_receivers = optional(map(object({
+        enabled       = optional(bool, true)
+        sqs_queue_arn = string
+        sqs_queue_url = string
+        sqs_region    = optional(string, null)
+        s3_bucket     = string
+        s3_region     = optional(string, null)
+        s3_prefix     = optional(string, "")
+      })), {})
     }), {})
 
     llm_worker = optional(object({
@@ -731,6 +754,22 @@ variable "helm" {
   validation {
     condition     = !var.helm.deploy_charts || var.helm.chart_version != null
     error_message = "helm.chart_version is required when deploy_charts = true."
+  }
+
+  validation {
+    condition     = alltrue([for name, r in var.helm.opentelemetry_collector.awss3_receivers : can(regex("^[a-zA-Z0-9_-]+$", name))])
+    error_message = "helm.opentelemetry_collector.awss3_receivers keys may only contain alphanumeric characters, hyphens, and underscores — each key becomes the OTel component ID \"awss3/<key>\" in the rendered collector config."
+  }
+
+  validation {
+    condition = length(distinct(concat(
+      try(var.helm.opentelemetry_collector.awss3_receiver.enabled, false) ? [var.helm.opentelemetry_collector.awss3_receiver.sqs_queue_arn] : [],
+      [for r in values(var.helm.opentelemetry_collector.awss3_receivers) : r.sqs_queue_arn if r.enabled],
+      ))) == length(concat(
+      try(var.helm.opentelemetry_collector.awss3_receiver.enabled, false) ? [var.helm.opentelemetry_collector.awss3_receiver.sqs_queue_arn] : [],
+      [for r in values(var.helm.opentelemetry_collector.awss3_receivers) : r.sqs_queue_arn if r.enabled],
+    ))
+    error_message = "Every enabled awss3 receiver (helm.opentelemetry_collector.awss3_receiver and awss3_receivers entries) must consume its own dedicated SQS queue — duplicate sqs_queue_arn values are rejected. In SQS mode each receiver deletes messages whose S3 records it filtered out, so receivers sharing a queue silently lose notifications."
   }
 }
 
