@@ -476,7 +476,7 @@ To use a StorageClass you manage outside this module, set `clickhouse_storage_cl
 | `helm.install_external_dns` | `bool` | `true` | Skip if external-dns is already installed |
 | `helm.llm_worker.bedrock_region` | `string` | `null` | AWS region the in-cluster LLM worker targets for Bedrock; defaults to `var.region` when unset |
 | `helm.llm_worker.image_repository` | `string` | `null` | LLM-worker container image repo override. Defaults to deriving from `chart_registry` (same ECR account/region, repo `ao-llm-worker`). |
-| `helm.llm_worker.image_tag` | `string` | `"latest"` | LLM-worker container image tag. |
+| `helm.llm_worker.image_tag` | `string` | `"latest-aws"` | LLM-worker container image tag. Pin to a released tag (e.g. `1.1.0-aws`) for production. |
 | `helm.llm_worker.replica_count` | `number` | `null` | Optional override for the llm-worker replica count. `null` (default) lets the chart control it; set to `0` to pause the worker as configuration that survives an apply (used during a maintenance window). |
 | `helm.clickhouse.resources` | `object` | `null` | Kubernetes resource requests/limits for the ClickHouse pods. Shape: `{ requests = map(string), limits = map(string) }`. Omit to use chart defaults. |
 | `helm.clickhouse.otel.restrict_grants` | `bool` | `false` | Forwards `clickhouse.otel.restrictGrants` to the chart. When `true`, the `otel` ingest user is restricted to `INSERT` on the telemetry source tables only; `false` keeps it broad. **Requires chart version >= 2.0.0** (ignored by older charts). Flip to `true` only after external readers have moved to the `monte_carlo` user. |
