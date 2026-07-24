@@ -633,7 +633,8 @@ variable "helm" {
 
     llm_worker.image_repository overrides the LLM-worker container image repo;
     defaults to deriving from chart_registry (same ECR account/region, repo
-    "ao-llm-worker"). llm_worker.image_tag pins the image tag; defaults to "latest".
+    "ao-llm-worker"). llm_worker.image_tag pins the image tag; defaults to
+    "latest-aws". Pin to a released tag (e.g. "1.1.0-aws") for production.
 
     clickhouse.resources, opentelemetry_collector.resources, and llm_worker.resources
     are optional Kubernetes resource requests/limits passed through to the chart for
@@ -732,7 +733,7 @@ variable "helm" {
       replica_count    = optional(number, null)
       bedrock_region   = optional(string, null)
       image_repository = optional(string, null)
-      image_tag        = optional(string, "latest")
+      image_tag        = optional(string, "latest-aws")
       resources = optional(object({
         requests = optional(map(string), null)
         limits   = optional(map(string), null)
