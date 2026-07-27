@@ -2099,3 +2099,62 @@ run "trace_export_outputs_null_when_unset" {
     error_message = "With the block unset, all six trace-export outputs must be null."
   }
 }
+
+# --- trace_export_ingest: CMK branch (paired with the no-CMK pins above) ---
+#
+# The no-CMK direction is already pinned byte-identically by
+# trace_export_default_encryption_is_sse_s3 (SSE-S3, Bucket Keys off), the
+# three-statement collector policy in trace_export_receiver_injected_and_
+# rendered, and the one-statement writer policy in trace_export_writer_role_
+# trust_and_policy. This run asserts the other direction: a caller-supplied
+# CMK must flip the bucket to SSE-KMS with Bucket Keys and add exactly the
+# matching KMS statements to the collector (Decrypt) and writer
+# (GenerateDataKey/Encrypt) policies.
+
+run "trace_export_cmk_widens_encryption_and_policies" {
+  command = plan
+  variables {
+    cluster = {
+      create                = false
+      name                  = "test-cluster"
+      existing_cluster_name = "test-cluster"
+    }
+    trace_export_ingest = {
+      dc_execution_role_arn = "arn:aws:iam::210987654321:role/writer-caller"
+      external_id           = "external-id-value"
+      kms_key_arn           = "arn:aws:kms:us-east-1:123456789012:key/11111111-2222-3333-4444-555555555555"
+    }
+  }
+  assert {
+    condition = (
+      tolist(aws_s3_bucket_server_side_encryption_configuration.trace_export_ingest[0].rule)[0].apply_server_side_encryption_by_default[0].sse_algorithm == "aws:kms" &&
+      tolist(aws_s3_bucket_server_side_encryption_configuration.trace_export_ingest[0].rule)[0].apply_server_side_encryption_by_default[0].kms_master_key_id == "arn:aws:kms:us-east-1:123456789012:key/11111111-2222-3333-4444-555555555555" &&
+      tolist(aws_s3_bucket_server_side_encryption_configuration.trace_export_ingest[0].rule)[0].bucket_key_enabled == true
+    )
+    error_message = "With a CMK the ingest bucket must use SSE-KMS on that key with S3 Bucket Keys enabled."
+  }
+  assert {
+    condition = jsonencode(jsondecode(aws_iam_role_policy.otel_collector_awss3_receiver[0].policy).Statement[3]) == jsonencode({
+      Effect   = "Allow"
+      Action   = ["kms:Decrypt"]
+      Resource = ["arn:aws:kms:us-east-1:123456789012:key/11111111-2222-3333-4444-555555555555"]
+    })
+    error_message = "With a CMK the collector policy must gain a fourth statement: kms:Decrypt on exactly that key."
+  }
+  assert {
+    condition     = length(jsondecode(aws_iam_role_policy.otel_collector_awss3_receiver[0].policy).Statement) == 4
+    error_message = "With a CMK the collector policy must contain exactly four statements (the three standard ones plus kms:Decrypt)."
+  }
+  assert {
+    condition = jsonencode(jsondecode(aws_iam_role_policy.trace_export_writer[0].policy).Statement[1]) == jsonencode({
+      Effect   = "Allow"
+      Action   = ["kms:GenerateDataKey", "kms:Encrypt"]
+      Resource = ["arn:aws:kms:us-east-1:123456789012:key/11111111-2222-3333-4444-555555555555"]
+    })
+    error_message = "With a CMK the writer policy must gain a second statement: kms:GenerateDataKey/kms:Encrypt on exactly that key."
+  }
+  assert {
+    condition     = length(jsondecode(aws_iam_role_policy.trace_export_writer[0].policy).Statement) == 2
+    error_message = "With a CMK the writer policy must contain exactly two statements (prefix-scoped PutObject plus the KMS grant)."
+  }
+}
