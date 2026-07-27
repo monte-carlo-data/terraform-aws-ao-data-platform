@@ -1567,3 +1567,95 @@ run "trace_export_bucket_name_override_accepted" {
     error_message = "The prefix default must be \"traces/\"."
   }
 }
+
+# --- trace_export_ingest: zero-diff pins (block unset) ---
+#
+# Authored BEFORE the receiver-injection and IAM wiring changes land, against
+# the shipped rendering, so they prove back-compat against what existing
+# deployments actually run — not against the new code's own output. With the
+# block unset (explicitly null here, documenting the contract) every
+# trace-export local is inert, the gated caller-identity data source is not
+# read, and the receiver map / rendered helm block / collector policy are
+# byte-identical to the pre-feature shapes pinned in the awss3 runs above.
+
+run "trace_export_unset_is_inert" {
+  command = plan
+  variables {
+    cluster = {
+      create                = false
+      name                  = "test-cluster"
+      existing_cluster_name = "test-cluster"
+    }
+    trace_export_ingest = null
+  }
+  assert {
+    condition     = local.trace_export_ingest_enabled == false
+    error_message = "trace_export_ingest_enabled must be false when the block is unset."
+  }
+  assert {
+    condition = (
+      local.trace_export_ingest_prefix == null &&
+      local.trace_export_ingest_bucket == null &&
+      local.trace_export_ingest_bucket_arn == null &&
+      local.trace_export_ingest_queue_name == null &&
+      local.trace_export_ingest_queue_arn == null &&
+      local.trace_export_ingest_queue_url == null
+    )
+    error_message = "Every trace-export name/ARN/URL local must be null when the block is unset."
+  }
+  assert {
+    condition     = length(data.aws_caller_identity.trace_export_ingest) == 0
+    error_message = "The caller-identity data source must not be read when the block is unset."
+  }
+  assert {
+    condition     = jsonencode(local.otel_awss3_receivers) == jsonencode({})
+    error_message = "With no receivers configured and trace_export_ingest unset, the normalized receiver map must be empty."
+  }
+  assert {
+    condition     = jsonencode(local.helm_otel_awss3_block) == jsonencode({})
+    error_message = "With no receivers configured and trace_export_ingest unset, the rendered awss3 helm block must be empty."
+  }
+  assert {
+    condition     = length(aws_iam_role_policy.otel_collector_awss3_receiver) == 0
+    error_message = "With no receivers configured and trace_export_ingest unset, no awss3-receiver IAM policy may be created."
+  }
+}
+
+run "trace_export_unset_leaves_receiver_map_untouched" {
+  command = plan
+  variables {
+    cluster = {
+      create                = false
+      name                  = "test-cluster"
+      existing_cluster_name = "test-cluster"
+    }
+    trace_export_ingest = null
+    helm = {
+      deploy_charts = false
+      opentelemetry_collector = {
+        awss3_receiver = {
+          enabled       = true
+          sqs_queue_arn = "arn:aws:sqs:us-east-1:123456789012:queue-one"
+          sqs_queue_url = "https://sqs.us-east-1.amazonaws.com/123456789012/queue-one"
+          s3_bucket     = "bucket-one"
+          s3_prefix     = "traces"
+        }
+        awss3_receivers = {
+          extra = {
+            sqs_queue_arn = "arn:aws:sqs:us-east-1:123456789012:queue-two"
+            sqs_queue_url = "https://sqs.us-east-1.amazonaws.com/123456789012/queue-two"
+            s3_bucket     = "bucket-two"
+          }
+        }
+      }
+    }
+  }
+  # Pin the injection point itself: with the block unset, the normalized map
+  # must contain exactly the caller-configured component IDs — nothing
+  # synthesized. (The byte-identical render/IAM pins for these entries live in
+  # the awss3 runs above and run in this same suite.)
+  assert {
+    condition     = jsonencode(sort(keys(local.otel_awss3_receivers))) == jsonencode(["awss3", "awss3/extra"])
+    error_message = "With trace_export_ingest unset, the normalized awss3 receiver map must contain exactly the caller-configured entries — no synthesized trace-export entry."
+  }
+}
