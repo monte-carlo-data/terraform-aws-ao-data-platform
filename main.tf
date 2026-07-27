@@ -293,3 +293,37 @@ locals {
 
 data "aws_partition" "current" {}
 data "aws_availability_zones" "available" {}
+
+# Read only when the trace-export ingest block is set — the account ID feeds
+# the default ingest bucket name and the constructed queue ARN/URL below.
+data "aws_caller_identity" "trace_export_ingest" {
+  count = var.trace_export_ingest != null ? 1 : 0
+}
+
+# --- Trace-export ingest (var.trace_export_ingest) ---
+# Bucket and queue names are derived deterministically here — never read back
+# from resource attributes — so everything downstream (receiver entry, queue
+# policy, collector/writer IAM, outputs) is known at plan time; the ARNs and
+# queue URL are string-built from the same name locals. All null when the
+# block is unset, keeping the unset plan identical to previous releases.
+locals {
+  trace_export_ingest_enabled = var.trace_export_ingest != null
+
+  # Same normalization as awss3-receiver prefixes above: exactly one trailing
+  # "/" — keeping "traces" and "traces/" equivalent and stopping a bare prefix
+  # from over-matching sibling keys in prefix-scoped IAM resource ARNs.
+  trace_export_ingest_prefix = local.trace_export_ingest_enabled ? "${trimsuffix(var.trace_export_ingest.prefix, "/")}/" : null
+
+  # Bucket names are globally unique, so the default carries the account ID;
+  # region-scoped resources otherwise use effective_cluster_name (see the
+  # naming notes at the top of this file).
+  trace_export_ingest_bucket = local.trace_export_ingest_enabled ? coalesce(
+    var.trace_export_ingest.bucket_name,
+    "${local.effective_cluster_name}-trace-export-ingest-${data.aws_caller_identity.trace_export_ingest[0].account_id}",
+  ) : null
+  trace_export_ingest_bucket_arn = local.trace_export_ingest_enabled ? "arn:${data.aws_partition.current.partition}:s3:::${local.trace_export_ingest_bucket}" : null
+
+  trace_export_ingest_queue_name = local.trace_export_ingest_enabled ? "${local.effective_cluster_name}-trace-export-ingest" : null
+  trace_export_ingest_queue_arn  = local.trace_export_ingest_enabled ? "arn:${data.aws_partition.current.partition}:sqs:${var.region}:${data.aws_caller_identity.trace_export_ingest[0].account_id}:${local.trace_export_ingest_queue_name}" : null
+  trace_export_ingest_queue_url  = local.trace_export_ingest_enabled ? "https://sqs.${var.region}.${data.aws_partition.current.dns_suffix}/${data.aws_caller_identity.trace_export_ingest[0].account_id}/${local.trace_export_ingest_queue_name}" : null
+}

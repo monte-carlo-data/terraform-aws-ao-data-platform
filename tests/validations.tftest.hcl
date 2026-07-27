@@ -63,6 +63,25 @@ mock_provider "aws" {
       certificate_authority = [{ data = "dGVzdC1jYQ==" }]
     }
   }
+
+  # The trace-export-ingest locals string-build ARNs/URLs from the partition
+  # and the caller account ID so they stay plan-known (byte-assertable) under
+  # this mock. Deterministic values here keep those asserts stable. The
+  # caller-identity data source only exists when trace_export_ingest is set —
+  # the override is inert for every other run.
+  override_data {
+    target = data.aws_partition.current
+    values = {
+      partition  = "aws"
+      dns_suffix = "amazonaws.com"
+    }
+  }
+  override_data {
+    target = data.aws_caller_identity.trace_export_ingest[0]
+    values = {
+      account_id = "123456789012"
+    }
+  }
 }
 
 mock_provider "helm" {}
@@ -1351,5 +1370,200 @@ run "control_plane_subnets_never_reach_node_resolution" {
   assert {
     condition     = local.effective_private_subnet_ids == tolist(["subnet-aaaa1111", "subnet-bbbb2222", "subnet-cccc3333"])
     error_message = "Node-group subnet resolution (effective_private_subnet_ids) must be exactly existing_private_subnet_ids — control_plane_subnet_ids must never narrow or widen it."
+  }
+}
+
+# --- trace_export_ingest: variable validations ---
+#
+# The block is optional (null default); every validation is a no-op when it
+# is unset. Set, the rejection paths below fire at plan time: the trusted
+# execution-role ARN must carry a literal account ID with wildcards confined
+# to the role-name portion (that pattern is the sole principal restriction in
+# the writer role's trust policy), the external ID needs a minimum length,
+# the prefix must be well-formed "/"-separated segments, and the lifecycle
+# needs at least one day. cluster.create = false keeps module.eks out of the
+# plan (same technique as the awss3 runs above).
+
+run "trace_export_dc_role_arn_malformed_rejected" {
+  command = plan
+  variables {
+    cluster = {
+      create                = false
+      name                  = "test-cluster"
+      existing_cluster_name = "test-cluster"
+    }
+    trace_export_ingest = {
+      dc_execution_role_arn = "not-an-arn"
+      external_id           = "external-id-value"
+    }
+  }
+  expect_failures = [var.trace_export_ingest]
+}
+
+run "trace_export_dc_role_arn_wildcard_account_rejected" {
+  command = plan
+  variables {
+    cluster = {
+      create                = false
+      name                  = "test-cluster"
+      existing_cluster_name = "test-cluster"
+    }
+    trace_export_ingest = {
+      dc_execution_role_arn = "arn:aws:iam::*:role/writer-caller"
+      external_id           = "external-id-value"
+    }
+  }
+  expect_failures = [var.trace_export_ingest]
+}
+
+run "trace_export_dc_role_arn_wildcard_only_name_rejected" {
+  command = plan
+  variables {
+    cluster = {
+      create                = false
+      name                  = "test-cluster"
+      existing_cluster_name = "test-cluster"
+    }
+    trace_export_ingest = {
+      dc_execution_role_arn = "arn:aws:iam::123456789012:role/*"
+      external_id           = "external-id-value"
+    }
+  }
+  expect_failures = [var.trace_export_ingest]
+}
+
+run "trace_export_external_id_too_short_rejected" {
+  command = plan
+  variables {
+    cluster = {
+      create                = false
+      name                  = "test-cluster"
+      existing_cluster_name = "test-cluster"
+    }
+    trace_export_ingest = {
+      dc_execution_role_arn = "arn:aws:iam::123456789012:role/writer-caller"
+      external_id           = "short"
+    }
+  }
+  expect_failures = [var.trace_export_ingest]
+}
+
+run "trace_export_prefix_leading_slash_rejected" {
+  command = plan
+  variables {
+    cluster = {
+      create                = false
+      name                  = "test-cluster"
+      existing_cluster_name = "test-cluster"
+    }
+    trace_export_ingest = {
+      dc_execution_role_arn = "arn:aws:iam::123456789012:role/writer-caller"
+      external_id           = "external-id-value"
+      prefix                = "/traces/"
+    }
+  }
+  expect_failures = [var.trace_export_ingest]
+}
+
+run "trace_export_prefix_empty_segment_rejected" {
+  command = plan
+  variables {
+    cluster = {
+      create                = false
+      name                  = "test-cluster"
+      existing_cluster_name = "test-cluster"
+    }
+    trace_export_ingest = {
+      dc_execution_role_arn = "arn:aws:iam::123456789012:role/writer-caller"
+      external_id           = "external-id-value"
+      prefix                = "traces//tenant"
+    }
+  }
+  expect_failures = [var.trace_export_ingest]
+}
+
+run "trace_export_lifecycle_days_zero_rejected" {
+  command = plan
+  variables {
+    cluster = {
+      create                = false
+      name                  = "test-cluster"
+      existing_cluster_name = "test-cluster"
+    }
+    trace_export_ingest = {
+      dc_execution_role_arn = "arn:aws:iam::123456789012:role/writer-caller"
+      external_id           = "external-id-value"
+      lifecycle_days        = 0
+    }
+  }
+  expect_failures = [var.trace_export_ingest]
+}
+
+# --- trace_export_ingest: accepted-path locals (pure variables, charts off) ---
+#
+# The name/normalization locals read only variables plus the overridden
+# partition/caller-identity data sources, so the derived names, ARNs, and
+# queue URL are plan-assertable. The multi-segment prefix is the C-contract
+# acceptance case: a "/"-separated prefix must pass validation and normalize
+# to exactly one trailing "/" — later phases scope the notification filter,
+# IAM grants, and receiver entry to this same local.
+
+run "trace_export_multisegment_prefix_accepted" {
+  command = plan
+  variables {
+    cluster = {
+      create                = false
+      name                  = "test-cluster"
+      existing_cluster_name = "test-cluster"
+    }
+    trace_export_ingest = {
+      dc_execution_role_arn = "arn:aws:iam::210987654321:role/writer-caller-*"
+      external_id           = "external-id-value"
+      prefix                = "traces/abc123"
+    }
+  }
+  assert {
+    condition     = local.trace_export_ingest_prefix == "traces/abc123/"
+    error_message = "A multi-segment prefix must pass validation and normalize to exactly one trailing \"/\"."
+  }
+  assert {
+    condition     = local.trace_export_ingest_bucket == "test-cluster-trace-export-ingest-123456789012"
+    error_message = "The default ingest bucket name must be <cluster-name>-trace-export-ingest-<account-id>."
+  }
+  assert {
+    condition     = local.trace_export_ingest_bucket_arn == "arn:aws:s3:::test-cluster-trace-export-ingest-123456789012"
+    error_message = "The ingest bucket ARN must be string-built from the derived bucket name (plan-known, never a resource attribute)."
+  }
+  assert {
+    condition     = local.trace_export_ingest_queue_arn == "arn:aws:sqs:us-east-1:123456789012:test-cluster-trace-export-ingest"
+    error_message = "The ingest queue ARN must be string-built from the derived queue name (plan-known, never a resource attribute)."
+  }
+  assert {
+    condition     = local.trace_export_ingest_queue_url == "https://sqs.us-east-1.amazonaws.com/123456789012/test-cluster-trace-export-ingest"
+    error_message = "The ingest queue URL must be string-built from the derived queue name (plan-known, never a resource attribute)."
+  }
+}
+
+run "trace_export_bucket_name_override_accepted" {
+  command = plan
+  variables {
+    cluster = {
+      create                = false
+      name                  = "test-cluster"
+      existing_cluster_name = "test-cluster"
+    }
+    trace_export_ingest = {
+      dc_execution_role_arn = "arn:aws:iam::210987654321:role/writer-caller"
+      external_id           = "external-id-value"
+      bucket_name           = "my-custom-ingest-bucket"
+    }
+  }
+  assert {
+    condition     = local.trace_export_ingest_bucket == "my-custom-ingest-bucket"
+    error_message = "bucket_name must override the derived default ingest bucket name."
+  }
+  assert {
+    condition     = local.trace_export_ingest_prefix == "traces/"
+    error_message = "The prefix default must be \"traces/\"."
   }
 }

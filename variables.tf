@@ -774,6 +774,88 @@ variable "helm" {
   }
 }
 
+# --- Trace Export Ingest ---
+
+variable "trace_export_ingest" {
+  description = <<-EOT
+    Optional trace-export ingest leg. When set, the module provisions the
+    resources an external trace producer needs to deliver OTLP trace files
+    into this deployment's collector: a dedicated S3 ingest bucket with a
+    short object lifecycle, an SQS queue wired to the bucket's object-created
+    notifications, an awss3 receiver consuming that queue, and a writer IAM
+    role an external execution role can assume (external-ID guarded) to
+    upload trace files. Leave null (the default) to create none of this —
+    unset, the module plans identically to previous releases.
+
+    dc_execution_role_arn is the external execution role trusted to assume
+    the writer role. It accepts an exact role ARN or a wildcard pattern in
+    the role-NAME portion only (e.g. "arn:aws:iam::123456789012:role/etl-*")
+    so the external role can be re-provisioned without re-applying this
+    module. The account ID must be literal — it anchors the trust policy's
+    principal — and the pattern is the effective principal boundary within
+    that account, so keep it as narrow as possible.
+
+    external_id is the sts:ExternalId condition value baked into the writer
+    role's trust policy (confused-deputy guard). Supply the value issued by
+    the system driving the export; minimum length 8. It is echoed back via
+    the sensitive trace_export_external_id output.
+
+    agent_role_arn optionally grants one additional role s3:PutObject on the
+    ingest prefix via the bucket policy — for producers that write directly
+    instead of assuming the writer role.
+
+    bucket_name overrides the default ingest bucket name,
+    "<cluster-name>-trace-export-ingest-<account-id>". The bucket is always
+    created and owned by the module (force_destroy — it holds transit data).
+
+    prefix (default "traces/") is the key prefix the producer writes under;
+    the receiver, lifecycle rule, notification filter, and IAM grants are all
+    scoped to it. Multi-segment prefixes ("traces/tenant-a/") are supported.
+
+    lifecycle_days (default 3) expires objects under the prefix and aborts
+    incomplete multipart uploads at the same age — the bucket is transit,
+    not storage.
+
+    kms_key_arn optionally encrypts the bucket with a customer-managed KMS
+    key (SSE-KMS with S3 Bucket Keys) instead of the default SSE-S3, and
+    widens the writer and collector policies with the matching KMS
+    permissions.
+  EOT
+  type = object({
+    dc_execution_role_arn = string
+    external_id           = string
+    agent_role_arn        = optional(string, null)
+    bucket_name           = optional(string, null)
+    prefix                = optional(string, "traces/")
+    lifecycle_days        = optional(number, 3)
+    kms_key_arn           = optional(string, null)
+  })
+  default = null
+
+  validation {
+    condition = var.trace_export_ingest == null ? true : (
+      can(regex("^arn:[a-z0-9-]+:iam::[0-9]{12}:role/.+$", var.trace_export_ingest.dc_execution_role_arn)) &&
+      length(replace(replace(element(split(":role/", var.trace_export_ingest.dc_execution_role_arn), 1), "*", ""), "/", "")) > 0
+    )
+    error_message = "trace_export_ingest.dc_execution_role_arn must be an IAM role ARN with a literal 12-digit account ID (\"arn:<partition>:iam::<account-id>:role/<name>\"). Wildcards are allowed only in the role-name portion, and the name must not consist of wildcards alone — this pattern is the effective principal boundary of the writer role's trust policy."
+  }
+
+  validation {
+    condition     = var.trace_export_ingest == null ? true : length(var.trace_export_ingest.external_id) >= 8
+    error_message = "trace_export_ingest.external_id must be at least 8 characters long."
+  }
+
+  validation {
+    condition     = var.trace_export_ingest == null ? true : can(regex("^[a-zA-Z0-9_.-]+(/[a-zA-Z0-9_.-]+)*/?$", var.trace_export_ingest.prefix))
+    error_message = "trace_export_ingest.prefix must be one or more \"/\"-separated segments of [a-zA-Z0-9_.-] characters with no leading \"/\" and no empty segments (e.g. \"traces/\" or \"traces/tenant-a/\"); a single trailing \"/\" is optional and normalized internally."
+  }
+
+  validation {
+    condition     = var.trace_export_ingest == null ? true : var.trace_export_ingest.lifecycle_days >= 1
+    error_message = "trace_export_ingest.lifecycle_days must be at least 1."
+  }
+}
+
 # --- ClickHouse Credentials ---
 
 variable "clickhouse_passwords" {
