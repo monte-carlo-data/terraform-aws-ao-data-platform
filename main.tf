@@ -352,4 +352,8 @@ locals {
   trace_export_ingest_queue_name = local.trace_export_ingest_enabled ? "${local.effective_cluster_name}-trace-export-ingest" : null
   trace_export_ingest_queue_arn  = local.trace_export_ingest_enabled ? "arn:${data.aws_partition.current.partition}:sqs:${var.region}:${data.aws_caller_identity.trace_export_ingest[0].account_id}:${local.trace_export_ingest_queue_name}" : null
   trace_export_ingest_queue_url  = local.trace_export_ingest_enabled ? "https://sqs.${var.region}.${data.aws_partition.current.dns_suffix}/${data.aws_caller_identity.trace_export_ingest[0].account_id}/${local.trace_export_ingest_queue_name}" : null
+
+  # Derived (not read from the role resource) so the output stays plan-known;
+  # the name is fixed by this module, so the ARN is deterministic.
+  trace_export_writer_role_arn = local.trace_export_ingest_enabled ? "arn:${data.aws_partition.current.partition}:iam::${data.aws_caller_identity.trace_export_ingest[0].account_id}:role/${local.region_qualified_name}-trace-export-writer" : null
 }

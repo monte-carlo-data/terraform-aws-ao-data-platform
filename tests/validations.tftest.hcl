@@ -2044,3 +2044,58 @@ run "trace_export_writer_role_absent_when_unset" {
     error_message = "With trace_export_ingest unset, no writer role or policy may be planned."
   }
 }
+
+# --- trace_export_ingest: outputs (both states) ---
+#
+# Outputs derive from the name locals (the writer-role ARN included — its
+# name is module-fixed, so the ARN is deterministic), keeping them plan-known
+# with the block set and null when unset.
+
+run "trace_export_outputs_populated_when_set" {
+  command = plan
+  variables {
+    cluster = {
+      create                = false
+      name                  = "test-cluster"
+      existing_cluster_name = "test-cluster"
+    }
+    trace_export_ingest = {
+      dc_execution_role_arn = "arn:aws:iam::210987654321:role/writer-caller"
+      external_id           = "external-id-value"
+    }
+  }
+  assert {
+    condition = (
+      output.trace_export_ingest_bucket == "test-cluster-trace-export-ingest-123456789012" &&
+      output.trace_export_ingest_prefix == "traces/" &&
+      output.trace_export_writer_role_arn == "arn:aws:iam::123456789012:role/test-cluster-us-east-1-trace-export-writer" &&
+      output.trace_export_external_id == "external-id-value" &&
+      output.trace_export_ingest_queue_arn == "arn:aws:sqs:us-east-1:123456789012:test-cluster-trace-export-ingest" &&
+      output.trace_export_ingest_queue_name == "test-cluster-trace-export-ingest"
+    )
+    error_message = "With the block set, all six trace-export outputs must carry the derived registration values (bucket, prefix, writer-role ARN, external ID, queue ARN/name)."
+  }
+}
+
+run "trace_export_outputs_null_when_unset" {
+  command = plan
+  variables {
+    cluster = {
+      create                = false
+      name                  = "test-cluster"
+      existing_cluster_name = "test-cluster"
+    }
+    trace_export_ingest = null
+  }
+  assert {
+    condition = (
+      output.trace_export_ingest_bucket == null &&
+      output.trace_export_ingest_prefix == null &&
+      output.trace_export_writer_role_arn == null &&
+      output.trace_export_external_id == null &&
+      output.trace_export_ingest_queue_arn == null &&
+      output.trace_export_ingest_queue_name == null
+    )
+    error_message = "With the block unset, all six trace-export outputs must be null."
+  }
+}
