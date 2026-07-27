@@ -68,8 +68,10 @@ resource "aws_iam_role" "otel_collector" {
 # and deduplicated (two receivers may share a bucket — never a queue, which
 # the helm variable validation rejects). With a single enabled receiver the
 # rendered JSON is identical to the policy this module has always attached.
-# When the trace-export ingest bucket uses a caller-supplied CMK, a fourth
-# statement grants the collector kms:Decrypt on that key so GetObject on the
+# When any receiver in that map carries a kms_key_arn — today only the
+# synthesized trace-export-ingest entry can, when its bucket uses a
+# caller-supplied CMK — a fourth statement grants the collector kms:Decrypt
+# on every such key (local.otel_awss3_receiver_kms_keys) so GetObject on the
 # SSE-KMS objects succeeds; without a CMK the statement list is unchanged.
 resource "aws_iam_role_policy" "otel_collector_awss3_receiver" {
   count = length(local.otel_awss3_receivers) > 0 ? 1 : 0
@@ -101,11 +103,11 @@ resource "aws_iam_role_policy" "otel_collector_awss3_receiver" {
           Resource = sort(distinct([for r in values(local.otel_awss3_receivers) : "arn:aws:s3:::${r.s3_bucket}"]))
         },
       ],
-      local.trace_export_ingest_enabled && var.trace_export_ingest.kms_key_arn != null ? [
+      length(local.otel_awss3_receiver_kms_keys) > 0 ? [
         {
           Effect   = "Allow"
           Action   = ["kms:Decrypt"]
-          Resource = [var.trace_export_ingest.kms_key_arn]
+          Resource = local.otel_awss3_receiver_kms_keys
         },
       ] : [],
     )
@@ -131,7 +133,7 @@ resource "aws_iam_role" "trace_export_writer" {
       Principal = { AWS = "arn:${local.trace_export_producer_partition}:iam::${local.trace_export_producer_account_id}:root" }
       Action    = "sts:AssumeRole"
       Condition = {
-        StringEquals = { "sts:ExternalId" = var.trace_export_ingest.external_id }
+        StringEquals = { "sts:ExternalId" = var.trace_export_external_id }
         StringLike   = { "aws:PrincipalArn" = var.trace_export_ingest.producer_execution_role_arn }
       }
     }]
@@ -141,6 +143,11 @@ resource "aws_iam_role" "trace_export_writer" {
 
   lifecycle {
     create_before_destroy = true
+
+    precondition {
+      condition     = var.trace_export_external_id != null
+      error_message = "trace_export_external_id is required when trace_export_ingest is set — it supplies the writer role's sts:ExternalId trust condition."
+    }
   }
 }
 

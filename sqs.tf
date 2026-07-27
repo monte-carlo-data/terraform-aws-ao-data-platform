@@ -23,13 +23,37 @@ resource "aws_sqs_queue" "trace_export_ingest" {
 
   lifecycle {
     # The synthesized receiver renders under the "awss3/trace-export-ingest"
-    # component ID; a caller awss3_receivers entry with that key would be
-    # silently overwritten in the merged map. Anchored here — not on the helm
-    # release — because this queue exists whenever the block is set, so the
-    # guard also fires for chartless (deploy_charts = false) deployments.
+    # component ID; an *enabled* caller awss3_receivers entry with that key
+    # would be silently overwritten in the merged map. Scoped to enabled
+    # entries because the merge itself filters on m.enabled — a disabled
+    # entry under that key never collides, and the README documents keeping
+    # one around (e.g. to stage a future receiver) as supported. Anchored
+    # here — not on the helm release — because this queue exists whenever
+    # the block is set, so the guard also fires for chartless
+    # (deploy_charts = false) deployments.
     precondition {
-      condition     = !contains(keys(var.helm.opentelemetry_collector.awss3_receivers), "trace-export-ingest")
-      error_message = "helm.opentelemetry_collector.awss3_receivers must not contain the key \"trace-export-ingest\" while trace_export_ingest is set — that component ID (\"awss3/trace-export-ingest\") is reserved for the receiver this module synthesizes for the ingest leg."
+      condition     = !contains([for name, m in var.helm.opentelemetry_collector.awss3_receivers : name if m.enabled], "trace-export-ingest")
+      error_message = "helm.opentelemetry_collector.awss3_receivers must not contain an enabled entry keyed \"trace-export-ingest\" while trace_export_ingest is set — that component ID (\"awss3/trace-export-ingest\") is reserved for the receiver this module synthesizes for the ingest leg. A disabled entry under that key is fine; it is dropped from the merge before rendering."
+    }
+
+    # The module-wide "every enabled receiver gets its own queue" check
+    # (helm.opentelemetry_collector's duplicate sqs_queue_arn validation)
+    # only sees var.helm, not this queue's ARN — it is synthesized in a
+    # local, not supplied by the caller. Without this guard a caller
+    # receiver could point at the same queue as the synthesized ingest
+    # receiver and neither validation would catch it: in SQS mode each
+    # receiver deletes messages whose records it filtered out, so the two
+    # receivers sharing this queue would silently destroy each other's
+    # notifications.
+    precondition {
+      condition = alltrue([
+        for name, m in var.helm.opentelemetry_collector.awss3_receivers : m.sqs_queue_arn != local.trace_export_ingest_queue_arn if m.enabled
+        ]) && (
+        try(var.helm.opentelemetry_collector.awss3_receiver.enabled, false)
+        ? var.helm.opentelemetry_collector.awss3_receiver.sqs_queue_arn != local.trace_export_ingest_queue_arn
+        : true
+      )
+      error_message = "A caller awss3 receiver (helm.opentelemetry_collector.awss3_receiver or an awss3_receivers entry) must not reuse the ingest queue's ARN (local.trace_export_ingest_queue_arn) while trace_export_ingest is set — sharing an SQS-mode queue with the synthesized ingest receiver causes the two receivers to delete each other's notifications, silently dropping traces."
     }
   }
 }

@@ -797,18 +797,26 @@ variable "trace_export_ingest" {
     principal — and the pattern is the effective principal boundary within
     that account, so keep it as narrow as possible.
 
-    external_id is the sts:ExternalId condition value baked into the writer
-    role's trust policy (confused-deputy guard). Supply the value issued by
-    the system driving the export; minimum length 8. It is echoed back via
-    the sensitive trace_export_external_id output.
+    The writer role's trust policy also carries an sts:ExternalId condition
+    (confused-deputy guard), supplied separately via the sensitive
+    trace_export_external_id variable — required whenever this block is set.
 
     agent_role_arn optionally grants one additional role s3:PutObject on the
     ingest prefix via the bucket policy — for producers that write directly
-    instead of assuming the writer role.
+    instead of assuming the writer role. It must be a well-formed IAM role
+    ARN with a literal 12-digit account ID; unlike producer_execution_role_arn
+    it is embedded verbatim as a bucket-policy Principal rather than matched
+    via a trust-policy condition, so no wildcards are permitted anywhere in
+    the ARN.
 
     bucket_name overrides the default ingest bucket name,
-    "<cluster-name>-trace-export-ingest-<account-id>". The bucket is always
-    created and owned by the module (force_destroy — it holds transit data).
+    "<cluster-name>-trace-export-ingest-<account-id>". It must name a bucket
+    that does NOT already exist: the module always creates and owns this
+    bucket (force_destroy — it holds transit data). Pointing bucket_name at a
+    pre-existing bucket adopts that bucket into this module's state — its
+    bucket policy and event-notification configuration are REPLACED with the
+    module's own, and a later teardown or unset of trace_export_ingest
+    deletes its contents.
 
     prefix (default "traces/") is the key prefix the producer writes under;
     the receiver, lifecycle rule, notification filter, and IAM grants are all
@@ -825,7 +833,6 @@ variable "trace_export_ingest" {
   EOT
   type = object({
     producer_execution_role_arn = string
-    external_id                 = string
     agent_role_arn              = optional(string, null)
     bucket_name                 = optional(string, null)
     prefix                      = optional(string, "traces/")
@@ -843,8 +850,12 @@ variable "trace_export_ingest" {
   }
 
   validation {
-    condition     = var.trace_export_ingest == null ? true : length(var.trace_export_ingest.external_id) >= 8
-    error_message = "trace_export_ingest.external_id must be at least 8 characters long."
+    condition = var.trace_export_ingest == null || var.trace_export_ingest.agent_role_arn == null ? true : (
+      can(regex("^arn:[a-z0-9-]+:iam::[0-9]{12}:role/.+$", var.trace_export_ingest.agent_role_arn)) &&
+      length(replace(replace(element(split(":role/", var.trace_export_ingest.agent_role_arn), 1), "*", ""), "/", "")) > 0 &&
+      !can(regex("\\*", var.trace_export_ingest.agent_role_arn))
+    )
+    error_message = "trace_export_ingest.agent_role_arn must be an exact IAM role ARN with a literal 12-digit account ID (\"arn:<partition>:iam::<account-id>:role/<name>\"). Unlike producer_execution_role_arn, which is matched via a StringLike trust-policy condition, this value is embedded verbatim as the ingest bucket policy's Principal — IAM does not glob-match wildcards there, so no wildcards are permitted anywhere in this ARN."
   }
 
   validation {
@@ -855,6 +866,29 @@ variable "trace_export_ingest" {
   validation {
     condition     = var.trace_export_ingest == null ? true : var.trace_export_ingest.lifecycle_days >= 1
     error_message = "trace_export_ingest.lifecycle_days must be at least 1."
+  }
+}
+
+variable "trace_export_external_id" {
+  description = <<-EOT
+    The sts:ExternalId condition value baked into the trace-export writer
+    role's trust policy (confused-deputy guard). Required when
+    trace_export_ingest is set; leave null (default) otherwise. Supply the
+    value issued by the system driving the export; minimum length 8.
+
+    Marked sensitive, so it is redacted from plan/apply output and CI logs.
+    Supply via a .tfvars file or TF_VAR_trace_export_external_id rather than
+    -var on a command line. Terraform state still contains the value —
+    protect state accordingly. It is echoed back via the sensitive
+    trace_export_external_id output.
+  EOT
+  type        = string
+  default     = null
+  sensitive   = true
+
+  validation {
+    condition     = var.trace_export_external_id == null ? true : length(var.trace_export_external_id) >= 8
+    error_message = "trace_export_external_id must be at least 8 characters long."
   }
 }
 

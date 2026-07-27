@@ -172,8 +172,8 @@ output "trace_export_writer_role_arn" {
 }
 
 output "trace_export_external_id" {
-  description = "The sts:ExternalId condition value baked into the writer role's trust policy — echoes the trace_export_ingest.external_id input for registration alongside the other outputs. Null when trace_export_ingest is unset."
-  value       = local.trace_export_ingest_enabled ? var.trace_export_ingest.external_id : null
+  description = "The sts:ExternalId condition value baked into the writer role's trust policy — echoes the trace_export_external_id input for registration alongside the other outputs. Null when trace_export_ingest is unset."
+  value       = local.trace_export_ingest_enabled ? var.trace_export_external_id : null
   sensitive   = true
 }
 

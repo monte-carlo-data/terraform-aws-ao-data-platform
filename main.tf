@@ -126,9 +126,12 @@ locals {
   # an empty string stays empty; any non-empty value gets exactly one trailing
   # "/" — keeping "traces" and "traces/" equivalent, and stopping a bare prefix
   # from over-matching sibling keys (e.g. "traces*" matching "tracesfoo") in
-  # the IAM GetObject resource ARN. Single source of truth for the rendered
-  # receiver config, the trace-pipeline receiver list, and the awss3-receiver
-  # IAM policy.
+  # the IAM GetObject resource ARN. kms_key_arn projects to null except on the
+  # synthesized trace-export-ingest entry below (see otel_awss3_receiver_kms_keys).
+  # Single source of truth for the rendered receiver config, the trace-pipeline
+  # receiver list, and every statement in the awss3-receiver IAM policy —
+  # including the collector's KMS-decrypt grant, which is derived from this
+  # map rather than reading var.trace_export_ingest directly.
   #
   # When var.trace_export_ingest is set, the module synthesizes one more entry
   # — "awss3/trace-export-ingest", consuming the module-created ingest
@@ -148,6 +151,7 @@ locals {
           s3_bucket     = local.trace_export_ingest_bucket
           s3_region     = null
           s3_prefix     = local.trace_export_ingest_prefix
+          kms_key_arn   = var.trace_export_ingest.kms_key_arn
         }
       } : {},
       ) : id => {
@@ -157,8 +161,17 @@ locals {
       s3_bucket     = r.s3_bucket
       s3_region     = coalesce(r.s3_region, var.region)
       s3_prefix     = r.s3_prefix == "" ? "" : "${trimsuffix(r.s3_prefix, "/")}/"
+      # Only the synthesized trace-export-ingest entry carries a KMS key —
+      # caller-configured awss3_receiver/awss3_receivers entries have no such
+      # field in their object schema (variables.tf), so they project to null.
+      kms_key_arn = try(r.kms_key_arn, null)
     }
   }
+  # Every non-null kms_key_arn across the normalized receiver map, deduped —
+  # today only the synthesized trace-export-ingest entry can carry one, but
+  # the collector's KMS-decrypt grant (iam.tf) is built from this local so it
+  # stays map-driven if that ever changes. Empty when no receiver has a CMK.
+  otel_awss3_receiver_kms_keys = distinct([for r in values(local.otel_awss3_receivers) : r.kms_key_arn if r.kms_key_arn != null])
   # awss3 receivers override. Empty when no receiver is enabled; helm-merged
   # into the chart's opentelemetry-collector values otherwise. The
   # pipelines.traces.receivers list MUST mirror the chart's default list plus
