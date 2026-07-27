@@ -121,3 +121,24 @@ resource "aws_s3_bucket_policy" "trace_export_ingest" {
   # AccessDenied on first apply.
   depends_on = [aws_s3_bucket_public_access_block.trace_export_ingest]
 }
+
+# Object-created events under the ingest prefix fan into the dedicated queue
+# (sqs.tf). This resource owns the bucket's ENTIRE notification configuration
+# — which is exactly why the module always creates the ingest bucket rather
+# than accepting a caller-managed one, whose existing notifications this
+# would silently replace.
+resource "aws_s3_bucket_notification" "trace_export_ingest" {
+  count = local.trace_export_ingest_enabled ? 1 : 0
+
+  bucket = aws_s3_bucket.trace_export_ingest[0].id
+
+  queue {
+    queue_arn     = local.trace_export_ingest_queue_arn
+    events        = ["s3:ObjectCreated:*"]
+    filter_prefix = local.trace_export_ingest_prefix
+  }
+
+  # S3 validates it can publish to the queue when the notification is
+  # created; the queue policy must exist first.
+  depends_on = [aws_sqs_queue_policy.trace_export_ingest]
+}

@@ -1659,3 +1659,168 @@ run "trace_export_unset_leaves_receiver_map_untouched" {
     error_message = "With trace_export_ingest unset, the normalized awss3 receiver map must contain exactly the caller-configured entries — no synthesized trace-export entry."
   }
 }
+
+# --- trace_export_ingest: transport-resource shapes (block set) ---
+#
+# Every asserted attribute below is a resource ARGUMENT configured from
+# variables or the name locals — plan-known under the mock — never a computed
+# attribute. The count-0 unset direction rides in trace_export_unset_is_inert
+# above plus the explicit run at the end of this section.
+
+run "trace_export_transport_resources_render" {
+  command = plan
+  variables {
+    cluster = {
+      create                = false
+      name                  = "test-cluster"
+      existing_cluster_name = "test-cluster"
+    }
+    trace_export_ingest = {
+      dc_execution_role_arn = "arn:aws:iam::210987654321:role/writer-caller"
+      external_id           = "external-id-value"
+      agent_role_arn        = "arn:aws:iam::123456789012:role/direct-writer"
+      lifecycle_days        = 5
+    }
+  }
+  assert {
+    condition     = aws_s3_bucket.trace_export_ingest[0].bucket == "test-cluster-trace-export-ingest-123456789012"
+    error_message = "The ingest bucket must be created with the derived default name."
+  }
+  assert {
+    condition     = aws_s3_bucket.trace_export_ingest[0].force_destroy == true
+    error_message = "The ingest bucket must set force_destroy — transit data must not block teardown."
+  }
+  assert {
+    condition = (
+      aws_s3_bucket_public_access_block.trace_export_ingest[0].block_public_acls == true &&
+      aws_s3_bucket_public_access_block.trace_export_ingest[0].block_public_policy == true &&
+      aws_s3_bucket_public_access_block.trace_export_ingest[0].ignore_public_acls == true &&
+      aws_s3_bucket_public_access_block.trace_export_ingest[0].restrict_public_buckets == true
+    )
+    error_message = "The ingest bucket must carry a full public-access block."
+  }
+  assert {
+    condition = (
+      aws_s3_bucket_lifecycle_configuration.trace_export_ingest[0].rule[0].filter[0].prefix == "traces/" &&
+      aws_s3_bucket_lifecycle_configuration.trace_export_ingest[0].rule[0].expiration[0].days == 5 &&
+      aws_s3_bucket_lifecycle_configuration.trace_export_ingest[0].rule[0].abort_incomplete_multipart_upload[0].days_after_initiation == 5
+    )
+    error_message = "The lifecycle rule must expire objects under the normalized prefix and abort incomplete multipart uploads at lifecycle_days."
+  }
+  # Byte-identical policy pins: both policies are jsonencode() of plan-known
+  # values, so exact comparison is stable and catches statement drift.
+  assert {
+    condition = aws_s3_bucket_policy.trace_export_ingest[0].policy == jsonencode({
+      Version = "2012-10-17"
+      Statement = [
+        {
+          Sid       = "DenyInsecureTransport"
+          Effect    = "Deny"
+          Principal = "*"
+          Action    = "s3:*"
+          Resource = [
+            "arn:aws:s3:::test-cluster-trace-export-ingest-123456789012",
+            "arn:aws:s3:::test-cluster-trace-export-ingest-123456789012/*",
+          ]
+          Condition = { Bool = { "aws:SecureTransport" = "false" } }
+        },
+        {
+          Sid       = "AgentPutObject"
+          Effect    = "Allow"
+          Principal = { AWS = "arn:aws:iam::123456789012:role/direct-writer" }
+          Action    = "s3:PutObject"
+          Resource  = "arn:aws:s3:::test-cluster-trace-export-ingest-123456789012/traces/*"
+        },
+      ]
+    })
+    error_message = "The bucket policy must always deny non-TLS access and, with agent_role_arn set, grant that role PutObject scoped to the ingest prefix."
+  }
+  assert {
+    condition = aws_sqs_queue_policy.trace_export_ingest[0].policy == jsonencode({
+      Version = "2012-10-17"
+      Statement = [
+        {
+          Sid       = "AllowIngestBucketNotifications"
+          Effect    = "Allow"
+          Principal = { Service = "s3.amazonaws.com" }
+          Action    = "sqs:SendMessage"
+          Resource  = "arn:aws:sqs:us-east-1:123456789012:test-cluster-trace-export-ingest"
+          Condition = {
+            ArnEquals    = { "aws:SourceArn" = "arn:aws:s3:::test-cluster-trace-export-ingest-123456789012" }
+            StringEquals = { "aws:SourceAccount" = "123456789012" }
+          }
+        },
+      ]
+    })
+    error_message = "The queue policy must allow S3 SendMessage conditioned on BOTH aws:SourceArn (the ingest bucket) and aws:SourceAccount (this account) — SourceArn alone permits bucket-name-squatting injection."
+  }
+  assert {
+    condition = (
+      aws_sqs_queue.trace_export_ingest[0].name == "test-cluster-trace-export-ingest" &&
+      aws_sqs_queue.trace_export_ingest[0].message_retention_seconds == 1209600 &&
+      aws_sqs_queue.trace_export_ingest[0].visibility_timeout_seconds == 300
+    )
+    error_message = "The ingest queue must use the derived name, 14-day retention (outliving the object lifecycle), and a 300s visibility timeout."
+  }
+  assert {
+    condition = (
+      tolist(aws_s3_bucket_notification.trace_export_ingest[0].queue)[0].queue_arn == "arn:aws:sqs:us-east-1:123456789012:test-cluster-trace-export-ingest" &&
+      tolist(aws_s3_bucket_notification.trace_export_ingest[0].queue)[0].filter_prefix == "traces/" &&
+      tolist(aws_s3_bucket_notification.trace_export_ingest[0].queue)[0].events == toset(["s3:ObjectCreated:*"])
+    )
+    error_message = "The bucket notification must target the derived queue ARN, filter on the normalized ingest prefix, and fire on all ObjectCreated events."
+  }
+}
+
+run "trace_export_default_encryption_is_sse_s3" {
+  command = plan
+  variables {
+    cluster = {
+      create                = false
+      name                  = "test-cluster"
+      existing_cluster_name = "test-cluster"
+    }
+    trace_export_ingest = {
+      dc_execution_role_arn = "arn:aws:iam::210987654321:role/writer-caller"
+      external_id           = "external-id-value"
+    }
+  }
+  assert {
+    condition = (
+      tolist(aws_s3_bucket_server_side_encryption_configuration.trace_export_ingest[0].rule)[0].apply_server_side_encryption_by_default[0].sse_algorithm == "AES256" &&
+      tolist(aws_s3_bucket_server_side_encryption_configuration.trace_export_ingest[0].rule)[0].bucket_key_enabled == false
+    )
+    error_message = "Without a CMK the ingest bucket must default to SSE-S3 (AES256) with Bucket Keys off."
+  }
+  # No direct-writer grant configured: the bucket policy must carry exactly
+  # the TLS-deny statement.
+  assert {
+    condition     = length(jsondecode(aws_s3_bucket_policy.trace_export_ingest[0].policy).Statement) == 1
+    error_message = "Without agent_role_arn the bucket policy must contain only the DenyInsecureTransport statement."
+  }
+}
+
+run "trace_export_unset_creates_no_transport_resources" {
+  command = plan
+  variables {
+    cluster = {
+      create                = false
+      name                  = "test-cluster"
+      existing_cluster_name = "test-cluster"
+    }
+    trace_export_ingest = null
+  }
+  assert {
+    condition = (
+      length(aws_s3_bucket.trace_export_ingest) == 0 &&
+      length(aws_s3_bucket_public_access_block.trace_export_ingest) == 0 &&
+      length(aws_s3_bucket_server_side_encryption_configuration.trace_export_ingest) == 0 &&
+      length(aws_s3_bucket_lifecycle_configuration.trace_export_ingest) == 0 &&
+      length(aws_s3_bucket_policy.trace_export_ingest) == 0 &&
+      length(aws_s3_bucket_notification.trace_export_ingest) == 0 &&
+      length(aws_sqs_queue.trace_export_ingest) == 0 &&
+      length(aws_sqs_queue_policy.trace_export_ingest) == 0
+    )
+    error_message = "With trace_export_ingest unset, no transport resource may be planned — the zero-diff guarantee."
+  }
+}
