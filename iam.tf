@@ -112,6 +112,67 @@ resource "aws_iam_role_policy" "otel_collector_awss3_receiver" {
   })
 }
 
+# IAM — Trace-export writer (var.trace_export_ingest). The module's only
+# non-IRSA role: an external execution role assumes it — typically
+# cross-account — to PUT OTLP trace files under the ingest prefix. The trust
+# principal is the external account's root (parsed from the validated
+# execution-role ARN), narrowed by two conditions: sts:ExternalId as the
+# confused-deputy guard, and aws:PrincipalArn StringLike on the configured
+# ARN. That pattern is the effective principal boundary — and because it may
+# carry a role-name wildcard, the external role can be re-provisioned (new
+# unique suffix, new ARN) without this trust policy going stale.
+resource "aws_iam_role" "trace_export_writer" {
+  count = local.trace_export_ingest_enabled ? 1 : 0
+  name  = "${local.region_qualified_name}-trace-export-writer"
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect    = "Allow"
+      Principal = { AWS = "arn:${local.trace_export_dc_partition}:iam::${local.trace_export_dc_account_id}:root" }
+      Action    = "sts:AssumeRole"
+      Condition = {
+        StringEquals = { "sts:ExternalId" = var.trace_export_ingest.external_id }
+        StringLike   = { "aws:PrincipalArn" = var.trace_export_ingest.dc_execution_role_arn }
+      }
+    }]
+  })
+
+  tags = var.tags
+
+  lifecycle {
+    create_before_destroy = true
+  }
+}
+
+# Write-only and prefix-scoped: the writer can PUT under the ingest prefix
+# and nothing else — no reads, no lists, no deletes. With a caller-supplied
+# CMK on the bucket, SSE-KMS PUTs additionally need GenerateDataKey (Encrypt
+# covers non-Bucket-Keys key usage).
+resource "aws_iam_role_policy" "trace_export_writer" {
+  count = local.trace_export_ingest_enabled ? 1 : 0
+  name  = "trace-export-writer"
+  role  = aws_iam_role.trace_export_writer[0].id
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = concat(
+      [
+        {
+          Effect   = "Allow"
+          Action   = ["s3:PutObject"]
+          Resource = ["${local.trace_export_ingest_bucket_arn}/${local.trace_export_ingest_prefix}*"]
+        },
+      ],
+      var.trace_export_ingest.kms_key_arn != null ? [
+        {
+          Effect   = "Allow"
+          Action   = ["kms:GenerateDataKey", "kms:Encrypt"]
+          Resource = [var.trace_export_ingest.kms_key_arn]
+        },
+      ] : [],
+    )
+  })
+}
+
 # IAM — LLM Worker IRSA. Grants Bedrock InvokeModel for the llm-worker pods.
 
 resource "aws_iam_role" "llm_worker" {

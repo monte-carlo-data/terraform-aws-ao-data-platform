@@ -340,6 +340,15 @@ locals {
   ) : null
   trace_export_ingest_bucket_arn = local.trace_export_ingest_enabled ? "arn:${data.aws_partition.current.partition}:s3:::${local.trace_export_ingest_bucket}" : null
 
+  # Trust anchoring for the writer role (iam.tf): the principal is the
+  # external account's ROOT, derived from the validated execution-role ARN —
+  # the variable validation guarantees its partition and 12-digit account
+  # segments are literal — while the configured ARN/pattern itself lands in
+  # the trust policy's aws:PrincipalArn condition. Wildcards therefore live
+  # only in the condition, never in the principal.
+  trace_export_dc_partition  = local.trace_export_ingest_enabled ? split(":", var.trace_export_ingest.dc_execution_role_arn)[1] : null
+  trace_export_dc_account_id = local.trace_export_ingest_enabled ? split(":", var.trace_export_ingest.dc_execution_role_arn)[4] : null
+
   trace_export_ingest_queue_name = local.trace_export_ingest_enabled ? "${local.effective_cluster_name}-trace-export-ingest" : null
   trace_export_ingest_queue_arn  = local.trace_export_ingest_enabled ? "arn:${data.aws_partition.current.partition}:sqs:${var.region}:${data.aws_caller_identity.trace_export_ingest[0].account_id}:${local.trace_export_ingest_queue_name}" : null
   trace_export_ingest_queue_url  = local.trace_export_ingest_enabled ? "https://sqs.${var.region}.${data.aws_partition.current.dns_suffix}/${data.aws_caller_identity.trace_export_ingest[0].account_id}/${local.trace_export_ingest_queue_name}" : null

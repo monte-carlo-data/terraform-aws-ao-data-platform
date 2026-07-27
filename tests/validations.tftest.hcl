@@ -1975,3 +1975,72 @@ run "trace_export_reserved_receiver_key_rejected" {
   }
   expect_failures = [aws_sqs_queue.trace_export_ingest]
 }
+
+# --- trace_export_ingest: writer role (block set) ---
+#
+# The trust policy is a pure function of variables (the account ID and
+# partition parse out of the validated execution-role ARN), and the inline
+# policy builds from the name locals — both byte-assertable at plan time.
+
+run "trace_export_writer_role_trust_and_policy" {
+  command = plan
+  variables {
+    cluster = {
+      create                = false
+      name                  = "test-cluster"
+      existing_cluster_name = "test-cluster"
+    }
+    trace_export_ingest = {
+      dc_execution_role_arn = "arn:aws:iam::210987654321:role/writer-caller-*"
+      external_id           = "external-id-value"
+    }
+  }
+  assert {
+    condition     = aws_iam_role.trace_export_writer[0].name == "test-cluster-us-east-1-trace-export-writer"
+    error_message = "The writer role name must be region-qualified — IAM role names are account-global."
+  }
+  assert {
+    condition = aws_iam_role.trace_export_writer[0].assume_role_policy == jsonencode({
+      Version = "2012-10-17"
+      Statement = [{
+        Effect    = "Allow"
+        Principal = { AWS = "arn:aws:iam::210987654321:root" }
+        Action    = "sts:AssumeRole"
+        Condition = {
+          StringEquals = { "sts:ExternalId" = "external-id-value" }
+          StringLike   = { "aws:PrincipalArn" = "arn:aws:iam::210987654321:role/writer-caller-*" }
+        }
+      }]
+    })
+    error_message = "The writer trust policy must anchor on the external account's root with the ExternalId StringEquals and PrincipalArn StringLike conditions — wildcards confined to the condition, never the principal."
+  }
+  assert {
+    condition = aws_iam_role_policy.trace_export_writer[0].policy == jsonencode({
+      Version = "2012-10-17"
+      Statement = [
+        {
+          Effect   = "Allow"
+          Action   = ["s3:PutObject"]
+          Resource = ["arn:aws:s3:::test-cluster-trace-export-ingest-123456789012/traces/*"]
+        },
+      ]
+    })
+    error_message = "Without a CMK the writer policy must be exactly one statement: s3:PutObject scoped to the ingest prefix."
+  }
+}
+
+run "trace_export_writer_role_absent_when_unset" {
+  command = plan
+  variables {
+    cluster = {
+      create                = false
+      name                  = "test-cluster"
+      existing_cluster_name = "test-cluster"
+    }
+    trace_export_ingest = null
+  }
+  assert {
+    condition     = length(aws_iam_role.trace_export_writer) == 0 && length(aws_iam_role_policy.trace_export_writer) == 0
+    error_message = "With trace_export_ingest unset, no writer role or policy may be planned."
+  }
+}
