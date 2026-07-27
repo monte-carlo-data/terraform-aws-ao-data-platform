@@ -236,6 +236,41 @@ module "ao_data_platform" {
 
 `helm.opentelemetry_collector.awss3_receiver` (singular) is the **deprecated** single-receiver form: use `awss3_receivers` for new configuration. It continues to work throughout v2.x and renders identically to before — under the bare `awss3` component ID, so existing deployments upgrading the module see a zero diff — and it may be combined with `awss3_receivers` entries. It will only be removed in a future major version.
 
+### Trace-export ingest leg
+
+Where `awss3_receivers` consumes buckets and queues you manage yourself, the optional top-level `trace_export_ingest` variable provisions the whole delivery leg for an external trace producer in one apply:
+
+- A dedicated **ingest S3 bucket** (public-access blocked, TLS-only bucket policy, `force_destroy`) with a short object lifecycle — this is transit storage, not retention: objects under the ingest prefix expire after `lifecycle_days` (default 3), and incomplete multipart uploads are aborted at the same age.
+- A dedicated **SQS queue** (14-day message retention, 300 s visibility timeout) receiving the bucket's `ObjectCreated` notifications for the ingest prefix, with a queue policy pinned to both the bucket ARN and this account.
+- A synthesized **awss3 receiver** under the reserved component ID `awss3/trace-export-ingest`, wired into the collector's trace pipeline and read policy exactly like an `awss3_receivers` entry (that map key is rejected while the block is set).
+- A **writer IAM role** the external producer assumes to upload files: trust is anchored on the producer account's root, guarded by an `sts:ExternalId` condition (`external_id`) and an `aws:PrincipalArn` `StringLike` condition on `dc_execution_role_arn`. That input accepts an exact role ARN or a wildcard in the role-**name** portion (e.g. `arn:aws:iam::210987654321:role/exporter-*`) so the producer role can be re-provisioned without re-applying this module — the account ID must be literal, and the pattern is the effective principal boundary, so keep it narrow. The role's only permission is `s3:PutObject` scoped to the ingest prefix.
+
+```hcl
+module "ao_data_platform" {
+  source  = "monte-carlo-data/ao-data-platform/aws"
+  version = "~> 2.0"
+
+  # ... cluster/networking/helm configuration ...
+
+  trace_export_ingest = {
+    dc_execution_role_arn = "arn:aws:iam::210987654321:role/exporter-*"
+    external_id           = "value-issued-by-the-exporting-system"
+    # bucket_name  defaults to "<cluster-name>-trace-export-ingest-<account-id>"
+    # prefix       defaults to "traces/" (multi-segment prefixes supported)
+    # lifecycle_days defaults to 3
+    # agent_role_arn / kms_key_arn optional — see the Inputs table
+  }
+}
+```
+
+The six `trace_export_*` outputs (bucket, prefix, writer-role ARN, external ID, queue ARN/name) carry everything the producer side and your monitoring need for registration — all null when the block is unset, and unset the module plans identically to previous releases.
+
+**Object format and key layout.** The receiver dispatches purely on the object key suffix: keys ending `.json` are decoded as OTLP JSON (one `ExportTraceServiceRequest` per object), `.binpb` as OTLP protobuf, and **anything else is skipped with only a collector warning** (`Unsupported file format`) — the object's Content-Type is ignored. Producers must write keys ending `.json` under the configured prefix; a date-partitioned layout (`<prefix>year=YYYY/month=MM/day=DD/traces-*.json`) is recommended, since the receiver's time-range (backfill) mode walks exactly that structure. Gzip (`.json.gz`) is auto-decompressed and needs no collector config change. Verified against OpenTelemetry Collector Contrib **0.150.1** (`awss3receiver` v0.150.0, bundled by `opentelemetry-collector` chart 0.151.0) — on older collector builds, or with a wrong key suffix, the failure is silent from the outside: **objects arrive in the bucket but no traces ingest**.
+
+**Encryption.** The bucket defaults to SSE-S3 — defensible for days-lived transit data behind a public-access block, a TLS-only policy, and prefix-scoped IAM. Compliance baselines that require a customer-managed key can pass `kms_key_arn`: the bucket switches to SSE-KMS with S3 Bucket Keys (keeping per-object KMS request cost low), the writer role gains `kms:GenerateDataKey`/`kms:Encrypt`, and the collector role gains `kms:Decrypt` on that key.
+
+**Teardown.** Unsetting the block (or destroying) removes the whole leg; the bucket sets `force_destroy`, so in-flight transit objects do not block removal. Notifications already in the queue at teardown are simply discarded with it.
+
 ### Least-privilege ClickHouse users
 
 The module provisions a per-access-path ClickHouse user model (`ao-data-platform` chart `>= 2.0.0`), where each component authenticates as a user scoped to what it does. Four users are always provisioned; two are opt-in.
@@ -488,6 +523,7 @@ To use a StorageClass you manage outside this module, set `clickhouse_storage_cl
 | `helm.opentelemetry_collector.awss3_receivers` | `map(object)` | `{}` | awss3 receivers for the OTel Collector, one entry per SQS-queue/S3-bucket pair. Each enabled entry renders a receiver with component ID `awss3/<key>` appended to the trace pipeline, and the otel-collector IRSA role gets SQS + S3 read permissions covering every enabled receiver. Entry shape: `{ enabled = optional(bool, true), sqs_queue_arn = string, sqs_queue_url = string, sqs_region = optional(string), s3_bucket = string, s3_region = optional(string), s3_prefix = optional(string, "") }`. Keys are restricted to `[a-zA-Z0-9_-]`; every receiver needs its own dedicated queue (duplicate `sqs_queue_arn` values are rejected — see [AWS S3 receivers](#aws-s3-receivers-for-the-otel-collector)). |
 | `helm.opentelemetry_collector.awss3_receiver` | `object` | `null` | **Deprecated** — use `awss3_receivers`. Single-receiver form; keeps working throughout v2.x and renders identically to before (bare `awss3` component ID), may be combined with `awss3_receivers` entries, and will only be removed in a future major version. Shape: as an `awss3_receivers` entry, but `enabled` is required. Omit (or leave `null`) to disable. |
 | `helm.llm_worker.resources` | `object` | `null` | Kubernetes resource requests/limits for the LLM-worker pods. Same shape as `helm.clickhouse.resources`. Omit to use chart defaults. |
+| `trace_export_ingest` | `object` | `null` | Optional trace-export ingest leg — see [Trace-export ingest leg](#trace-export-ingest-leg). Shape: `{ dc_execution_role_arn = string, external_id = string, agent_role_arn = optional(string), bucket_name = optional(string), prefix = optional(string, "traces/"), lifecycle_days = optional(number, 3), kms_key_arn = optional(string) }`. `dc_execution_role_arn` is the external role trusted to assume the writer role (exact ARN or role-name wildcard; literal account ID enforced). `external_id` (min 8 chars) becomes the `sts:ExternalId` trust condition. `agent_role_arn` optionally grants one additional role `s3:PutObject` on the prefix via the bucket policy. `prefix` accepts multi-segment values (`"traces/tenant-a/"`) and is normalized to one trailing `/`. `kms_key_arn` switches the bucket to SSE-KMS (Bucket Keys on) and widens writer/collector policies accordingly. Unset (default), no resources are created and the plan is unchanged from previous releases. |
 
 ## Outputs
 
@@ -510,6 +546,12 @@ To use a StorageClass you manage outside this module, set `clickhouse_storage_cl
 | `clickhouse_llm_worker_credentials_secret_arn` | Secrets Manager ARN for the ClickHouse llm_worker user password |
 | `clickhouse_readonly_user_credentials_secret_arn` | Secrets Manager ARN for the password of the ClickHouse SQL user `readonly_user` (profile: readonly, SELECT-only). Null when `helm.clickhouse.readonly_user` is disabled. |
 | `clickhouse_node_group` | Identity of the dedicated ClickHouse node group when active: `{ availability_zone, instance_type, size, label = { key, value }, taint = { key, value, effect } }`. Null when not active (`helm.deploy_charts = false`, `cluster.create = false`, or `manage_legacy_clickhouse_node_group = false`). Useful for verifying the resolved AZ during plan/apply review. |
+| `trace_export_ingest_bucket` | Name of the trace-export ingest bucket. Null when `trace_export_ingest` is unset. |
+| `trace_export_ingest_prefix` | Normalized key prefix the producer must write beneath. Null when `trace_export_ingest` is unset. |
+| `trace_export_writer_role_arn` | ARN of the writer IAM role the external producer assumes to upload trace files. Null when `trace_export_ingest` is unset. |
+| `trace_export_external_id` | Sensitive echo of `trace_export_ingest.external_id` for registration alongside the other outputs. Null when `trace_export_ingest` is unset. |
+| `trace_export_ingest_queue_arn` | ARN of the ingest notification SQS queue — hook for queue-depth/oldest-message-age monitoring. Null when `trace_export_ingest` is unset. |
+| `trace_export_ingest_queue_name` | Name of the ingest notification SQS queue. Null when `trace_export_ingest` is unset. |
 
 ## After Deployment
 
