@@ -129,10 +129,27 @@ locals {
   # the IAM GetObject resource ARN. Single source of truth for the rendered
   # receiver config, the trace-pipeline receiver list, and the awss3-receiver
   # IAM policy.
+  #
+  # When var.trace_export_ingest is set, the module synthesizes one more entry
+  # — "awss3/trace-export-ingest", consuming the module-created ingest
+  # bucket/queue (s3.tf/sqs.tf) via the plan-known name locals below — so the
+  # render, pipeline list, and collector read policy pick it up through the
+  # same path as caller-configured receivers. A caller map key that would
+  # collide is rejected by a precondition on the ingest queue.
   otel_awss3_receivers = {
     for id, r in merge(
       try(var.helm.opentelemetry_collector.awss3_receiver.enabled, false) ? { "awss3" = var.helm.opentelemetry_collector.awss3_receiver } : {},
       { for name, m in var.helm.opentelemetry_collector.awss3_receivers : "awss3/${name}" => m if m.enabled },
+      local.trace_export_ingest_enabled ? {
+        "awss3/trace-export-ingest" = {
+          sqs_queue_arn = local.trace_export_ingest_queue_arn
+          sqs_queue_url = local.trace_export_ingest_queue_url
+          sqs_region    = null
+          s3_bucket     = local.trace_export_ingest_bucket
+          s3_region     = null
+          s3_prefix     = local.trace_export_ingest_prefix
+        }
+      } : {},
       ) : id => {
       sqs_queue_arn = r.sqs_queue_arn
       sqs_queue_url = r.sqs_queue_url

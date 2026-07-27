@@ -68,35 +68,47 @@ resource "aws_iam_role" "otel_collector" {
 # and deduplicated (two receivers may share a bucket — never a queue, which
 # the helm variable validation rejects). With a single enabled receiver the
 # rendered JSON is identical to the policy this module has always attached.
+# When the trace-export ingest bucket uses a caller-supplied CMK, a fourth
+# statement grants the collector kms:Decrypt on that key so GetObject on the
+# SSE-KMS objects succeeds; without a CMK the statement list is unchanged.
 resource "aws_iam_role_policy" "otel_collector_awss3_receiver" {
   count = length(local.otel_awss3_receivers) > 0 ? 1 : 0
   name  = "awss3-receiver"
   role  = aws_iam_role.otel_collector.id
   policy = jsonencode({
     Version = "2012-10-17"
-    Statement = [
-      {
-        Effect = "Allow"
-        Action = [
-          "sqs:ReceiveMessage",
-          "sqs:DeleteMessage",
-          "sqs:GetQueueAttributes",
-          "sqs:GetQueueUrl",
-        ]
-        Resource = sort([for r in values(local.otel_awss3_receivers) : r.sqs_queue_arn])
-      },
-      {
-        Effect   = "Allow"
-        Action   = ["s3:GetObject"]
-        Resource = sort(distinct([for r in values(local.otel_awss3_receivers) : "arn:aws:s3:::${r.s3_bucket}/${r.s3_prefix}*"]))
-      },
-      {
-        # Some collector versions probe the bucket region.
-        Effect   = "Allow"
-        Action   = ["s3:GetBucketLocation"]
-        Resource = sort(distinct([for r in values(local.otel_awss3_receivers) : "arn:aws:s3:::${r.s3_bucket}"]))
-      },
-    ]
+    Statement = concat(
+      [
+        {
+          Effect = "Allow"
+          Action = [
+            "sqs:ReceiveMessage",
+            "sqs:DeleteMessage",
+            "sqs:GetQueueAttributes",
+            "sqs:GetQueueUrl",
+          ]
+          Resource = sort([for r in values(local.otel_awss3_receivers) : r.sqs_queue_arn])
+        },
+        {
+          Effect   = "Allow"
+          Action   = ["s3:GetObject"]
+          Resource = sort(distinct([for r in values(local.otel_awss3_receivers) : "arn:aws:s3:::${r.s3_bucket}/${r.s3_prefix}*"]))
+        },
+        {
+          # Some collector versions probe the bucket region.
+          Effect   = "Allow"
+          Action   = ["s3:GetBucketLocation"]
+          Resource = sort(distinct([for r in values(local.otel_awss3_receivers) : "arn:aws:s3:::${r.s3_bucket}"]))
+        },
+      ],
+      local.trace_export_ingest_enabled && var.trace_export_ingest.kms_key_arn != null ? [
+        {
+          Effect   = "Allow"
+          Action   = ["kms:Decrypt"]
+          Resource = [var.trace_export_ingest.kms_key_arn]
+        },
+      ] : [],
+    )
   })
 }
 

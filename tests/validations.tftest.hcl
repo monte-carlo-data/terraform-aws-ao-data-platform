@@ -1824,3 +1824,154 @@ run "trace_export_unset_creates_no_transport_resources" {
     error_message = "With trace_export_ingest unset, no transport resource may be planned — the zero-diff guarantee."
   }
 }
+
+# --- trace_export_ingest: receiver injection (block set) ---
+#
+# The synthesized "awss3/trace-export-ingest" entry flows through the same
+# normalization/render/IAM path as caller-configured receivers, built entirely
+# from the plan-known name locals — so the rendered helm block and the
+# collector policy are byte-assertable here. The zero-diff pins above (and the
+# byte-identical awss3 runs earlier in this file, untouched by this feature)
+# hold the unset direction.
+
+run "trace_export_receiver_injected_and_rendered" {
+  command = plan
+  variables {
+    cluster = {
+      create                = false
+      name                  = "test-cluster"
+      existing_cluster_name = "test-cluster"
+    }
+    trace_export_ingest = {
+      dc_execution_role_arn = "arn:aws:iam::210987654321:role/writer-caller"
+      external_id           = "external-id-value"
+    }
+  }
+  assert {
+    condition = jsonencode(local.helm_otel_awss3_block) == jsonencode({
+      config = {
+        receivers = {
+          "awss3/trace-export-ingest" = {
+            sqs = {
+              queue_url = "https://sqs.us-east-1.amazonaws.com/123456789012/test-cluster-trace-export-ingest"
+              region    = "us-east-1"
+            }
+            s3downloader = {
+              region    = "us-east-1"
+              s3_bucket = "test-cluster-trace-export-ingest-123456789012"
+              s3_prefix = "traces/"
+            }
+          }
+        }
+        service = { pipelines = { traces = { receivers = ["otlp", "awss3/trace-export-ingest"] } } }
+      }
+    })
+    error_message = "With only the ingest block set, the rendered awss3 helm block must contain exactly the synthesized receiver, consuming the derived queue/bucket, appended to the trace pipeline."
+  }
+  assert {
+    condition = aws_iam_role_policy.otel_collector_awss3_receiver[0].policy == jsonencode({
+      Version = "2012-10-17"
+      Statement = [
+        {
+          Effect = "Allow"
+          Action = [
+            "sqs:ReceiveMessage",
+            "sqs:DeleteMessage",
+            "sqs:GetQueueAttributes",
+            "sqs:GetQueueUrl",
+          ]
+          Resource = ["arn:aws:sqs:us-east-1:123456789012:test-cluster-trace-export-ingest"]
+        },
+        {
+          Effect   = "Allow"
+          Action   = ["s3:GetObject"]
+          Resource = ["arn:aws:s3:::test-cluster-trace-export-ingest-123456789012/traces/*"]
+        },
+        {
+          Effect   = "Allow"
+          Action   = ["s3:GetBucketLocation"]
+          Resource = ["arn:aws:s3:::test-cluster-trace-export-ingest-123456789012"]
+        },
+      ]
+    })
+    error_message = "The collector read policy must auto-widen to the synthesized receiver's queue and prefix-scoped bucket resources — with no CMK, exactly the three standard statements."
+  }
+}
+
+run "trace_export_receiver_coexists_with_caller_receivers" {
+  command = plan
+  variables {
+    cluster = {
+      create                = false
+      name                  = "test-cluster"
+      existing_cluster_name = "test-cluster"
+    }
+    trace_export_ingest = {
+      dc_execution_role_arn = "arn:aws:iam::210987654321:role/writer-caller"
+      external_id           = "external-id-value"
+    }
+    helm = {
+      deploy_charts = false
+      opentelemetry_collector = {
+        awss3_receiver = {
+          enabled       = true
+          sqs_queue_arn = "arn:aws:sqs:us-east-1:123456789012:queue-one"
+          sqs_queue_url = "https://sqs.us-east-1.amazonaws.com/123456789012/queue-one"
+          s3_bucket     = "bucket-one"
+          s3_prefix     = "traces"
+        }
+        awss3_receivers = {
+          extra = {
+            sqs_queue_arn = "arn:aws:sqs:us-east-1:123456789012:queue-two"
+            sqs_queue_url = "https://sqs.us-east-1.amazonaws.com/123456789012/queue-two"
+            s3_bucket     = "bucket-two"
+          }
+        }
+      }
+    }
+  }
+  assert {
+    condition     = jsonencode(sort(keys(local.otel_awss3_receivers))) == jsonencode(["awss3", "awss3/extra", "awss3/trace-export-ingest"])
+    error_message = "The synthesized ingest receiver must coexist with the caller's singular and map receivers under distinct component IDs."
+  }
+  assert {
+    condition     = jsonencode(local.helm_otel_awss3_block.config.service.pipelines.traces.receivers) == jsonencode(["otlp", "awss3", "awss3/extra", "awss3/trace-export-ingest"])
+    error_message = "The trace pipeline must list otlp plus every receiver — caller-configured and synthesized — in sorted component-ID order."
+  }
+  assert {
+    condition = jsonencode(jsondecode(aws_iam_role_policy.otel_collector_awss3_receiver[0].policy).Statement[0].Resource) == jsonencode([
+      "arn:aws:sqs:us-east-1:123456789012:queue-one",
+      "arn:aws:sqs:us-east-1:123456789012:queue-two",
+      "arn:aws:sqs:us-east-1:123456789012:test-cluster-trace-export-ingest",
+    ])
+    error_message = "The collector policy's SQS statement must cover the caller queues and the synthesized ingest queue, sorted."
+  }
+}
+
+run "trace_export_reserved_receiver_key_rejected" {
+  command = plan
+  variables {
+    cluster = {
+      create                = false
+      name                  = "test-cluster"
+      existing_cluster_name = "test-cluster"
+    }
+    trace_export_ingest = {
+      dc_execution_role_arn = "arn:aws:iam::210987654321:role/writer-caller"
+      external_id           = "external-id-value"
+    }
+    helm = {
+      deploy_charts = false
+      opentelemetry_collector = {
+        awss3_receivers = {
+          trace-export-ingest = {
+            sqs_queue_arn = "arn:aws:sqs:us-east-1:123456789012:queue-one"
+            sqs_queue_url = "https://sqs.us-east-1.amazonaws.com/123456789012/queue-one"
+            s3_bucket     = "bucket-one"
+          }
+        }
+      }
+    }
+  }
+  expect_failures = [aws_sqs_queue.trace_export_ingest]
+}

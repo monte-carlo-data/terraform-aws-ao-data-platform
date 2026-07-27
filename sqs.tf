@@ -20,6 +20,18 @@ resource "aws_sqs_queue" "trace_export_ingest" {
   message_retention_seconds  = 1209600 # 14 days (maximum)
   visibility_timeout_seconds = 300
   tags                       = var.tags
+
+  lifecycle {
+    # The synthesized receiver renders under the "awss3/trace-export-ingest"
+    # component ID; a caller awss3_receivers entry with that key would be
+    # silently overwritten in the merged map. Anchored here — not on the helm
+    # release — because this queue exists whenever the block is set, so the
+    # guard also fires for chartless (deploy_charts = false) deployments.
+    precondition {
+      condition     = !contains(keys(var.helm.opentelemetry_collector.awss3_receivers), "trace-export-ingest")
+      error_message = "helm.opentelemetry_collector.awss3_receivers must not contain the key \"trace-export-ingest\" while trace_export_ingest is set — that component ID (\"awss3/trace-export-ingest\") is reserved for the receiver this module synthesizes for the ingest leg."
+    }
+  }
 }
 
 resource "aws_sqs_queue_policy" "trace_export_ingest" {
