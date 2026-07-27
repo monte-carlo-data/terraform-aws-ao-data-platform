@@ -1384,7 +1384,7 @@ run "control_plane_subnets_never_reach_node_resolution" {
 # needs at least one day. cluster.create = false keeps module.eks out of the
 # plan (same technique as the awss3 runs above).
 
-run "trace_export_dc_role_arn_malformed_rejected" {
+run "trace_export_producer_role_arn_malformed_rejected" {
   command = plan
   variables {
     cluster = {
@@ -1393,14 +1393,14 @@ run "trace_export_dc_role_arn_malformed_rejected" {
       existing_cluster_name = "test-cluster"
     }
     trace_export_ingest = {
-      dc_execution_role_arn = "not-an-arn"
-      external_id           = "external-id-value"
+      producer_execution_role_arn = "not-an-arn"
+      external_id                 = "external-id-value"
     }
   }
   expect_failures = [var.trace_export_ingest]
 }
 
-run "trace_export_dc_role_arn_wildcard_account_rejected" {
+run "trace_export_producer_role_arn_wildcard_account_rejected" {
   command = plan
   variables {
     cluster = {
@@ -1409,14 +1409,14 @@ run "trace_export_dc_role_arn_wildcard_account_rejected" {
       existing_cluster_name = "test-cluster"
     }
     trace_export_ingest = {
-      dc_execution_role_arn = "arn:aws:iam::*:role/writer-caller"
-      external_id           = "external-id-value"
+      producer_execution_role_arn = "arn:aws:iam::*:role/writer-caller"
+      external_id                 = "external-id-value"
     }
   }
   expect_failures = [var.trace_export_ingest]
 }
 
-run "trace_export_dc_role_arn_wildcard_only_name_rejected" {
+run "trace_export_producer_role_arn_wildcard_only_name_rejected" {
   command = plan
   variables {
     cluster = {
@@ -1425,8 +1425,8 @@ run "trace_export_dc_role_arn_wildcard_only_name_rejected" {
       existing_cluster_name = "test-cluster"
     }
     trace_export_ingest = {
-      dc_execution_role_arn = "arn:aws:iam::123456789012:role/*"
-      external_id           = "external-id-value"
+      producer_execution_role_arn = "arn:aws:iam::123456789012:role/*"
+      external_id                 = "external-id-value"
     }
   }
   expect_failures = [var.trace_export_ingest]
@@ -1441,8 +1441,8 @@ run "trace_export_external_id_too_short_rejected" {
       existing_cluster_name = "test-cluster"
     }
     trace_export_ingest = {
-      dc_execution_role_arn = "arn:aws:iam::123456789012:role/writer-caller"
-      external_id           = "short"
+      producer_execution_role_arn = "arn:aws:iam::123456789012:role/writer-caller"
+      external_id                 = "short"
     }
   }
   expect_failures = [var.trace_export_ingest]
@@ -1457,9 +1457,9 @@ run "trace_export_prefix_leading_slash_rejected" {
       existing_cluster_name = "test-cluster"
     }
     trace_export_ingest = {
-      dc_execution_role_arn = "arn:aws:iam::123456789012:role/writer-caller"
-      external_id           = "external-id-value"
-      prefix                = "/traces/"
+      producer_execution_role_arn = "arn:aws:iam::123456789012:role/writer-caller"
+      external_id                 = "external-id-value"
+      prefix                      = "/traces/"
     }
   }
   expect_failures = [var.trace_export_ingest]
@@ -1474,9 +1474,9 @@ run "trace_export_prefix_empty_segment_rejected" {
       existing_cluster_name = "test-cluster"
     }
     trace_export_ingest = {
-      dc_execution_role_arn = "arn:aws:iam::123456789012:role/writer-caller"
-      external_id           = "external-id-value"
-      prefix                = "traces//tenant"
+      producer_execution_role_arn = "arn:aws:iam::123456789012:role/writer-caller"
+      external_id                 = "external-id-value"
+      prefix                      = "traces//tenant"
     }
   }
   expect_failures = [var.trace_export_ingest]
@@ -1491,9 +1491,9 @@ run "trace_export_lifecycle_days_zero_rejected" {
       existing_cluster_name = "test-cluster"
     }
     trace_export_ingest = {
-      dc_execution_role_arn = "arn:aws:iam::123456789012:role/writer-caller"
-      external_id           = "external-id-value"
-      lifecycle_days        = 0
+      producer_execution_role_arn = "arn:aws:iam::123456789012:role/writer-caller"
+      external_id                 = "external-id-value"
+      lifecycle_days              = 0
     }
   }
   expect_failures = [var.trace_export_ingest]
@@ -1503,10 +1503,10 @@ run "trace_export_lifecycle_days_zero_rejected" {
 #
 # The name/normalization locals read only variables plus the overridden
 # partition/caller-identity data sources, so the derived names, ARNs, and
-# queue URL are plan-assertable. The multi-segment prefix is the C-contract
-# acceptance case: a "/"-separated prefix must pass validation and normalize
-# to exactly one trailing "/" — later phases scope the notification filter,
-# IAM grants, and receiver entry to this same local.
+# queue URL are plan-assertable. Multi-segment prefixes are part of the
+# supported surface: a "/"-separated prefix must pass validation and
+# normalize to exactly one trailing "/" — the notification filter, IAM
+# grants, and receiver entry are all scoped to this same local.
 
 run "trace_export_multisegment_prefix_accepted" {
   command = plan
@@ -1517,9 +1517,9 @@ run "trace_export_multisegment_prefix_accepted" {
       existing_cluster_name = "test-cluster"
     }
     trace_export_ingest = {
-      dc_execution_role_arn = "arn:aws:iam::210987654321:role/writer-caller-*"
-      external_id           = "external-id-value"
-      prefix                = "traces/abc123"
+      producer_execution_role_arn = "arn:aws:iam::210987654321:role/writer-caller-*"
+      external_id                 = "external-id-value"
+      prefix                      = "traces/abc123"
     }
   }
   assert {
@@ -1553,9 +1553,9 @@ run "trace_export_bucket_name_override_accepted" {
       existing_cluster_name = "test-cluster"
     }
     trace_export_ingest = {
-      dc_execution_role_arn = "arn:aws:iam::210987654321:role/writer-caller"
-      external_id           = "external-id-value"
-      bucket_name           = "my-custom-ingest-bucket"
+      producer_execution_role_arn = "arn:aws:iam::210987654321:role/writer-caller"
+      external_id                 = "external-id-value"
+      bucket_name                 = "my-custom-ingest-bucket"
     }
   }
   assert {
@@ -1570,10 +1570,10 @@ run "trace_export_bucket_name_override_accepted" {
 
 # --- trace_export_ingest: zero-diff pins (block unset) ---
 #
-# Authored BEFORE the receiver-injection and IAM wiring changes land, against
-# the shipped rendering, so they prove back-compat against what existing
-# deployments actually run — not against the new code's own output. With the
-# block unset (explicitly null here, documenting the contract) every
+# Pinned against the rendering as it shipped before this feature existed, so
+# they prove the unset configuration stays back-compatible with what existing
+# deployments actually run — not merely self-consistent with current code.
+# With the block unset (explicitly null here, documenting the contract) every
 # trace-export local is inert, the gated caller-identity data source is not
 # read, and the receiver map / rendered helm block / collector policy are
 # byte-identical to the pre-feature shapes pinned in the awss3 runs above.
@@ -1676,10 +1676,10 @@ run "trace_export_transport_resources_render" {
       existing_cluster_name = "test-cluster"
     }
     trace_export_ingest = {
-      dc_execution_role_arn = "arn:aws:iam::210987654321:role/writer-caller"
-      external_id           = "external-id-value"
-      agent_role_arn        = "arn:aws:iam::123456789012:role/direct-writer"
-      lifecycle_days        = 5
+      producer_execution_role_arn = "arn:aws:iam::210987654321:role/writer-caller"
+      external_id                 = "external-id-value"
+      agent_role_arn              = "arn:aws:iam::123456789012:role/direct-writer"
+      lifecycle_days              = 5
     }
   }
   assert {
@@ -1781,8 +1781,8 @@ run "trace_export_default_encryption_is_sse_s3" {
       existing_cluster_name = "test-cluster"
     }
     trace_export_ingest = {
-      dc_execution_role_arn = "arn:aws:iam::210987654321:role/writer-caller"
-      external_id           = "external-id-value"
+      producer_execution_role_arn = "arn:aws:iam::210987654321:role/writer-caller"
+      external_id                 = "external-id-value"
     }
   }
   assert {
@@ -1843,8 +1843,8 @@ run "trace_export_receiver_injected_and_rendered" {
       existing_cluster_name = "test-cluster"
     }
     trace_export_ingest = {
-      dc_execution_role_arn = "arn:aws:iam::210987654321:role/writer-caller"
-      external_id           = "external-id-value"
+      producer_execution_role_arn = "arn:aws:iam::210987654321:role/writer-caller"
+      external_id                 = "external-id-value"
     }
   }
   assert {
@@ -1907,8 +1907,8 @@ run "trace_export_receiver_coexists_with_caller_receivers" {
       existing_cluster_name = "test-cluster"
     }
     trace_export_ingest = {
-      dc_execution_role_arn = "arn:aws:iam::210987654321:role/writer-caller"
-      external_id           = "external-id-value"
+      producer_execution_role_arn = "arn:aws:iam::210987654321:role/writer-caller"
+      external_id                 = "external-id-value"
     }
     helm = {
       deploy_charts = false
@@ -1957,8 +1957,8 @@ run "trace_export_reserved_receiver_key_rejected" {
       existing_cluster_name = "test-cluster"
     }
     trace_export_ingest = {
-      dc_execution_role_arn = "arn:aws:iam::210987654321:role/writer-caller"
-      external_id           = "external-id-value"
+      producer_execution_role_arn = "arn:aws:iam::210987654321:role/writer-caller"
+      external_id                 = "external-id-value"
     }
     helm = {
       deploy_charts = false
@@ -1991,8 +1991,8 @@ run "trace_export_writer_role_trust_and_policy" {
       existing_cluster_name = "test-cluster"
     }
     trace_export_ingest = {
-      dc_execution_role_arn = "arn:aws:iam::210987654321:role/writer-caller-*"
-      external_id           = "external-id-value"
+      producer_execution_role_arn = "arn:aws:iam::210987654321:role/writer-caller-*"
+      external_id                 = "external-id-value"
     }
   }
   assert {
@@ -2060,8 +2060,8 @@ run "trace_export_outputs_populated_when_set" {
       existing_cluster_name = "test-cluster"
     }
     trace_export_ingest = {
-      dc_execution_role_arn = "arn:aws:iam::210987654321:role/writer-caller"
-      external_id           = "external-id-value"
+      producer_execution_role_arn = "arn:aws:iam::210987654321:role/writer-caller"
+      external_id                 = "external-id-value"
     }
   }
   assert {
@@ -2120,9 +2120,9 @@ run "trace_export_cmk_widens_encryption_and_policies" {
       existing_cluster_name = "test-cluster"
     }
     trace_export_ingest = {
-      dc_execution_role_arn = "arn:aws:iam::210987654321:role/writer-caller"
-      external_id           = "external-id-value"
-      kms_key_arn           = "arn:aws:kms:us-east-1:123456789012:key/11111111-2222-3333-4444-555555555555"
+      producer_execution_role_arn = "arn:aws:iam::210987654321:role/writer-caller"
+      external_id                 = "external-id-value"
+      kms_key_arn                 = "arn:aws:kms:us-east-1:123456789012:key/11111111-2222-3333-4444-555555555555"
     }
   }
   assert {

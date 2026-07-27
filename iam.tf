@@ -128,11 +128,11 @@ resource "aws_iam_role" "trace_export_writer" {
     Version = "2012-10-17"
     Statement = [{
       Effect    = "Allow"
-      Principal = { AWS = "arn:${local.trace_export_dc_partition}:iam::${local.trace_export_dc_account_id}:root" }
+      Principal = { AWS = "arn:${local.trace_export_producer_partition}:iam::${local.trace_export_producer_account_id}:root" }
       Action    = "sts:AssumeRole"
       Condition = {
         StringEquals = { "sts:ExternalId" = var.trace_export_ingest.external_id }
-        StringLike   = { "aws:PrincipalArn" = var.trace_export_ingest.dc_execution_role_arn }
+        StringLike   = { "aws:PrincipalArn" = var.trace_export_ingest.producer_execution_role_arn }
       }
     }]
   })

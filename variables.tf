@@ -668,7 +668,9 @@ variable "helm" {
     receivers sharing a queue silently lose notifications — give each receiver
     its own dedicated queue; to feed several receivers from one bucket's
     events, fan the bucket's notifications out via SNS with a separate queue
-    per receiver.
+    per receiver. The map key "trace-export-ingest" is reserved while
+    var.trace_export_ingest is set — the module synthesizes that receiver for
+    the trace-export ingest leg.
 
     opentelemetry_collector.awss3_receiver (singular) is the deprecated
     single-receiver form: use awss3_receivers instead. It continues to work
@@ -787,7 +789,7 @@ variable "trace_export_ingest" {
     upload trace files. Leave null (the default) to create none of this —
     unset, the module plans identically to previous releases.
 
-    dc_execution_role_arn is the external execution role trusted to assume
+    producer_execution_role_arn is the external execution role trusted to assume
     the writer role. It accepts an exact role ARN or a wildcard pattern in
     the role-NAME portion only (e.g. "arn:aws:iam::123456789012:role/etl-*")
     so the external role can be re-provisioned without re-applying this
@@ -822,22 +824,22 @@ variable "trace_export_ingest" {
     permissions.
   EOT
   type = object({
-    dc_execution_role_arn = string
-    external_id           = string
-    agent_role_arn        = optional(string, null)
-    bucket_name           = optional(string, null)
-    prefix                = optional(string, "traces/")
-    lifecycle_days        = optional(number, 3)
-    kms_key_arn           = optional(string, null)
+    producer_execution_role_arn = string
+    external_id                 = string
+    agent_role_arn              = optional(string, null)
+    bucket_name                 = optional(string, null)
+    prefix                      = optional(string, "traces/")
+    lifecycle_days              = optional(number, 3)
+    kms_key_arn                 = optional(string, null)
   })
   default = null
 
   validation {
     condition = var.trace_export_ingest == null ? true : (
-      can(regex("^arn:[a-z0-9-]+:iam::[0-9]{12}:role/.+$", var.trace_export_ingest.dc_execution_role_arn)) &&
-      length(replace(replace(element(split(":role/", var.trace_export_ingest.dc_execution_role_arn), 1), "*", ""), "/", "")) > 0
+      can(regex("^arn:[a-z0-9-]+:iam::[0-9]{12}:role/.+$", var.trace_export_ingest.producer_execution_role_arn)) &&
+      length(replace(replace(element(split(":role/", var.trace_export_ingest.producer_execution_role_arn), 1), "*", ""), "/", "")) > 0
     )
-    error_message = "trace_export_ingest.dc_execution_role_arn must be an IAM role ARN with a literal 12-digit account ID (\"arn:<partition>:iam::<account-id>:role/<name>\"). Wildcards are allowed only in the role-name portion, and the name must not consist of wildcards alone — this pattern is the effective principal boundary of the writer role's trust policy."
+    error_message = "trace_export_ingest.producer_execution_role_arn must be an IAM role ARN with a literal 12-digit account ID (\"arn:<partition>:iam::<account-id>:role/<name>\"). Wildcards are allowed only in the role-name portion, and the name must not consist of wildcards alone — this pattern is the effective principal boundary of the writer role's trust policy."
   }
 
   validation {

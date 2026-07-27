@@ -346,8 +346,8 @@ locals {
   # segments are literal — while the configured ARN/pattern itself lands in
   # the trust policy's aws:PrincipalArn condition. Wildcards therefore live
   # only in the condition, never in the principal.
-  trace_export_dc_partition  = local.trace_export_ingest_enabled ? split(":", var.trace_export_ingest.dc_execution_role_arn)[1] : null
-  trace_export_dc_account_id = local.trace_export_ingest_enabled ? split(":", var.trace_export_ingest.dc_execution_role_arn)[4] : null
+  trace_export_producer_partition  = local.trace_export_ingest_enabled ? split(":", var.trace_export_ingest.producer_execution_role_arn)[1] : null
+  trace_export_producer_account_id = local.trace_export_ingest_enabled ? split(":", var.trace_export_ingest.producer_execution_role_arn)[4] : null
 
   trace_export_ingest_queue_name = local.trace_export_ingest_enabled ? "${local.effective_cluster_name}-trace-export-ingest" : null
   trace_export_ingest_queue_arn  = local.trace_export_ingest_enabled ? "arn:${data.aws_partition.current.partition}:sqs:${var.region}:${data.aws_caller_identity.trace_export_ingest[0].account_id}:${local.trace_export_ingest_queue_name}" : null
