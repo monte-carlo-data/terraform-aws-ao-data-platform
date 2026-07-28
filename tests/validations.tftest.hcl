@@ -1568,11 +1568,11 @@ run "trace_export_multisegment_prefix_accepted" {
     error_message = "A multi-segment prefix must pass validation and normalize to exactly one trailing \"/\"."
   }
   assert {
-    condition     = local.trace_export_ingest_bucket == "test-cluster-trace-export-ingest-123456789012"
-    error_message = "The default ingest bucket name must be <cluster-name>-trace-export-ingest-<account-id>."
+    condition     = local.trace_export_ingest_bucket == "test-cluster-us-east-1-trace-export-ingest-123456789012"
+    error_message = "The default ingest bucket name must be <cluster-name>-<region>-trace-export-ingest-<account-id>."
   }
   assert {
-    condition     = local.trace_export_ingest_bucket_arn == "arn:aws:s3:::test-cluster-trace-export-ingest-123456789012"
+    condition     = local.trace_export_ingest_bucket_arn == "arn:aws:s3:::test-cluster-us-east-1-trace-export-ingest-123456789012"
     error_message = "The ingest bucket ARN must be string-built from the derived bucket name (plan-known, never a resource attribute)."
   }
   assert {
@@ -1606,6 +1606,33 @@ run "trace_export_bucket_name_override_accepted" {
   assert {
     condition     = local.trace_export_ingest_prefix == "traces/"
     error_message = "The prefix default must be \"traces/\"."
+  }
+}
+
+# The default bucket name is account-global (region_qualified_name + account
+# ID), not just cluster + account: S3 bucket names are global, so two applies
+# in one account with the same cluster name in different regions must NOT
+# collide. Re-running the default-name case under a second region proves the
+# region segment is present and load-bearing — a revert to effective_cluster_name
+# would make both regions compute an identical name.
+
+run "trace_export_default_bucket_name_is_region_qualified" {
+  command = plan
+  variables {
+    region = "us-west-2"
+    cluster = {
+      create                = false
+      name                  = "test-cluster"
+      existing_cluster_name = "test-cluster"
+    }
+    trace_export_ingest = {
+      producer_execution_role_arn = "arn:aws:iam::210987654321:role/writer-caller"
+    }
+    trace_export_external_id = "external-id-value"
+  }
+  assert {
+    condition     = local.trace_export_ingest_bucket == "test-cluster-us-west-2-trace-export-ingest-123456789012"
+    error_message = "The default ingest bucket name must carry the region, so the same cluster name in two regions of one account does not collide."
   }
 }
 
@@ -1724,7 +1751,7 @@ run "trace_export_transport_resources_render" {
     trace_export_external_id = "external-id-value"
   }
   assert {
-    condition     = aws_s3_bucket.trace_export_ingest[0].bucket == "test-cluster-trace-export-ingest-123456789012"
+    condition     = aws_s3_bucket.trace_export_ingest[0].bucket == "test-cluster-us-east-1-trace-export-ingest-123456789012"
     error_message = "The ingest bucket must be created with the derived default name."
   }
   assert {
@@ -1760,8 +1787,8 @@ run "trace_export_transport_resources_render" {
           Principal = "*"
           Action    = "s3:*"
           Resource = [
-            "arn:aws:s3:::test-cluster-trace-export-ingest-123456789012",
-            "arn:aws:s3:::test-cluster-trace-export-ingest-123456789012/*",
+            "arn:aws:s3:::test-cluster-us-east-1-trace-export-ingest-123456789012",
+            "arn:aws:s3:::test-cluster-us-east-1-trace-export-ingest-123456789012/*",
           ]
           Condition = { Bool = { "aws:SecureTransport" = "false" } }
         },
@@ -1770,7 +1797,7 @@ run "trace_export_transport_resources_render" {
           Effect    = "Allow"
           Principal = { AWS = "arn:aws:iam::123456789012:role/direct-writer" }
           Action    = "s3:PutObject"
-          Resource  = "arn:aws:s3:::test-cluster-trace-export-ingest-123456789012/traces/*"
+          Resource  = "arn:aws:s3:::test-cluster-us-east-1-trace-export-ingest-123456789012/traces/*"
         },
       ]
     })
@@ -1787,7 +1814,7 @@ run "trace_export_transport_resources_render" {
           Action    = "sqs:SendMessage"
           Resource  = "arn:aws:sqs:us-east-1:123456789012:test-cluster-trace-export-ingest"
           Condition = {
-            ArnEquals    = { "aws:SourceArn" = "arn:aws:s3:::test-cluster-trace-export-ingest-123456789012" }
+            ArnEquals    = { "aws:SourceArn" = "arn:aws:s3:::test-cluster-us-east-1-trace-export-ingest-123456789012" }
             StringEquals = { "aws:SourceAccount" = "123456789012" }
           }
         },
@@ -1810,6 +1837,60 @@ run "trace_export_transport_resources_render" {
       tolist(aws_s3_bucket_notification.trace_export_ingest[0].queue)[0].events == toset(["s3:ObjectCreated:*"])
     )
     error_message = "The bucket notification must target the derived queue ARN, filter on the normalized ingest prefix, and fire on all ObjectCreated events."
+  }
+}
+
+# Every other trace-export run uses the default prefix "traces/", which is
+# already normalized — so var.trace_export_ingest.prefix and
+# local.trace_export_ingest_prefix are identical in all of them, and a resource
+# wired to the raw var instead of the normalized local would pass unnoticed
+# (trace_export_multisegment_prefix_accepted asserts the local only). This run
+# feeds an un-normalized multi-segment prefix ("traces/tenant-a", no trailing
+# "/") and pins the NORMALIZED value at every resource that consumes it: the
+# lifecycle filter, the bucket-notification filter, the bucket-policy agent
+# grant, the writer policy, the collector read policy, and the rendered
+# receiver's s3downloader. A caller prefix of "traces" (no slash) would
+# otherwise yield "bucket/traces*", over-matching sibling keys like
+# "tracesfoo/" — the exact drift the trailing-slash normalization prevents.
+
+run "trace_export_nondefault_prefix_normalized_at_resources" {
+  command = plan
+  variables {
+    cluster = {
+      create                = false
+      name                  = "test-cluster"
+      existing_cluster_name = "test-cluster"
+    }
+    trace_export_ingest = {
+      producer_execution_role_arn = "arn:aws:iam::210987654321:role/writer-caller"
+      agent_role_arn              = "arn:aws:iam::123456789012:role/direct-writer"
+      prefix                      = "traces/tenant-a"
+    }
+    trace_export_external_id = "external-id-value"
+  }
+  assert {
+    condition     = aws_s3_bucket_lifecycle_configuration.trace_export_ingest[0].rule[0].filter[0].prefix == "traces/tenant-a/"
+    error_message = "The lifecycle rule must scope to the NORMALIZED prefix (one trailing slash), not the raw caller input."
+  }
+  assert {
+    condition     = tolist(aws_s3_bucket_notification.trace_export_ingest[0].queue)[0].filter_prefix == "traces/tenant-a/"
+    error_message = "The bucket-notification filter must use the normalized prefix — a bare prefix would over-match sibling keys."
+  }
+  assert {
+    condition     = jsondecode(aws_s3_bucket_policy.trace_export_ingest[0].policy).Statement[1].Resource == "arn:aws:s3:::test-cluster-us-east-1-trace-export-ingest-123456789012/traces/tenant-a/*"
+    error_message = "The bucket-policy agent grant must scope PutObject to the normalized prefix."
+  }
+  assert {
+    condition     = jsondecode(aws_iam_role_policy.trace_export_writer[0].policy).Statement[0].Resource[0] == "arn:aws:s3:::test-cluster-us-east-1-trace-export-ingest-123456789012/traces/tenant-a/*"
+    error_message = "The writer policy must scope PutObject to the normalized prefix."
+  }
+  assert {
+    condition     = jsondecode(aws_iam_role_policy.otel_collector_awss3_receiver[0].policy).Statement[1].Resource[0] == "arn:aws:s3:::test-cluster-us-east-1-trace-export-ingest-123456789012/traces/tenant-a/*"
+    error_message = "The collector read policy must scope GetObject to the normalized prefix."
+  }
+  assert {
+    condition     = local.helm_otel_awss3_block.config.receivers["awss3/trace-export-ingest"].s3downloader.s3_prefix == "traces/tenant-a/"
+    error_message = "The rendered receiver's s3downloader.s3_prefix must be the normalized prefix."
   }
 }
 
@@ -1937,7 +2018,7 @@ run "trace_export_receiver_injected_and_rendered" {
             }
             s3downloader = {
               region    = "us-east-1"
-              s3_bucket = "test-cluster-trace-export-ingest-123456789012"
+              s3_bucket = "test-cluster-us-east-1-trace-export-ingest-123456789012"
               s3_prefix = "traces/"
             }
           }
@@ -1964,12 +2045,12 @@ run "trace_export_receiver_injected_and_rendered" {
         {
           Effect   = "Allow"
           Action   = ["s3:GetObject"]
-          Resource = ["arn:aws:s3:::test-cluster-trace-export-ingest-123456789012/traces/*"]
+          Resource = ["arn:aws:s3:::test-cluster-us-east-1-trace-export-ingest-123456789012/traces/*"]
         },
         {
           Effect   = "Allow"
           Action   = ["s3:GetBucketLocation"]
-          Resource = ["arn:aws:s3:::test-cluster-trace-export-ingest-123456789012"]
+          Resource = ["arn:aws:s3:::test-cluster-us-east-1-trace-export-ingest-123456789012"]
         },
       ]
     })
@@ -2130,6 +2211,40 @@ run "trace_export_caller_receiver_reuses_ingest_queue_arn_rejected" {
   expect_failures = [aws_sqs_queue.trace_export_ingest]
 }
 
+# The run above exercises only the awss3_receivers (map) half of the queue-reuse
+# precondition; its singular try(awss3_receiver.enabled, false) ? ... half is
+# only ever evaluated in its passing direction elsewhere. This run drives the
+# singular branch to its FAILING direction — mirroring the deprecated-form
+# coverage that awss3_singular_and_map_duplicate_queue_rejected gives the
+# sibling duplicate-queue validation.
+
+run "trace_export_singular_awss3_receiver_reuses_ingest_queue_arn_rejected" {
+  command = plan
+  variables {
+    cluster = {
+      create                = false
+      name                  = "test-cluster"
+      existing_cluster_name = "test-cluster"
+    }
+    trace_export_ingest = {
+      producer_execution_role_arn = "arn:aws:iam::210987654321:role/writer-caller"
+    }
+    trace_export_external_id = "external-id-value"
+    helm = {
+      deploy_charts = false
+      opentelemetry_collector = {
+        awss3_receiver = {
+          enabled       = true
+          sqs_queue_arn = "arn:aws:sqs:us-east-1:123456789012:test-cluster-trace-export-ingest"
+          sqs_queue_url = "https://sqs.us-east-1.amazonaws.com/123456789012/test-cluster-trace-export-ingest"
+          s3_bucket     = "bucket-hijack"
+        }
+      }
+    }
+  }
+  expect_failures = [aws_sqs_queue.trace_export_ingest]
+}
+
 # --- trace_export_ingest: writer role (block set) ---
 #
 # The trust policy is a pure function of variables (the account ID and
@@ -2175,7 +2290,7 @@ run "trace_export_writer_role_trust_and_policy" {
         {
           Effect   = "Allow"
           Action   = ["s3:PutObject"]
-          Resource = ["arn:aws:s3:::test-cluster-trace-export-ingest-123456789012/traces/*"]
+          Resource = ["arn:aws:s3:::test-cluster-us-east-1-trace-export-ingest-123456789012/traces/*"]
         },
       ]
     })
@@ -2303,7 +2418,7 @@ run "trace_export_outputs_populated_when_set" {
   }
   assert {
     condition = (
-      output.trace_export_ingest_bucket == "test-cluster-trace-export-ingest-123456789012" &&
+      output.trace_export_ingest_bucket == "test-cluster-us-east-1-trace-export-ingest-123456789012" &&
       output.trace_export_ingest_prefix == "traces/" &&
       output.trace_export_writer_role_arn == "arn:aws:iam::123456789012:role/test-cluster-us-east-1-trace-export-writer" &&
       nonsensitive(output.trace_export_external_id) == "external-id-value" &&
@@ -2334,6 +2449,31 @@ run "trace_export_outputs_null_when_unset" {
       output.trace_export_ingest_queue_name == null
     )
     error_message = "With the block unset, all six trace-export outputs must be null."
+  }
+}
+
+# The five null-derived outputs above prove themselves via genuinely-null
+# locals, but trace_export_external_id is a plain variable — so the run above
+# (external ID left at its null default) would pass whether or not the output's
+# enabled gate exists. This run sets a non-null external ID with the block
+# still unset: only the "local.trace_export_ingest_enabled ? ... : null" gate
+# keeps a sensitive value from echoing out of a deployment that provisioned
+# nothing. Drop the gate and this assertion fails.
+
+run "trace_export_external_id_output_gated_off_when_unset" {
+  command = plan
+  variables {
+    cluster = {
+      create                = false
+      name                  = "test-cluster"
+      existing_cluster_name = "test-cluster"
+    }
+    trace_export_ingest      = null
+    trace_export_external_id = "external-id-value"
+  }
+  assert {
+    condition     = nonsensitive(output.trace_export_external_id) == null
+    error_message = "With the block unset, trace_export_external_id must be gated to null even when the input variable carries a value — the output must not echo a secret from a deployment that provisioned nothing."
   }
 }
 
@@ -2403,6 +2543,12 @@ run "trace_export_cmk_widens_encryption_and_policies" {
 # s3.tf/iam.tf — this run pins that they compose rather than one silently
 # suppressing the other: both bucket-policy statements render AND both KMS
 # grants render, all in the same plan.
+#
+# This is a plan-time RENDERING pin only; it does NOT assert the combination
+# works at runtime. agent_role_arn is cross-account, and this module cannot
+# grant a foreign principal KMS access — so for the agent's SSE-KMS PUTs to
+# succeed, the CMK's own key policy must grant it kms:GenerateDataKey/Encrypt
+# (see the kms_key_arn docs in variables.tf and the README Encryption note).
 
 run "trace_export_agent_role_arn_and_cmk_together" {
   command = plan
@@ -2429,8 +2575,8 @@ run "trace_export_agent_role_arn_and_cmk_together" {
           Principal = "*"
           Action    = "s3:*"
           Resource = [
-            "arn:aws:s3:::test-cluster-trace-export-ingest-123456789012",
-            "arn:aws:s3:::test-cluster-trace-export-ingest-123456789012/*",
+            "arn:aws:s3:::test-cluster-us-east-1-trace-export-ingest-123456789012",
+            "arn:aws:s3:::test-cluster-us-east-1-trace-export-ingest-123456789012/*",
           ]
           Condition = { Bool = { "aws:SecureTransport" = "false" } }
         },
@@ -2439,7 +2585,7 @@ run "trace_export_agent_role_arn_and_cmk_together" {
           Effect    = "Allow"
           Principal = { AWS = "arn:aws:iam::210987654321:role/agent-writer" }
           Action    = "s3:PutObject"
-          Resource  = "arn:aws:s3:::test-cluster-trace-export-ingest-123456789012/traces/*"
+          Resource  = "arn:aws:s3:::test-cluster-us-east-1-trace-export-ingest-123456789012/traces/*"
         },
       ]
     })

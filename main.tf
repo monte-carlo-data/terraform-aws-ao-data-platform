@@ -344,12 +344,14 @@ locals {
   # from over-matching sibling keys in prefix-scoped IAM resource ARNs.
   trace_export_ingest_prefix = local.trace_export_ingest_enabled ? "${trimsuffix(var.trace_export_ingest.prefix, "/")}/" : null
 
-  # Bucket names are globally unique, so the default carries the account ID;
-  # region-scoped resources otherwise use effective_cluster_name (see the
-  # naming notes at the top of this file).
+  # S3 bucket names are globally unique, so the default is region_qualified_name
+  # (cluster + region) plus the account ID — the same account-global stem the
+  # writer role uses. The account ID alone is not enough: two applies in one
+  # account with the same cluster name in different regions would otherwise
+  # compute an identical name and collide on BucketAlreadyOwnedByYou.
   trace_export_ingest_bucket = local.trace_export_ingest_enabled ? coalesce(
     var.trace_export_ingest.bucket_name,
-    "${local.effective_cluster_name}-trace-export-ingest-${data.aws_caller_identity.trace_export_ingest[0].account_id}",
+    "${local.region_qualified_name}-trace-export-ingest-${data.aws_caller_identity.trace_export_ingest[0].account_id}",
   ) : null
   trace_export_ingest_bucket_arn = local.trace_export_ingest_enabled ? "arn:${data.aws_partition.current.partition}:s3:::${local.trace_export_ingest_bucket}" : null
 

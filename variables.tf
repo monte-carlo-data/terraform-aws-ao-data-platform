@@ -668,9 +668,11 @@ variable "helm" {
     receivers sharing a queue silently lose notifications — give each receiver
     its own dedicated queue; to feed several receivers from one bucket's
     events, fan the bucket's notifications out via SNS with a separate queue
-    per receiver. The map key "trace-export-ingest" is reserved while
-    var.trace_export_ingest is set — the module synthesizes that receiver for
-    the trace-export ingest leg.
+    per receiver. The map key "trace-export-ingest" is reserved for enabled
+    entries while var.trace_export_ingest is set — the module synthesizes that
+    receiver for the trace-export ingest leg. A disabled entry under that key
+    is dropped from the merge before rendering, so it is fine to keep (e.g. to
+    stage a future receiver).
 
     opentelemetry_collector.awss3_receiver (singular) is the deprecated
     single-receiver form: use awss3_receivers instead. It continues to work
@@ -829,7 +831,12 @@ variable "trace_export_ingest" {
     kms_key_arn optionally encrypts the bucket with a customer-managed KMS
     key (SSE-KMS with S3 Bucket Keys) instead of the default SSE-S3, and
     widens the writer and collector policies with the matching KMS
-    permissions.
+    permissions. Those are identity-policy grants on same-account roles, so
+    they take effect only if the CMK's key policy delegates to the account;
+    a tightened key policy must name the collector IRSA role and the writer
+    role explicitly. Cross-account KMS access cannot be granted from here, so
+    when agent_role_arn is also set the key policy must itself grant that
+    role kms:GenerateDataKey/kms:Encrypt or its SSE-KMS PUTs fail.
   EOT
   type = object({
     producer_execution_role_arn = string
