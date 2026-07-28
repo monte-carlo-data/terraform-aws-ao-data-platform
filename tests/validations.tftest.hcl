@@ -1432,6 +1432,25 @@ run "trace_export_producer_role_arn_wildcard_only_name_rejected" {
   expect_failures = [var.trace_export_ingest]
 }
 
+# "?" is a single-character wildcard in the trust policy's StringLike match,
+# so a name of nothing but "?" is as unbounded as "*" — the guard must strip
+# it before the wildcards-alone length check, not just "*".
+run "trace_export_producer_role_arn_question_only_name_rejected" {
+  command = plan
+  variables {
+    cluster = {
+      create                = false
+      name                  = "test-cluster"
+      existing_cluster_name = "test-cluster"
+    }
+    trace_export_ingest = {
+      producer_execution_role_arn = "arn:aws:iam::123456789012:role/????????"
+    }
+    trace_export_external_id = "external-id-value"
+  }
+  expect_failures = [var.trace_export_ingest]
+}
+
 run "trace_export_external_id_too_short_rejected" {
   command = plan
   variables {

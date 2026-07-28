@@ -844,9 +844,9 @@ variable "trace_export_ingest" {
   validation {
     condition = var.trace_export_ingest == null ? true : (
       can(regex("^arn:[a-z0-9-]+:iam::[0-9]{12}:role/.+$", var.trace_export_ingest.producer_execution_role_arn)) &&
-      length(replace(replace(element(split(":role/", var.trace_export_ingest.producer_execution_role_arn), 1), "*", ""), "/", "")) > 0
+      length(replace(replace(replace(element(split(":role/", var.trace_export_ingest.producer_execution_role_arn), 1), "*", ""), "?", ""), "/", "")) > 0
     )
-    error_message = "trace_export_ingest.producer_execution_role_arn must be an IAM role ARN with a literal 12-digit account ID (\"arn:<partition>:iam::<account-id>:role/<name>\"). Wildcards are allowed only in the role-name portion, and the name must not consist of wildcards alone — this pattern is the effective principal boundary of the writer role's trust policy."
+    error_message = "trace_export_ingest.producer_execution_role_arn must be an IAM role ARN with a literal 12-digit account ID (\"arn:<partition>:iam::<account-id>:role/<name>\"). Wildcards (\"*\" and \"?\") are allowed only in the role-name portion, and the name must not consist of wildcards alone — this pattern is the effective principal boundary of the writer role's trust policy."
   }
 
   validation {
