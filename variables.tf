@@ -668,7 +668,9 @@ variable "helm" {
     receivers sharing a queue silently lose notifications — give each receiver
     its own dedicated queue; to feed several receivers from one bucket's
     events, fan the bucket's notifications out via SNS with a separate queue
-    per receiver.
+    per receiver. The map key "trace-export-ingest" is reserved while
+    var.trace_export_ingest is set — the module synthesizes that receiver for
+    the trace-export ingest leg.
 
     opentelemetry_collector.awss3_receiver (singular) is the deprecated
     single-receiver form: use awss3_receivers instead. It continues to work
@@ -771,6 +773,122 @@ variable "helm" {
       [for r in values(var.helm.opentelemetry_collector.awss3_receivers) : r.sqs_queue_arn if r.enabled],
     ))
     error_message = "Every enabled awss3 receiver (helm.opentelemetry_collector.awss3_receiver and awss3_receivers entries) must consume its own dedicated SQS queue — duplicate sqs_queue_arn values are rejected. In SQS mode each receiver deletes messages whose S3 records it filtered out, so receivers sharing a queue silently lose notifications."
+  }
+}
+
+# --- Trace Export Ingest ---
+
+variable "trace_export_ingest" {
+  description = <<-EOT
+    Optional trace-export ingest leg. When set, the module provisions the
+    resources an external trace producer needs to deliver OTLP trace files
+    into this deployment's collector: a dedicated S3 ingest bucket with a
+    short object lifecycle, an SQS queue wired to the bucket's object-created
+    notifications, an awss3 receiver consuming that queue, and a writer IAM
+    role an external execution role can assume (external-ID guarded) to
+    upload trace files. Leave null (the default) to create none of this —
+    unset, the module plans identically to previous releases.
+
+    producer_execution_role_arn is the external execution role trusted to assume
+    the writer role. It accepts an exact role ARN or a wildcard pattern in
+    the role-NAME portion only (e.g. "arn:aws:iam::123456789012:role/etl-*")
+    so the external role can be re-provisioned without re-applying this
+    module. The account ID must be literal — it anchors the trust policy's
+    principal — and the pattern is the effective principal boundary within
+    that account, so keep it as narrow as possible.
+
+    The writer role's trust policy also carries an sts:ExternalId condition
+    (confused-deputy guard), supplied separately via the sensitive
+    trace_export_external_id variable — required whenever this block is set.
+
+    agent_role_arn optionally grants one additional role s3:PutObject on the
+    ingest prefix via the bucket policy — for producers that write directly
+    instead of assuming the writer role. It must be a well-formed IAM role
+    ARN with a literal 12-digit account ID; unlike producer_execution_role_arn
+    it is embedded verbatim as a bucket-policy Principal rather than matched
+    via a trust-policy condition, so no wildcards are permitted anywhere in
+    the ARN.
+
+    bucket_name overrides the default ingest bucket name,
+    "<cluster-name>-trace-export-ingest-<account-id>". It must name a bucket
+    that does NOT already exist: the module always creates and owns this
+    bucket (force_destroy — it holds transit data). Pointing bucket_name at a
+    pre-existing bucket adopts that bucket into this module's state — its
+    bucket policy and event-notification configuration are REPLACED with the
+    module's own, and a later teardown or unset of trace_export_ingest
+    deletes its contents.
+
+    prefix (default "traces/") is the key prefix the producer writes under;
+    the receiver, lifecycle rule, notification filter, and IAM grants are all
+    scoped to it. Multi-segment prefixes ("traces/tenant-a/") are supported.
+
+    lifecycle_days (default 3) expires objects under the prefix and aborts
+    incomplete multipart uploads at the same age — the bucket is transit,
+    not storage.
+
+    kms_key_arn optionally encrypts the bucket with a customer-managed KMS
+    key (SSE-KMS with S3 Bucket Keys) instead of the default SSE-S3, and
+    widens the writer and collector policies with the matching KMS
+    permissions.
+  EOT
+  type = object({
+    producer_execution_role_arn = string
+    agent_role_arn              = optional(string, null)
+    bucket_name                 = optional(string, null)
+    prefix                      = optional(string, "traces/")
+    lifecycle_days              = optional(number, 3)
+    kms_key_arn                 = optional(string, null)
+  })
+  default = null
+
+  validation {
+    condition = var.trace_export_ingest == null ? true : (
+      can(regex("^arn:[a-z0-9-]+:iam::[0-9]{12}:role/.+$", var.trace_export_ingest.producer_execution_role_arn)) &&
+      length(replace(replace(replace(element(split(":role/", var.trace_export_ingest.producer_execution_role_arn), 1), "*", ""), "?", ""), "/", "")) > 0
+    )
+    error_message = "trace_export_ingest.producer_execution_role_arn must be an IAM role ARN with a literal 12-digit account ID (\"arn:<partition>:iam::<account-id>:role/<name>\"). Wildcards (\"*\" and \"?\") are allowed only in the role-name portion, and the name must not consist of wildcards alone — this pattern is the effective principal boundary of the writer role's trust policy."
+  }
+
+  validation {
+    condition = var.trace_export_ingest == null || var.trace_export_ingest.agent_role_arn == null ? true : (
+      can(regex("^arn:[a-z0-9-]+:iam::[0-9]{12}:role/.+$", var.trace_export_ingest.agent_role_arn)) &&
+      length(replace(replace(element(split(":role/", var.trace_export_ingest.agent_role_arn), 1), "*", ""), "/", "")) > 0 &&
+      !can(regex("\\*", var.trace_export_ingest.agent_role_arn))
+    )
+    error_message = "trace_export_ingest.agent_role_arn must be an exact IAM role ARN with a literal 12-digit account ID (\"arn:<partition>:iam::<account-id>:role/<name>\"). Unlike producer_execution_role_arn, which is matched via a StringLike trust-policy condition, this value is embedded verbatim as the ingest bucket policy's Principal — IAM does not glob-match wildcards there, so no wildcards are permitted anywhere in this ARN."
+  }
+
+  validation {
+    condition     = var.trace_export_ingest == null ? true : can(regex("^[a-zA-Z0-9_.-]+(/[a-zA-Z0-9_.-]+)*/?$", var.trace_export_ingest.prefix))
+    error_message = "trace_export_ingest.prefix must be one or more \"/\"-separated segments of [a-zA-Z0-9_.-] characters with no leading \"/\" and no empty segments (e.g. \"traces/\" or \"traces/tenant-a/\"); a single trailing \"/\" is optional and normalized internally."
+  }
+
+  validation {
+    condition     = var.trace_export_ingest == null ? true : var.trace_export_ingest.lifecycle_days >= 1
+    error_message = "trace_export_ingest.lifecycle_days must be at least 1."
+  }
+}
+
+variable "trace_export_external_id" {
+  description = <<-EOT
+    The sts:ExternalId condition value baked into the trace-export writer
+    role's trust policy (confused-deputy guard). Required when
+    trace_export_ingest is set; leave null (default) otherwise. Supply the
+    value issued by the system driving the export; minimum length 8.
+
+    Marked sensitive, so it is redacted from plan/apply output and CI logs.
+    Supply via a .tfvars file or TF_VAR_trace_export_external_id rather than
+    -var on a command line. Terraform state still contains the value —
+    protect state accordingly. It is echoed back via the sensitive
+    trace_export_external_id output.
+  EOT
+  type        = string
+  default     = null
+  sensitive   = true
+
+  validation {
+    condition     = var.trace_export_external_id == null ? true : length(var.trace_export_external_id) >= 8
+    error_message = "trace_export_external_id must be at least 8 characters long."
   }
 }
 

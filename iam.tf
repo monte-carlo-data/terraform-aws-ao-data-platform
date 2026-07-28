@@ -68,35 +68,115 @@ resource "aws_iam_role" "otel_collector" {
 # and deduplicated (two receivers may share a bucket — never a queue, which
 # the helm variable validation rejects). With a single enabled receiver the
 # rendered JSON is identical to the policy this module has always attached.
+# When any receiver in that map carries a kms_key_arn — today only the
+# synthesized trace-export-ingest entry can, when its bucket uses a
+# caller-supplied CMK — a fourth statement grants the collector kms:Decrypt
+# on every such key (local.otel_awss3_receiver_kms_keys) so GetObject on the
+# SSE-KMS objects succeeds; without a CMK the statement list is unchanged.
 resource "aws_iam_role_policy" "otel_collector_awss3_receiver" {
   count = length(local.otel_awss3_receivers) > 0 ? 1 : 0
   name  = "awss3-receiver"
   role  = aws_iam_role.otel_collector.id
   policy = jsonencode({
     Version = "2012-10-17"
-    Statement = [
-      {
-        Effect = "Allow"
-        Action = [
-          "sqs:ReceiveMessage",
-          "sqs:DeleteMessage",
-          "sqs:GetQueueAttributes",
-          "sqs:GetQueueUrl",
-        ]
-        Resource = sort([for r in values(local.otel_awss3_receivers) : r.sqs_queue_arn])
-      },
-      {
-        Effect   = "Allow"
-        Action   = ["s3:GetObject"]
-        Resource = sort(distinct([for r in values(local.otel_awss3_receivers) : "arn:aws:s3:::${r.s3_bucket}/${r.s3_prefix}*"]))
-      },
-      {
-        # Some collector versions probe the bucket region.
-        Effect   = "Allow"
-        Action   = ["s3:GetBucketLocation"]
-        Resource = sort(distinct([for r in values(local.otel_awss3_receivers) : "arn:aws:s3:::${r.s3_bucket}"]))
-      },
-    ]
+    Statement = concat(
+      [
+        {
+          Effect = "Allow"
+          Action = [
+            "sqs:ReceiveMessage",
+            "sqs:DeleteMessage",
+            "sqs:GetQueueAttributes",
+            "sqs:GetQueueUrl",
+          ]
+          Resource = sort([for r in values(local.otel_awss3_receivers) : r.sqs_queue_arn])
+        },
+        {
+          Effect   = "Allow"
+          Action   = ["s3:GetObject"]
+          Resource = sort(distinct([for r in values(local.otel_awss3_receivers) : "arn:aws:s3:::${r.s3_bucket}/${r.s3_prefix}*"]))
+        },
+        {
+          # Some collector versions probe the bucket region.
+          Effect   = "Allow"
+          Action   = ["s3:GetBucketLocation"]
+          Resource = sort(distinct([for r in values(local.otel_awss3_receivers) : "arn:aws:s3:::${r.s3_bucket}"]))
+        },
+      ],
+      length(local.otel_awss3_receiver_kms_keys) > 0 ? [
+        {
+          Effect   = "Allow"
+          Action   = ["kms:Decrypt"]
+          Resource = local.otel_awss3_receiver_kms_keys
+        },
+      ] : [],
+    )
+  })
+}
+
+# IAM — Trace-export writer (var.trace_export_ingest). The module's only
+# non-IRSA role: an external execution role assumes it — typically
+# cross-account — to PUT OTLP trace files under the ingest prefix. The trust
+# principal is the external account's root (parsed from the validated
+# execution-role ARN), narrowed by two conditions: sts:ExternalId as the
+# confused-deputy guard, and aws:PrincipalArn StringLike on the configured
+# ARN. That pattern is the effective principal boundary — and because it may
+# carry a role-name wildcard, the external role can be re-provisioned (new
+# unique suffix, new ARN) without this trust policy going stale.
+resource "aws_iam_role" "trace_export_writer" {
+  count = local.trace_export_ingest_enabled ? 1 : 0
+  name  = "${local.region_qualified_name}-trace-export-writer"
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect    = "Allow"
+      Principal = { AWS = "arn:${local.trace_export_producer_partition}:iam::${local.trace_export_producer_account_id}:root" }
+      Action    = "sts:AssumeRole"
+      Condition = {
+        StringEquals = { "sts:ExternalId" = var.trace_export_external_id }
+        StringLike   = { "aws:PrincipalArn" = var.trace_export_ingest.producer_execution_role_arn }
+      }
+    }]
+  })
+
+  tags = var.tags
+
+  lifecycle {
+    create_before_destroy = true
+
+    precondition {
+      condition     = var.trace_export_external_id != null
+      error_message = "trace_export_external_id is required when trace_export_ingest is set — it supplies the writer role's sts:ExternalId trust condition."
+    }
+  }
+}
+
+# Write-only and prefix-scoped: the writer can PUT under the ingest prefix
+# and nothing else — no reads, no lists, no deletes. With a caller-supplied
+# CMK on the bucket, SSE-KMS PUTs additionally need GenerateDataKey (Encrypt
+# covers non-Bucket-Keys key usage).
+resource "aws_iam_role_policy" "trace_export_writer" {
+  count = local.trace_export_ingest_enabled ? 1 : 0
+  name  = "trace-export-writer"
+  role  = aws_iam_role.trace_export_writer[0].id
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = concat(
+      [
+        {
+          Effect   = "Allow"
+          Action   = ["s3:PutObject"]
+          Resource = ["${local.trace_export_ingest_bucket_arn}/${local.trace_export_ingest_prefix}*"]
+        },
+      ],
+      var.trace_export_ingest.kms_key_arn != null ? [
+        {
+          Effect   = "Allow"
+          Action   = ["kms:GenerateDataKey", "kms:Encrypt"]
+          Resource = [var.trace_export_ingest.kms_key_arn]
+        },
+      ] : [],
+    )
   })
 }
 

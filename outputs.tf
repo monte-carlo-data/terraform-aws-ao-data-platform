@@ -154,3 +154,36 @@ output "clickhouse_node_group" {
   } : null
 }
 
+# --- Trace Export Ingest (null when var.trace_export_ingest is unset) ---
+
+output "trace_export_ingest_bucket" {
+  description = "Name of the trace-export ingest bucket the external producer writes OTLP trace files into. Null when trace_export_ingest is unset."
+  value       = local.trace_export_ingest_bucket
+}
+
+output "trace_export_ingest_prefix" {
+  description = "Normalized key prefix (single trailing \"/\") under the ingest bucket that the producer must write beneath — the receiver, notification filter, lifecycle rule, and IAM grants are all scoped to it. Null when trace_export_ingest is unset."
+  value       = local.trace_export_ingest_prefix
+}
+
+output "trace_export_writer_role_arn" {
+  description = "ARN of the writer IAM role the configured external execution role assumes (with the external ID) to upload trace files. Null when trace_export_ingest is unset."
+  value       = local.trace_export_writer_role_arn
+}
+
+output "trace_export_external_id" {
+  description = "The sts:ExternalId condition value baked into the writer role's trust policy — echoes the trace_export_external_id input for registration alongside the other outputs. Null when trace_export_ingest is unset."
+  value       = local.trace_export_ingest_enabled ? var.trace_export_external_id : null
+  sensitive   = true
+}
+
+output "trace_export_ingest_queue_arn" {
+  description = "ARN of the ingest notification SQS queue — the hook for queue-depth/oldest-message-age monitoring. Null when trace_export_ingest is unset."
+  value       = local.trace_export_ingest_queue_arn
+}
+
+output "trace_export_ingest_queue_name" {
+  description = "Name of the ingest notification SQS queue — the hook for queue-depth/oldest-message-age monitoring. Null when trace_export_ingest is unset."
+  value       = local.trace_export_ingest_queue_name
+}
+

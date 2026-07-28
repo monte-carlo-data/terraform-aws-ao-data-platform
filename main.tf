@@ -126,13 +126,34 @@ locals {
   # an empty string stays empty; any non-empty value gets exactly one trailing
   # "/" — keeping "traces" and "traces/" equivalent, and stopping a bare prefix
   # from over-matching sibling keys (e.g. "traces*" matching "tracesfoo") in
-  # the IAM GetObject resource ARN. Single source of truth for the rendered
-  # receiver config, the trace-pipeline receiver list, and the awss3-receiver
-  # IAM policy.
+  # the IAM GetObject resource ARN. kms_key_arn projects to null except on the
+  # synthesized trace-export-ingest entry below (see otel_awss3_receiver_kms_keys).
+  # Single source of truth for the rendered receiver config, the trace-pipeline
+  # receiver list, and every statement in the awss3-receiver IAM policy —
+  # including the collector's KMS-decrypt grant, which is derived from this
+  # map rather than reading var.trace_export_ingest directly.
+  #
+  # When var.trace_export_ingest is set, the module synthesizes one more entry
+  # — "awss3/trace-export-ingest", consuming the module-created ingest
+  # bucket/queue (s3.tf/sqs.tf) via the plan-known name locals below — so the
+  # render, pipeline list, and collector read policy pick it up through the
+  # same path as caller-configured receivers. A caller map key that would
+  # collide is rejected by a precondition on the ingest queue.
   otel_awss3_receivers = {
     for id, r in merge(
       try(var.helm.opentelemetry_collector.awss3_receiver.enabled, false) ? { "awss3" = var.helm.opentelemetry_collector.awss3_receiver } : {},
       { for name, m in var.helm.opentelemetry_collector.awss3_receivers : "awss3/${name}" => m if m.enabled },
+      local.trace_export_ingest_enabled ? {
+        "awss3/trace-export-ingest" = {
+          sqs_queue_arn = local.trace_export_ingest_queue_arn
+          sqs_queue_url = local.trace_export_ingest_queue_url
+          sqs_region    = null
+          s3_bucket     = local.trace_export_ingest_bucket
+          s3_region     = null
+          s3_prefix     = local.trace_export_ingest_prefix
+          kms_key_arn   = var.trace_export_ingest.kms_key_arn
+        }
+      } : {},
       ) : id => {
       sqs_queue_arn = r.sqs_queue_arn
       sqs_queue_url = r.sqs_queue_url
@@ -140,8 +161,17 @@ locals {
       s3_bucket     = r.s3_bucket
       s3_region     = coalesce(r.s3_region, var.region)
       s3_prefix     = r.s3_prefix == "" ? "" : "${trimsuffix(r.s3_prefix, "/")}/"
+      # Only the synthesized trace-export-ingest entry carries a KMS key —
+      # caller-configured awss3_receiver/awss3_receivers entries have no such
+      # field in their object schema (variables.tf), so they project to null.
+      kms_key_arn = try(r.kms_key_arn, null)
     }
   }
+  # Every non-null kms_key_arn across the normalized receiver map, deduped —
+  # today only the synthesized trace-export-ingest entry can carry one, but
+  # the collector's KMS-decrypt grant (iam.tf) is built from this local so it
+  # stays map-driven if that ever changes. Empty when no receiver has a CMK.
+  otel_awss3_receiver_kms_keys = distinct([for r in values(local.otel_awss3_receivers) : r.kms_key_arn if r.kms_key_arn != null])
   # awss3 receivers override. Empty when no receiver is enabled; helm-merged
   # into the chart's opentelemetry-collector values otherwise. The
   # pipelines.traces.receivers list MUST mirror the chart's default list plus
@@ -293,3 +323,50 @@ locals {
 
 data "aws_partition" "current" {}
 data "aws_availability_zones" "available" {}
+
+# Read only when the trace-export ingest block is set — the account ID feeds
+# the default ingest bucket name and the constructed queue ARN/URL below.
+data "aws_caller_identity" "trace_export_ingest" {
+  count = var.trace_export_ingest != null ? 1 : 0
+}
+
+# --- Trace-export ingest (var.trace_export_ingest) ---
+# Bucket and queue names are derived deterministically here — never read back
+# from resource attributes — so everything downstream (receiver entry, queue
+# policy, collector/writer IAM, outputs) is known at plan time; the ARNs and
+# queue URL are string-built from the same name locals. All null when the
+# block is unset, keeping the unset plan identical to previous releases.
+locals {
+  trace_export_ingest_enabled = var.trace_export_ingest != null
+
+  # Same normalization as awss3-receiver prefixes above: exactly one trailing
+  # "/" — keeping "traces" and "traces/" equivalent and stopping a bare prefix
+  # from over-matching sibling keys in prefix-scoped IAM resource ARNs.
+  trace_export_ingest_prefix = local.trace_export_ingest_enabled ? "${trimsuffix(var.trace_export_ingest.prefix, "/")}/" : null
+
+  # Bucket names are globally unique, so the default carries the account ID;
+  # region-scoped resources otherwise use effective_cluster_name (see the
+  # naming notes at the top of this file).
+  trace_export_ingest_bucket = local.trace_export_ingest_enabled ? coalesce(
+    var.trace_export_ingest.bucket_name,
+    "${local.effective_cluster_name}-trace-export-ingest-${data.aws_caller_identity.trace_export_ingest[0].account_id}",
+  ) : null
+  trace_export_ingest_bucket_arn = local.trace_export_ingest_enabled ? "arn:${data.aws_partition.current.partition}:s3:::${local.trace_export_ingest_bucket}" : null
+
+  # Trust anchoring for the writer role (iam.tf): the principal is the
+  # external account's ROOT, derived from the validated execution-role ARN —
+  # the variable validation guarantees its partition and 12-digit account
+  # segments are literal — while the configured ARN/pattern itself lands in
+  # the trust policy's aws:PrincipalArn condition. Wildcards therefore live
+  # only in the condition, never in the principal.
+  trace_export_producer_partition  = local.trace_export_ingest_enabled ? split(":", var.trace_export_ingest.producer_execution_role_arn)[1] : null
+  trace_export_producer_account_id = local.trace_export_ingest_enabled ? split(":", var.trace_export_ingest.producer_execution_role_arn)[4] : null
+
+  trace_export_ingest_queue_name = local.trace_export_ingest_enabled ? "${local.effective_cluster_name}-trace-export-ingest" : null
+  trace_export_ingest_queue_arn  = local.trace_export_ingest_enabled ? "arn:${data.aws_partition.current.partition}:sqs:${var.region}:${data.aws_caller_identity.trace_export_ingest[0].account_id}:${local.trace_export_ingest_queue_name}" : null
+  trace_export_ingest_queue_url  = local.trace_export_ingest_enabled ? "https://sqs.${var.region}.${data.aws_partition.current.dns_suffix}/${data.aws_caller_identity.trace_export_ingest[0].account_id}/${local.trace_export_ingest_queue_name}" : null
+
+  # Derived (not read from the role resource) so the output stays plan-known;
+  # the name is fixed by this module, so the ARN is deterministic.
+  trace_export_writer_role_arn = local.trace_export_ingest_enabled ? "arn:${data.aws_partition.current.partition}:iam::${data.aws_caller_identity.trace_export_ingest[0].account_id}:role/${local.region_qualified_name}-trace-export-writer" : null
+}

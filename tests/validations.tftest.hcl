@@ -63,6 +63,25 @@ mock_provider "aws" {
       certificate_authority = [{ data = "dGVzdC1jYQ==" }]
     }
   }
+
+  # The trace-export-ingest locals string-build ARNs/URLs from the partition
+  # and the caller account ID so they stay plan-known (byte-assertable) under
+  # this mock. Deterministic values here keep those asserts stable. The
+  # caller-identity data source only exists when trace_export_ingest is set —
+  # the override is inert for every other run.
+  override_data {
+    target = data.aws_partition.current
+    values = {
+      partition  = "aws"
+      dns_suffix = "amazonaws.com"
+    }
+  }
+  override_data {
+    target = data.aws_caller_identity.trace_export_ingest[0]
+    values = {
+      account_id = "123456789012"
+    }
+  }
 }
 
 mock_provider "helm" {}
@@ -1351,5 +1370,1095 @@ run "control_plane_subnets_never_reach_node_resolution" {
   assert {
     condition     = local.effective_private_subnet_ids == tolist(["subnet-aaaa1111", "subnet-bbbb2222", "subnet-cccc3333"])
     error_message = "Node-group subnet resolution (effective_private_subnet_ids) must be exactly existing_private_subnet_ids — control_plane_subnet_ids must never narrow or widen it."
+  }
+}
+
+# --- trace_export_ingest: variable validations ---
+#
+# The block is optional (null default); every validation is a no-op when it
+# is unset. Set, the rejection paths below fire at plan time: the trusted
+# execution-role ARN must carry a literal account ID with wildcards confined
+# to the role-name portion (that pattern is the sole principal restriction in
+# the writer role's trust policy), the external ID needs a minimum length,
+# the prefix must be well-formed "/"-separated segments, and the lifecycle
+# needs at least one day. cluster.create = false keeps module.eks out of the
+# plan (same technique as the awss3 runs above).
+
+run "trace_export_producer_role_arn_malformed_rejected" {
+  command = plan
+  variables {
+    cluster = {
+      create                = false
+      name                  = "test-cluster"
+      existing_cluster_name = "test-cluster"
+    }
+    trace_export_ingest = {
+      producer_execution_role_arn = "not-an-arn"
+    }
+    trace_export_external_id = "external-id-value"
+  }
+  expect_failures = [var.trace_export_ingest]
+}
+
+run "trace_export_producer_role_arn_wildcard_account_rejected" {
+  command = plan
+  variables {
+    cluster = {
+      create                = false
+      name                  = "test-cluster"
+      existing_cluster_name = "test-cluster"
+    }
+    trace_export_ingest = {
+      producer_execution_role_arn = "arn:aws:iam::*:role/writer-caller"
+    }
+    trace_export_external_id = "external-id-value"
+  }
+  expect_failures = [var.trace_export_ingest]
+}
+
+run "trace_export_producer_role_arn_wildcard_only_name_rejected" {
+  command = plan
+  variables {
+    cluster = {
+      create                = false
+      name                  = "test-cluster"
+      existing_cluster_name = "test-cluster"
+    }
+    trace_export_ingest = {
+      producer_execution_role_arn = "arn:aws:iam::123456789012:role/*"
+    }
+    trace_export_external_id = "external-id-value"
+  }
+  expect_failures = [var.trace_export_ingest]
+}
+
+# "?" is a single-character wildcard in the trust policy's StringLike match,
+# so a name of nothing but "?" is as unbounded as "*" — the guard must strip
+# it before the wildcards-alone length check, not just "*".
+run "trace_export_producer_role_arn_question_only_name_rejected" {
+  command = plan
+  variables {
+    cluster = {
+      create                = false
+      name                  = "test-cluster"
+      existing_cluster_name = "test-cluster"
+    }
+    trace_export_ingest = {
+      producer_execution_role_arn = "arn:aws:iam::123456789012:role/????????"
+    }
+    trace_export_external_id = "external-id-value"
+  }
+  expect_failures = [var.trace_export_ingest]
+}
+
+run "trace_export_external_id_too_short_rejected" {
+  command = plan
+  variables {
+    cluster = {
+      create                = false
+      name                  = "test-cluster"
+      existing_cluster_name = "test-cluster"
+    }
+    trace_export_ingest = {
+      producer_execution_role_arn = "arn:aws:iam::123456789012:role/writer-caller"
+    }
+    trace_export_external_id = "short"
+  }
+  expect_failures = [var.trace_export_external_id]
+}
+
+run "trace_export_prefix_leading_slash_rejected" {
+  command = plan
+  variables {
+    cluster = {
+      create                = false
+      name                  = "test-cluster"
+      existing_cluster_name = "test-cluster"
+    }
+    trace_export_ingest = {
+      producer_execution_role_arn = "arn:aws:iam::123456789012:role/writer-caller"
+      prefix                      = "/traces/"
+    }
+    trace_export_external_id = "external-id-value"
+  }
+  expect_failures = [var.trace_export_ingest]
+}
+
+run "trace_export_prefix_empty_segment_rejected" {
+  command = plan
+  variables {
+    cluster = {
+      create                = false
+      name                  = "test-cluster"
+      existing_cluster_name = "test-cluster"
+    }
+    trace_export_ingest = {
+      producer_execution_role_arn = "arn:aws:iam::123456789012:role/writer-caller"
+      prefix                      = "traces//tenant"
+    }
+    trace_export_external_id = "external-id-value"
+  }
+  expect_failures = [var.trace_export_ingest]
+}
+
+run "trace_export_lifecycle_days_zero_rejected" {
+  command = plan
+  variables {
+    cluster = {
+      create                = false
+      name                  = "test-cluster"
+      existing_cluster_name = "test-cluster"
+    }
+    trace_export_ingest = {
+      producer_execution_role_arn = "arn:aws:iam::123456789012:role/writer-caller"
+      lifecycle_days              = 0
+    }
+    trace_export_external_id = "external-id-value"
+  }
+  expect_failures = [var.trace_export_ingest]
+}
+
+# Unlike producer_execution_role_arn, agent_role_arn is embedded verbatim as
+# the bucket policy's Principal (IAM does not glob-match wildcards there), so
+# no wildcard is permitted anywhere in it — not even confined to the role-name
+# portion the way producer_execution_role_arn allows.
+
+run "trace_export_agent_role_arn_wildcard_rejected" {
+  command = plan
+  variables {
+    cluster = {
+      create                = false
+      name                  = "test-cluster"
+      existing_cluster_name = "test-cluster"
+    }
+    trace_export_ingest = {
+      producer_execution_role_arn = "arn:aws:iam::210987654321:role/writer-caller"
+      agent_role_arn              = "arn:aws:iam::210987654321:role/agent-*"
+    }
+    trace_export_external_id = "external-id-value"
+  }
+  expect_failures = [var.trace_export_ingest]
+}
+
+# --- trace_export_ingest: accepted-path locals (pure variables, charts off) ---
+#
+# The name/normalization locals read only variables plus the overridden
+# partition/caller-identity data sources, so the derived names, ARNs, and
+# queue URL are plan-assertable. Multi-segment prefixes are part of the
+# supported surface: a "/"-separated prefix must pass validation and
+# normalize to exactly one trailing "/" — the notification filter, IAM
+# grants, and receiver entry are all scoped to this same local.
+
+run "trace_export_multisegment_prefix_accepted" {
+  command = plan
+  variables {
+    cluster = {
+      create                = false
+      name                  = "test-cluster"
+      existing_cluster_name = "test-cluster"
+    }
+    trace_export_ingest = {
+      producer_execution_role_arn = "arn:aws:iam::210987654321:role/writer-caller-*"
+      prefix                      = "traces/abc123"
+    }
+    trace_export_external_id = "external-id-value"
+  }
+  assert {
+    condition     = local.trace_export_ingest_prefix == "traces/abc123/"
+    error_message = "A multi-segment prefix must pass validation and normalize to exactly one trailing \"/\"."
+  }
+  assert {
+    condition     = local.trace_export_ingest_bucket == "test-cluster-trace-export-ingest-123456789012"
+    error_message = "The default ingest bucket name must be <cluster-name>-trace-export-ingest-<account-id>."
+  }
+  assert {
+    condition     = local.trace_export_ingest_bucket_arn == "arn:aws:s3:::test-cluster-trace-export-ingest-123456789012"
+    error_message = "The ingest bucket ARN must be string-built from the derived bucket name (plan-known, never a resource attribute)."
+  }
+  assert {
+    condition     = local.trace_export_ingest_queue_arn == "arn:aws:sqs:us-east-1:123456789012:test-cluster-trace-export-ingest"
+    error_message = "The ingest queue ARN must be string-built from the derived queue name (plan-known, never a resource attribute)."
+  }
+  assert {
+    condition     = local.trace_export_ingest_queue_url == "https://sqs.us-east-1.amazonaws.com/123456789012/test-cluster-trace-export-ingest"
+    error_message = "The ingest queue URL must be string-built from the derived queue name (plan-known, never a resource attribute)."
+  }
+}
+
+run "trace_export_bucket_name_override_accepted" {
+  command = plan
+  variables {
+    cluster = {
+      create                = false
+      name                  = "test-cluster"
+      existing_cluster_name = "test-cluster"
+    }
+    trace_export_ingest = {
+      producer_execution_role_arn = "arn:aws:iam::210987654321:role/writer-caller"
+      bucket_name                 = "my-custom-ingest-bucket"
+    }
+    trace_export_external_id = "external-id-value"
+  }
+  assert {
+    condition     = local.trace_export_ingest_bucket == "my-custom-ingest-bucket"
+    error_message = "bucket_name must override the derived default ingest bucket name."
+  }
+  assert {
+    condition     = local.trace_export_ingest_prefix == "traces/"
+    error_message = "The prefix default must be \"traces/\"."
+  }
+}
+
+# --- trace_export_ingest: zero-diff pins (block unset) ---
+#
+# Pinned against the rendering as it shipped before this feature existed, so
+# they prove the unset configuration stays back-compatible with what existing
+# deployments actually run — not merely self-consistent with current code.
+# With the block unset (explicitly null here, documenting the contract) every
+# trace-export local is inert, the gated caller-identity data source is not
+# read, and the receiver map / rendered helm block / collector policy are
+# byte-identical to the pre-feature shapes pinned in the awss3 runs above.
+
+run "trace_export_unset_is_inert" {
+  command = plan
+  variables {
+    cluster = {
+      create                = false
+      name                  = "test-cluster"
+      existing_cluster_name = "test-cluster"
+    }
+    trace_export_ingest = null
+  }
+  assert {
+    condition     = local.trace_export_ingest_enabled == false
+    error_message = "trace_export_ingest_enabled must be false when the block is unset."
+  }
+  assert {
+    condition = (
+      local.trace_export_ingest_prefix == null &&
+      local.trace_export_ingest_bucket == null &&
+      local.trace_export_ingest_bucket_arn == null &&
+      local.trace_export_ingest_queue_name == null &&
+      local.trace_export_ingest_queue_arn == null &&
+      local.trace_export_ingest_queue_url == null
+    )
+    error_message = "Every trace-export name/ARN/URL local must be null when the block is unset."
+  }
+  assert {
+    condition     = length(data.aws_caller_identity.trace_export_ingest) == 0
+    error_message = "The caller-identity data source must not be read when the block is unset."
+  }
+  assert {
+    condition     = jsonencode(local.otel_awss3_receivers) == jsonencode({})
+    error_message = "With no receivers configured and trace_export_ingest unset, the normalized receiver map must be empty."
+  }
+  assert {
+    condition     = jsonencode(local.helm_otel_awss3_block) == jsonencode({})
+    error_message = "With no receivers configured and trace_export_ingest unset, the rendered awss3 helm block must be empty."
+  }
+  assert {
+    condition     = length(aws_iam_role_policy.otel_collector_awss3_receiver) == 0
+    error_message = "With no receivers configured and trace_export_ingest unset, no awss3-receiver IAM policy may be created."
+  }
+}
+
+run "trace_export_unset_leaves_receiver_map_untouched" {
+  command = plan
+  variables {
+    cluster = {
+      create                = false
+      name                  = "test-cluster"
+      existing_cluster_name = "test-cluster"
+    }
+    trace_export_ingest = null
+    helm = {
+      deploy_charts = false
+      opentelemetry_collector = {
+        awss3_receiver = {
+          enabled       = true
+          sqs_queue_arn = "arn:aws:sqs:us-east-1:123456789012:queue-one"
+          sqs_queue_url = "https://sqs.us-east-1.amazonaws.com/123456789012/queue-one"
+          s3_bucket     = "bucket-one"
+          s3_prefix     = "traces"
+        }
+        awss3_receivers = {
+          extra = {
+            sqs_queue_arn = "arn:aws:sqs:us-east-1:123456789012:queue-two"
+            sqs_queue_url = "https://sqs.us-east-1.amazonaws.com/123456789012/queue-two"
+            s3_bucket     = "bucket-two"
+          }
+        }
+      }
+    }
+  }
+  # Pin the injection point itself: with the block unset, the normalized map
+  # must contain exactly the caller-configured component IDs — nothing
+  # synthesized. (The byte-identical render/IAM pins for these entries live in
+  # the awss3 runs above and run in this same suite.)
+  assert {
+    condition     = jsonencode(sort(keys(local.otel_awss3_receivers))) == jsonencode(["awss3", "awss3/extra"])
+    error_message = "With trace_export_ingest unset, the normalized awss3 receiver map must contain exactly the caller-configured entries — no synthesized trace-export entry."
+  }
+}
+
+# --- trace_export_ingest: transport-resource shapes (block set) ---
+#
+# Every asserted attribute below is a resource ARGUMENT configured from
+# variables or the name locals — plan-known under the mock — never a computed
+# attribute. The count-0 unset direction rides in trace_export_unset_is_inert
+# above plus the explicit run at the end of this section.
+
+run "trace_export_transport_resources_render" {
+  command = plan
+  variables {
+    cluster = {
+      create                = false
+      name                  = "test-cluster"
+      existing_cluster_name = "test-cluster"
+    }
+    trace_export_ingest = {
+      producer_execution_role_arn = "arn:aws:iam::210987654321:role/writer-caller"
+      agent_role_arn              = "arn:aws:iam::123456789012:role/direct-writer"
+      lifecycle_days              = 5
+    }
+    trace_export_external_id = "external-id-value"
+  }
+  assert {
+    condition     = aws_s3_bucket.trace_export_ingest[0].bucket == "test-cluster-trace-export-ingest-123456789012"
+    error_message = "The ingest bucket must be created with the derived default name."
+  }
+  assert {
+    condition     = aws_s3_bucket.trace_export_ingest[0].force_destroy == true
+    error_message = "The ingest bucket must set force_destroy — transit data must not block teardown."
+  }
+  assert {
+    condition = (
+      aws_s3_bucket_public_access_block.trace_export_ingest[0].block_public_acls == true &&
+      aws_s3_bucket_public_access_block.trace_export_ingest[0].block_public_policy == true &&
+      aws_s3_bucket_public_access_block.trace_export_ingest[0].ignore_public_acls == true &&
+      aws_s3_bucket_public_access_block.trace_export_ingest[0].restrict_public_buckets == true
+    )
+    error_message = "The ingest bucket must carry a full public-access block."
+  }
+  assert {
+    condition = (
+      aws_s3_bucket_lifecycle_configuration.trace_export_ingest[0].rule[0].filter[0].prefix == "traces/" &&
+      aws_s3_bucket_lifecycle_configuration.trace_export_ingest[0].rule[0].expiration[0].days == 5 &&
+      aws_s3_bucket_lifecycle_configuration.trace_export_ingest[0].rule[0].abort_incomplete_multipart_upload[0].days_after_initiation == 5
+    )
+    error_message = "The lifecycle rule must expire objects under the normalized prefix and abort incomplete multipart uploads at lifecycle_days."
+  }
+  # Byte-identical policy pins: both policies are jsonencode() of plan-known
+  # values, so exact comparison is stable and catches statement drift.
+  assert {
+    condition = aws_s3_bucket_policy.trace_export_ingest[0].policy == jsonencode({
+      Version = "2012-10-17"
+      Statement = [
+        {
+          Sid       = "DenyInsecureTransport"
+          Effect    = "Deny"
+          Principal = "*"
+          Action    = "s3:*"
+          Resource = [
+            "arn:aws:s3:::test-cluster-trace-export-ingest-123456789012",
+            "arn:aws:s3:::test-cluster-trace-export-ingest-123456789012/*",
+          ]
+          Condition = { Bool = { "aws:SecureTransport" = "false" } }
+        },
+        {
+          Sid       = "AgentPutObject"
+          Effect    = "Allow"
+          Principal = { AWS = "arn:aws:iam::123456789012:role/direct-writer" }
+          Action    = "s3:PutObject"
+          Resource  = "arn:aws:s3:::test-cluster-trace-export-ingest-123456789012/traces/*"
+        },
+      ]
+    })
+    error_message = "The bucket policy must always deny non-TLS access and, with agent_role_arn set, grant that role PutObject scoped to the ingest prefix."
+  }
+  assert {
+    condition = aws_sqs_queue_policy.trace_export_ingest[0].policy == jsonencode({
+      Version = "2012-10-17"
+      Statement = [
+        {
+          Sid       = "AllowIngestBucketNotifications"
+          Effect    = "Allow"
+          Principal = { Service = "s3.amazonaws.com" }
+          Action    = "sqs:SendMessage"
+          Resource  = "arn:aws:sqs:us-east-1:123456789012:test-cluster-trace-export-ingest"
+          Condition = {
+            ArnEquals    = { "aws:SourceArn" = "arn:aws:s3:::test-cluster-trace-export-ingest-123456789012" }
+            StringEquals = { "aws:SourceAccount" = "123456789012" }
+          }
+        },
+      ]
+    })
+    error_message = "The queue policy must allow S3 SendMessage conditioned on BOTH aws:SourceArn (the ingest bucket) and aws:SourceAccount (this account) — SourceArn alone permits bucket-name-squatting injection."
+  }
+  assert {
+    condition = (
+      aws_sqs_queue.trace_export_ingest[0].name == "test-cluster-trace-export-ingest" &&
+      aws_sqs_queue.trace_export_ingest[0].message_retention_seconds == 1209600 &&
+      aws_sqs_queue.trace_export_ingest[0].visibility_timeout_seconds == 300
+    )
+    error_message = "The ingest queue must use the derived name, 14-day retention (outliving the object lifecycle), and a 300s visibility timeout."
+  }
+  assert {
+    condition = (
+      tolist(aws_s3_bucket_notification.trace_export_ingest[0].queue)[0].queue_arn == "arn:aws:sqs:us-east-1:123456789012:test-cluster-trace-export-ingest" &&
+      tolist(aws_s3_bucket_notification.trace_export_ingest[0].queue)[0].filter_prefix == "traces/" &&
+      tolist(aws_s3_bucket_notification.trace_export_ingest[0].queue)[0].events == toset(["s3:ObjectCreated:*"])
+    )
+    error_message = "The bucket notification must target the derived queue ARN, filter on the normalized ingest prefix, and fire on all ObjectCreated events."
+  }
+}
+
+# The default ingest bucket name inherits effective_cluster_name, which
+# permits characters (uppercase, underscore) that S3 bucket names forbid — the
+# aws_s3_bucket precondition (s3.tf) catches the resulting invalid derived
+# name at plan time rather than surfacing an opaque AWS validation error at
+# apply. cluster.create = false with an invalid existing_cluster_name reaches
+# the precondition without dragging module.eks into the plan — the same
+# technique every other trace-export run in this file uses; cluster.create =
+# true would exercise the identical precondition but only via the brittle
+# module.eks surface this file's scope note excludes.
+
+run "trace_export_bucket_name_invalid_derived_name_rejected" {
+  command = plan
+  variables {
+    cluster = {
+      create                = false
+      name                  = "test-cluster"
+      existing_cluster_name = "MyCluster_AO"
+    }
+    trace_export_ingest = {
+      producer_execution_role_arn = "arn:aws:iam::210987654321:role/writer-caller"
+    }
+    trace_export_external_id = "external-id-value"
+  }
+  expect_failures = [aws_s3_bucket.trace_export_ingest]
+}
+
+run "trace_export_default_encryption_is_sse_s3" {
+  command = plan
+  variables {
+    cluster = {
+      create                = false
+      name                  = "test-cluster"
+      existing_cluster_name = "test-cluster"
+    }
+    trace_export_ingest = {
+      producer_execution_role_arn = "arn:aws:iam::210987654321:role/writer-caller"
+    }
+    trace_export_external_id = "external-id-value"
+  }
+  assert {
+    condition = (
+      tolist(aws_s3_bucket_server_side_encryption_configuration.trace_export_ingest[0].rule)[0].apply_server_side_encryption_by_default[0].sse_algorithm == "AES256" &&
+      tolist(aws_s3_bucket_server_side_encryption_configuration.trace_export_ingest[0].rule)[0].bucket_key_enabled == false
+    )
+    error_message = "Without a CMK the ingest bucket must default to SSE-S3 (AES256) with Bucket Keys off."
+  }
+  # No direct-writer grant configured: the bucket policy must carry exactly
+  # the TLS-deny statement.
+  assert {
+    condition     = length(jsondecode(aws_s3_bucket_policy.trace_export_ingest[0].policy).Statement) == 1
+    error_message = "Without agent_role_arn the bucket policy must contain only the DenyInsecureTransport statement."
+  }
+  # lifecycle_days is omitted here too — the object-type default (3) must
+  # render as both the expiration age and the abort-incomplete-multipart-
+  # upload age, mirroring the explicit lifecycle_days = 5 pin in
+  # trace_export_transport_resources_render above.
+  assert {
+    condition     = aws_s3_bucket_lifecycle_configuration.trace_export_ingest[0].rule[0].expiration[0].days == 3
+    error_message = "The default lifecycle_days (3) must render as the lifecycle rule's expiration days when lifecycle_days is omitted."
+  }
+  assert {
+    condition     = aws_s3_bucket_lifecycle_configuration.trace_export_ingest[0].rule[0].abort_incomplete_multipart_upload[0].days_after_initiation == 3
+    error_message = "The default lifecycle_days (3) must also render as the abort-incomplete-multipart-upload days_after_initiation when lifecycle_days is omitted."
+  }
+}
+
+run "trace_export_unset_creates_no_transport_resources" {
+  command = plan
+  variables {
+    cluster = {
+      create                = false
+      name                  = "test-cluster"
+      existing_cluster_name = "test-cluster"
+    }
+    trace_export_ingest = null
+  }
+  assert {
+    condition = (
+      length(aws_s3_bucket.trace_export_ingest) == 0 &&
+      length(aws_s3_bucket_public_access_block.trace_export_ingest) == 0 &&
+      length(aws_s3_bucket_server_side_encryption_configuration.trace_export_ingest) == 0 &&
+      length(aws_s3_bucket_lifecycle_configuration.trace_export_ingest) == 0 &&
+      length(aws_s3_bucket_policy.trace_export_ingest) == 0 &&
+      length(aws_s3_bucket_notification.trace_export_ingest) == 0 &&
+      length(aws_sqs_queue.trace_export_ingest) == 0 &&
+      length(aws_sqs_queue_policy.trace_export_ingest) == 0
+    )
+    error_message = "With trace_export_ingest unset, no transport resource may be planned — the zero-diff guarantee."
+  }
+}
+
+# --- trace_export_ingest: receiver injection (block set) ---
+#
+# The synthesized "awss3/trace-export-ingest" entry flows through the same
+# normalization/render/IAM path as caller-configured receivers, built entirely
+# from the plan-known name locals — so the rendered helm block and the
+# collector policy are byte-assertable here. The zero-diff pins above (and the
+# byte-identical awss3 runs earlier in this file, untouched by this feature)
+# hold the unset direction.
+
+run "trace_export_receiver_injected_and_rendered" {
+  command = plan
+  variables {
+    cluster = {
+      create                = false
+      name                  = "test-cluster"
+      existing_cluster_name = "test-cluster"
+    }
+    trace_export_ingest = {
+      producer_execution_role_arn = "arn:aws:iam::210987654321:role/writer-caller"
+    }
+    trace_export_external_id = "external-id-value"
+  }
+  assert {
+    condition = jsonencode(local.helm_otel_awss3_block) == jsonencode({
+      config = {
+        receivers = {
+          "awss3/trace-export-ingest" = {
+            sqs = {
+              queue_url = "https://sqs.us-east-1.amazonaws.com/123456789012/test-cluster-trace-export-ingest"
+              region    = "us-east-1"
+            }
+            s3downloader = {
+              region    = "us-east-1"
+              s3_bucket = "test-cluster-trace-export-ingest-123456789012"
+              s3_prefix = "traces/"
+            }
+          }
+        }
+        service = { pipelines = { traces = { receivers = ["otlp", "awss3/trace-export-ingest"] } } }
+      }
+    })
+    error_message = "With only the ingest block set, the rendered awss3 helm block must contain exactly the synthesized receiver, consuming the derived queue/bucket, appended to the trace pipeline."
+  }
+  assert {
+    condition = aws_iam_role_policy.otel_collector_awss3_receiver[0].policy == jsonencode({
+      Version = "2012-10-17"
+      Statement = [
+        {
+          Effect = "Allow"
+          Action = [
+            "sqs:ReceiveMessage",
+            "sqs:DeleteMessage",
+            "sqs:GetQueueAttributes",
+            "sqs:GetQueueUrl",
+          ]
+          Resource = ["arn:aws:sqs:us-east-1:123456789012:test-cluster-trace-export-ingest"]
+        },
+        {
+          Effect   = "Allow"
+          Action   = ["s3:GetObject"]
+          Resource = ["arn:aws:s3:::test-cluster-trace-export-ingest-123456789012/traces/*"]
+        },
+        {
+          Effect   = "Allow"
+          Action   = ["s3:GetBucketLocation"]
+          Resource = ["arn:aws:s3:::test-cluster-trace-export-ingest-123456789012"]
+        },
+      ]
+    })
+    error_message = "The collector read policy must auto-widen to the synthesized receiver's queue and prefix-scoped bucket resources — with no CMK, exactly the three standard statements."
+  }
+}
+
+run "trace_export_receiver_coexists_with_caller_receivers" {
+  command = plan
+  variables {
+    cluster = {
+      create                = false
+      name                  = "test-cluster"
+      existing_cluster_name = "test-cluster"
+    }
+    trace_export_ingest = {
+      producer_execution_role_arn = "arn:aws:iam::210987654321:role/writer-caller"
+    }
+    trace_export_external_id = "external-id-value"
+    helm = {
+      deploy_charts = false
+      opentelemetry_collector = {
+        awss3_receiver = {
+          enabled       = true
+          sqs_queue_arn = "arn:aws:sqs:us-east-1:123456789012:queue-one"
+          sqs_queue_url = "https://sqs.us-east-1.amazonaws.com/123456789012/queue-one"
+          s3_bucket     = "bucket-one"
+          s3_prefix     = "traces"
+        }
+        awss3_receivers = {
+          extra = {
+            sqs_queue_arn = "arn:aws:sqs:us-east-1:123456789012:queue-two"
+            sqs_queue_url = "https://sqs.us-east-1.amazonaws.com/123456789012/queue-two"
+            s3_bucket     = "bucket-two"
+          }
+        }
+      }
+    }
+  }
+  assert {
+    condition     = jsonencode(sort(keys(local.otel_awss3_receivers))) == jsonencode(["awss3", "awss3/extra", "awss3/trace-export-ingest"])
+    error_message = "The synthesized ingest receiver must coexist with the caller's singular and map receivers under distinct component IDs."
+  }
+  assert {
+    condition     = jsonencode(local.helm_otel_awss3_block.config.service.pipelines.traces.receivers) == jsonencode(["otlp", "awss3", "awss3/extra", "awss3/trace-export-ingest"])
+    error_message = "The trace pipeline must list otlp plus every receiver — caller-configured and synthesized — in sorted component-ID order."
+  }
+  assert {
+    condition = jsonencode(jsondecode(aws_iam_role_policy.otel_collector_awss3_receiver[0].policy).Statement[0].Resource) == jsonencode([
+      "arn:aws:sqs:us-east-1:123456789012:queue-one",
+      "arn:aws:sqs:us-east-1:123456789012:queue-two",
+      "arn:aws:sqs:us-east-1:123456789012:test-cluster-trace-export-ingest",
+    ])
+    error_message = "The collector policy's SQS statement must cover the caller queues and the synthesized ingest queue, sorted."
+  }
+}
+
+run "trace_export_reserved_receiver_key_rejected" {
+  command = plan
+  variables {
+    cluster = {
+      create                = false
+      name                  = "test-cluster"
+      existing_cluster_name = "test-cluster"
+    }
+    trace_export_ingest = {
+      producer_execution_role_arn = "arn:aws:iam::210987654321:role/writer-caller"
+    }
+    trace_export_external_id = "external-id-value"
+    helm = {
+      deploy_charts = false
+      opentelemetry_collector = {
+        awss3_receivers = {
+          trace-export-ingest = {
+            sqs_queue_arn = "arn:aws:sqs:us-east-1:123456789012:queue-one"
+            sqs_queue_url = "https://sqs.us-east-1.amazonaws.com/123456789012/queue-one"
+            s3_bucket     = "bucket-one"
+          }
+        }
+      }
+    }
+  }
+  expect_failures = [aws_sqs_queue.trace_export_ingest]
+}
+
+# Flip side of the run above: a *disabled* entry under the reserved
+# "trace-export-ingest" key is explicitly supported (the README documents
+# keeping one around, e.g. to stage a future receiver) — the merge filters it
+# out via `if m.enabled` before the reserved-key precondition ever sees it, so
+# the plan must succeed and the synthesized receiver must still render.
+
+run "trace_export_reserved_receiver_key_disabled_entry_accepted" {
+  command = plan
+  variables {
+    cluster = {
+      create                = false
+      name                  = "test-cluster"
+      existing_cluster_name = "test-cluster"
+    }
+    trace_export_ingest = {
+      producer_execution_role_arn = "arn:aws:iam::210987654321:role/writer-caller"
+    }
+    trace_export_external_id = "external-id-value"
+    helm = {
+      deploy_charts = false
+      opentelemetry_collector = {
+        awss3_receivers = {
+          trace-export-ingest = {
+            enabled       = false
+            sqs_queue_arn = "arn:aws:sqs:us-east-1:123456789012:queue-one"
+            sqs_queue_url = "https://sqs.us-east-1.amazonaws.com/123456789012/queue-one"
+            s3_bucket     = "bucket-one"
+          }
+        }
+      }
+    }
+  }
+  assert {
+    condition     = contains(keys(local.helm_otel_awss3_block.config.receivers), "awss3/trace-export-ingest")
+    error_message = "The synthesized ingest receiver must still render under its reserved component ID when the caller's identically-keyed entry is disabled and dropped from the merge."
+  }
+}
+
+# The dedicated-queue guard on the ingest queue (sqs.tf) also spans a caller
+# receiver under a DIFFERENT key that happens to reuse the derived ingest
+# queue ARN — not just the reserved-key collision above. The literal ARN here
+# is the same "arn:aws:sqs:<region>:<account>:<cluster>-trace-export-ingest"
+# string this file's other trace-export runs already assert
+# local.trace_export_ingest_queue_arn resolves to under this baseline
+# (region = us-east-1, account = 123456789012, cluster = test-cluster), so it
+# is reproduced here deterministically rather than guessed.
+
+run "trace_export_caller_receiver_reuses_ingest_queue_arn_rejected" {
+  command = plan
+  variables {
+    cluster = {
+      create                = false
+      name                  = "test-cluster"
+      existing_cluster_name = "test-cluster"
+    }
+    trace_export_ingest = {
+      producer_execution_role_arn = "arn:aws:iam::210987654321:role/writer-caller"
+    }
+    trace_export_external_id = "external-id-value"
+    helm = {
+      deploy_charts = false
+      opentelemetry_collector = {
+        awss3_receivers = {
+          hijack = {
+            sqs_queue_arn = "arn:aws:sqs:us-east-1:123456789012:test-cluster-trace-export-ingest"
+            sqs_queue_url = "https://sqs.us-east-1.amazonaws.com/123456789012/test-cluster-trace-export-ingest"
+            s3_bucket     = "bucket-hijack"
+          }
+        }
+      }
+    }
+  }
+  expect_failures = [aws_sqs_queue.trace_export_ingest]
+}
+
+# --- trace_export_ingest: writer role (block set) ---
+#
+# The trust policy is a pure function of variables (the account ID and
+# partition parse out of the validated execution-role ARN), and the inline
+# policy builds from the name locals — both byte-assertable at plan time.
+
+run "trace_export_writer_role_trust_and_policy" {
+  command = plan
+  variables {
+    cluster = {
+      create                = false
+      name                  = "test-cluster"
+      existing_cluster_name = "test-cluster"
+    }
+    trace_export_ingest = {
+      producer_execution_role_arn = "arn:aws:iam::210987654321:role/writer-caller-*"
+    }
+    trace_export_external_id = "external-id-value"
+  }
+  assert {
+    condition     = aws_iam_role.trace_export_writer[0].name == "test-cluster-us-east-1-trace-export-writer"
+    error_message = "The writer role name must be region-qualified — IAM role names are account-global."
+  }
+  assert {
+    condition = nonsensitive(aws_iam_role.trace_export_writer[0].assume_role_policy) == jsonencode({
+      Version = "2012-10-17"
+      Statement = [{
+        Effect    = "Allow"
+        Principal = { AWS = "arn:aws:iam::210987654321:root" }
+        Action    = "sts:AssumeRole"
+        Condition = {
+          StringEquals = { "sts:ExternalId" = "external-id-value" }
+          StringLike   = { "aws:PrincipalArn" = "arn:aws:iam::210987654321:role/writer-caller-*" }
+        }
+      }]
+    })
+    error_message = "The writer trust policy must anchor on the external account's root with the ExternalId StringEquals and PrincipalArn StringLike conditions — wildcards confined to the condition, never the principal."
+  }
+  assert {
+    condition = aws_iam_role_policy.trace_export_writer[0].policy == jsonencode({
+      Version = "2012-10-17"
+      Statement = [
+        {
+          Effect   = "Allow"
+          Action   = ["s3:PutObject"]
+          Resource = ["arn:aws:s3:::test-cluster-trace-export-ingest-123456789012/traces/*"]
+        },
+      ]
+    })
+    error_message = "Without a CMK the writer policy must be exactly one statement: s3:PutObject scoped to the ingest prefix."
+  }
+}
+
+# The run above pins the trust policy with a wildcarded producer ARN (the
+# StringLike condition value carries the "*"). This run pins the other
+# direction: an exact, wildcard-free producer ARN must flow into that same
+# condition byte-for-byte — the trust policy doesn't require or assume a
+# wildcard is present.
+
+run "trace_export_producer_role_arn_without_wildcard_trust_exact" {
+  command = plan
+  variables {
+    cluster = {
+      create                = false
+      name                  = "test-cluster"
+      existing_cluster_name = "test-cluster"
+    }
+    trace_export_ingest = {
+      producer_execution_role_arn = "arn:aws:iam::210987654321:role/writer-caller"
+    }
+    trace_export_external_id = "external-id-value"
+  }
+  assert {
+    condition = nonsensitive(aws_iam_role.trace_export_writer[0].assume_role_policy) == jsonencode({
+      Version = "2012-10-17"
+      Statement = [{
+        Effect    = "Allow"
+        Principal = { AWS = "arn:aws:iam::210987654321:root" }
+        Action    = "sts:AssumeRole"
+        Condition = {
+          StringEquals = { "sts:ExternalId" = "external-id-value" }
+          StringLike   = { "aws:PrincipalArn" = "arn:aws:iam::210987654321:role/writer-caller" }
+        }
+      }]
+    })
+    error_message = "With an exact (wildcard-free) producer_execution_role_arn, the writer trust policy's aws:PrincipalArn StringLike condition must equal that ARN exactly — the condition is not coincidentally only correct when a wildcard is present."
+  }
+}
+
+# The trust policy's principal partition (arn:<partition>:iam::<account>:root)
+# is parsed from producer_execution_role_arn itself (local.
+# trace_export_producer_partition), not from data.aws_partition.current (the
+# module's own partition, mocked to "aws" for this whole suite). A non-"aws"
+# partition in the producer ARN proves the derivation isn't coincidentally
+# always "aws".
+
+run "trace_export_producer_role_arn_non_aws_partition_parsed" {
+  command = plan
+  variables {
+    cluster = {
+      create                = false
+      name                  = "test-cluster"
+      existing_cluster_name = "test-cluster"
+    }
+    trace_export_ingest = {
+      producer_execution_role_arn = "arn:aws-us-gov:iam::210987654321:role/writer-caller"
+    }
+    trace_export_external_id = "external-id-value"
+  }
+  assert {
+    condition     = jsondecode(nonsensitive(aws_iam_role.trace_export_writer[0].assume_role_policy)).Statement[0].Principal.AWS == "arn:aws-us-gov:iam::210987654321:root"
+    error_message = "The writer trust policy's principal partition must be parsed from producer_execution_role_arn (\"aws-us-gov\"), not the module's own data.aws_partition.current (mocked to \"aws\")."
+  }
+}
+
+# trace_export_external_id is required whenever trace_export_ingest is set —
+# the writer role's trust policy has nowhere else to source the sts:ExternalId
+# condition. This is a cross-variable check, so it lives as a precondition on
+# aws_iam_role.trace_export_writer rather than a var.trace_export_external_id
+# validation (which cannot see var.trace_export_ingest).
+
+run "trace_export_external_id_required_when_block_set" {
+  command = plan
+  variables {
+    cluster = {
+      create                = false
+      name                  = "test-cluster"
+      existing_cluster_name = "test-cluster"
+    }
+    trace_export_ingest = {
+      producer_execution_role_arn = "arn:aws:iam::210987654321:role/writer-caller"
+    }
+  }
+  expect_failures = [aws_iam_role.trace_export_writer]
+}
+
+run "trace_export_writer_role_absent_when_unset" {
+  command = plan
+  variables {
+    cluster = {
+      create                = false
+      name                  = "test-cluster"
+      existing_cluster_name = "test-cluster"
+    }
+    trace_export_ingest = null
+  }
+  assert {
+    condition     = length(aws_iam_role.trace_export_writer) == 0 && length(aws_iam_role_policy.trace_export_writer) == 0
+    error_message = "With trace_export_ingest unset, no writer role or policy may be planned."
+  }
+}
+
+# --- trace_export_ingest: outputs (both states) ---
+#
+# Outputs derive from the name locals (the writer-role ARN included — its
+# name is module-fixed, so the ARN is deterministic), keeping them plan-known
+# with the block set and null when unset.
+
+run "trace_export_outputs_populated_when_set" {
+  command = plan
+  variables {
+    cluster = {
+      create                = false
+      name                  = "test-cluster"
+      existing_cluster_name = "test-cluster"
+    }
+    trace_export_ingest = {
+      producer_execution_role_arn = "arn:aws:iam::210987654321:role/writer-caller"
+    }
+    trace_export_external_id = "external-id-value"
+  }
+  assert {
+    condition = (
+      output.trace_export_ingest_bucket == "test-cluster-trace-export-ingest-123456789012" &&
+      output.trace_export_ingest_prefix == "traces/" &&
+      output.trace_export_writer_role_arn == "arn:aws:iam::123456789012:role/test-cluster-us-east-1-trace-export-writer" &&
+      nonsensitive(output.trace_export_external_id) == "external-id-value" &&
+      output.trace_export_ingest_queue_arn == "arn:aws:sqs:us-east-1:123456789012:test-cluster-trace-export-ingest" &&
+      output.trace_export_ingest_queue_name == "test-cluster-trace-export-ingest"
+    )
+    error_message = "With the block set, all six trace-export outputs must carry the derived registration values (bucket, prefix, writer-role ARN, external ID, queue ARN/name)."
+  }
+}
+
+run "trace_export_outputs_null_when_unset" {
+  command = plan
+  variables {
+    cluster = {
+      create                = false
+      name                  = "test-cluster"
+      existing_cluster_name = "test-cluster"
+    }
+    trace_export_ingest = null
+  }
+  assert {
+    condition = (
+      output.trace_export_ingest_bucket == null &&
+      output.trace_export_ingest_prefix == null &&
+      output.trace_export_writer_role_arn == null &&
+      nonsensitive(output.trace_export_external_id) == null &&
+      output.trace_export_ingest_queue_arn == null &&
+      output.trace_export_ingest_queue_name == null
+    )
+    error_message = "With the block unset, all six trace-export outputs must be null."
+  }
+}
+
+# --- trace_export_ingest: CMK branch (paired with the no-CMK pins above) ---
+#
+# The no-CMK direction is already pinned byte-identically by
+# trace_export_default_encryption_is_sse_s3 (SSE-S3, Bucket Keys off), the
+# three-statement collector policy in trace_export_receiver_injected_and_
+# rendered, and the one-statement writer policy in trace_export_writer_role_
+# trust_and_policy. This run asserts the other direction: a caller-supplied
+# CMK must flip the bucket to SSE-KMS with Bucket Keys and add exactly the
+# matching KMS statements to the collector (Decrypt) and writer
+# (GenerateDataKey/Encrypt) policies.
+
+run "trace_export_cmk_widens_encryption_and_policies" {
+  command = plan
+  variables {
+    cluster = {
+      create                = false
+      name                  = "test-cluster"
+      existing_cluster_name = "test-cluster"
+    }
+    trace_export_ingest = {
+      producer_execution_role_arn = "arn:aws:iam::210987654321:role/writer-caller"
+      kms_key_arn                 = "arn:aws:kms:us-east-1:123456789012:key/11111111-2222-3333-4444-555555555555"
+    }
+    trace_export_external_id = "external-id-value"
+  }
+  assert {
+    condition = (
+      tolist(aws_s3_bucket_server_side_encryption_configuration.trace_export_ingest[0].rule)[0].apply_server_side_encryption_by_default[0].sse_algorithm == "aws:kms" &&
+      tolist(aws_s3_bucket_server_side_encryption_configuration.trace_export_ingest[0].rule)[0].apply_server_side_encryption_by_default[0].kms_master_key_id == "arn:aws:kms:us-east-1:123456789012:key/11111111-2222-3333-4444-555555555555" &&
+      tolist(aws_s3_bucket_server_side_encryption_configuration.trace_export_ingest[0].rule)[0].bucket_key_enabled == true
+    )
+    error_message = "With a CMK the ingest bucket must use SSE-KMS on that key with S3 Bucket Keys enabled."
+  }
+  assert {
+    condition = jsonencode(jsondecode(aws_iam_role_policy.otel_collector_awss3_receiver[0].policy).Statement[3]) == jsonencode({
+      Effect   = "Allow"
+      Action   = ["kms:Decrypt"]
+      Resource = ["arn:aws:kms:us-east-1:123456789012:key/11111111-2222-3333-4444-555555555555"]
+    })
+    error_message = "With a CMK the collector policy must gain a fourth statement: kms:Decrypt on exactly that key."
+  }
+  assert {
+    condition     = length(jsondecode(aws_iam_role_policy.otel_collector_awss3_receiver[0].policy).Statement) == 4
+    error_message = "With a CMK the collector policy must contain exactly four statements (the three standard ones plus kms:Decrypt)."
+  }
+  assert {
+    condition = jsonencode(jsondecode(aws_iam_role_policy.trace_export_writer[0].policy).Statement[1]) == jsonencode({
+      Effect   = "Allow"
+      Action   = ["kms:GenerateDataKey", "kms:Encrypt"]
+      Resource = ["arn:aws:kms:us-east-1:123456789012:key/11111111-2222-3333-4444-555555555555"]
+    })
+    error_message = "With a CMK the writer policy must gain a second statement: kms:GenerateDataKey/kms:Encrypt on exactly that key."
+  }
+  assert {
+    condition     = length(jsondecode(aws_iam_role_policy.trace_export_writer[0].policy).Statement) == 2
+    error_message = "With a CMK the writer policy must contain exactly two statements (prefix-scoped PutObject plus the KMS grant)."
+  }
+}
+
+# --- trace_export_ingest: agent_role_arn and kms_key_arn combined ---
+#
+# agent_role_arn (bucket-policy direct-writer grant) and kms_key_arn (SSE-KMS
+# widening) are independent knobs gated on separate conditionals throughout
+# s3.tf/iam.tf — this run pins that they compose rather than one silently
+# suppressing the other: both bucket-policy statements render AND both KMS
+# grants render, all in the same plan.
+
+run "trace_export_agent_role_arn_and_cmk_together" {
+  command = plan
+  variables {
+    cluster = {
+      create                = false
+      name                  = "test-cluster"
+      existing_cluster_name = "test-cluster"
+    }
+    trace_export_ingest = {
+      producer_execution_role_arn = "arn:aws:iam::210987654321:role/writer-caller"
+      agent_role_arn              = "arn:aws:iam::210987654321:role/agent-writer"
+      kms_key_arn                 = "arn:aws:kms:us-east-1:123456789012:key/11111111-2222-3333-4444-555555555555"
+    }
+    trace_export_external_id = "external-id-value"
+  }
+  assert {
+    condition = aws_s3_bucket_policy.trace_export_ingest[0].policy == jsonencode({
+      Version = "2012-10-17"
+      Statement = [
+        {
+          Sid       = "DenyInsecureTransport"
+          Effect    = "Deny"
+          Principal = "*"
+          Action    = "s3:*"
+          Resource = [
+            "arn:aws:s3:::test-cluster-trace-export-ingest-123456789012",
+            "arn:aws:s3:::test-cluster-trace-export-ingest-123456789012/*",
+          ]
+          Condition = { Bool = { "aws:SecureTransport" = "false" } }
+        },
+        {
+          Sid       = "AgentPutObject"
+          Effect    = "Allow"
+          Principal = { AWS = "arn:aws:iam::210987654321:role/agent-writer" }
+          Action    = "s3:PutObject"
+          Resource  = "arn:aws:s3:::test-cluster-trace-export-ingest-123456789012/traces/*"
+        },
+      ]
+    })
+    error_message = "With both agent_role_arn and kms_key_arn set, the bucket policy must still carry both the DenyInsecureTransport and AgentPutObject statements — the CMK branch must not suppress the direct-writer grant."
+  }
+  assert {
+    condition = jsonencode(jsondecode(aws_iam_role_policy.otel_collector_awss3_receiver[0].policy).Statement[3]) == jsonencode({
+      Effect   = "Allow"
+      Action   = ["kms:Decrypt"]
+      Resource = ["arn:aws:kms:us-east-1:123456789012:key/11111111-2222-3333-4444-555555555555"]
+    })
+    error_message = "With agent_role_arn also set, the collector's awss3-receiver policy must still gain the kms:Decrypt statement on the CMK — the agent_role_arn branch (bucket policy only) must not interfere with the collector's KMS grant."
+  }
+  assert {
+    condition = jsonencode(jsondecode(aws_iam_role_policy.trace_export_writer[0].policy).Statement[1]) == jsonencode({
+      Effect   = "Allow"
+      Action   = ["kms:GenerateDataKey", "kms:Encrypt"]
+      Resource = ["arn:aws:kms:us-east-1:123456789012:key/11111111-2222-3333-4444-555555555555"]
+    })
+    error_message = "With agent_role_arn also set, the writer policy must still gain the kms:GenerateDataKey/kms:Encrypt statement on the CMK — the writer's own grant is unaffected by the bucket-policy-only agent_role_arn branch."
   }
 }
