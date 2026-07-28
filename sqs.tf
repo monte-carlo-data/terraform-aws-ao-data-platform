@@ -8,10 +8,14 @@
 #
 # Retention is deliberately longer than the object lifecycle: after a long
 # collector outage the backlog drains to some GetObject misses on expired
-# objects (tolerable — the producer's export watermark re-covers the window)
-# rather than dropping notifications silently. No DLQ: the receiver deletes
-# what it processes or filters, transient failures retry via the visibility
-# timeout, and gap recovery is the producer's job.
+# objects rather than dropping notifications silently. This is tolerable
+# because the awss3 receiver treats a GetObject 404 (NoSuchKey) as terminal —
+# it deletes the SQS message instead of redelivering, so an expired object
+# can't become a poison backlog (verified against awss3receiver v0.150.0;
+# re-check on a receiver bump). The producer's export watermark re-covers the
+# window regardless. No DLQ: the receiver deletes what it processes or filters,
+# other transient failures retry via the visibility timeout, and gap recovery
+# is the producer's job.
 
 resource "aws_sqs_queue" "trace_export_ingest" {
   count = local.trace_export_ingest_enabled ? 1 : 0
