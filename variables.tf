@@ -812,13 +812,20 @@ variable "trace_export_ingest" {
     the ARN.
 
     bucket_name overrides the default ingest bucket name,
-    "<cluster-name>-trace-export-ingest-<account-id>". It must name a bucket
-    that does NOT already exist: the module always creates and owns this
+    "<cluster-name>-<region>-trace-export-ingest-<account-id>". It must name a
+    bucket that does NOT already exist: the module always creates and owns this
     bucket (force_destroy — it holds transit data). Pointing bucket_name at a
     pre-existing bucket adopts that bucket into this module's state — its
     bucket policy and event-notification configuration are REPLACED with the
     module's own, and a later teardown or unset of trace_export_ingest
     deletes its contents.
+
+    S3 caps bucket names at 63 characters. The default spends the region, the
+    fixed "-trace-export-ingest-" segment, and the 12-digit account ID on top of
+    the cluster name — roughly 43 characters in us-east-1, more in longer region
+    names — leaving about 20 characters for the cluster name (fewer still in a
+    long region). A cluster name that overflows this trips the name-format
+    precondition at plan time, which names bucket_name as the escape hatch.
 
     prefix (default "traces/") is the key prefix the producer writes under;
     the receiver, lifecycle rule, notification filter, and IAM grants are all
