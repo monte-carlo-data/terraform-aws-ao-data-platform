@@ -387,5 +387,33 @@ resource "helm_release" "ao_data_platform" {
     helm_release.cert_manager,
     data.kubernetes_namespace_v1.cert_manager,
     null_resource.eso_resources,
+
+    # Every ClickHouse/Keeper node must exist before the chart schedules those
+    # pods. Their PVCs use a WaitForFirstConsumer storage class, so a pod that
+    # schedules while only one zone has a node binds its volume to that zone
+    # permanently — a bound zonal EBS volume pins the StatefulSet pod, silently
+    # collapsing the intended cross-zone topology spread. The node groups live
+    # inside module.eks (eks_managed_node_groups), so depending on the module
+    # waits for all of them. This edge already holds transitively today (the
+    # release's namespace argument reaches module.eks, and every other entry
+    # above reaches it too, the count-gated ones in complementary pairs that
+    # always resolve to exactly one) — but only incidentally, as a side effect
+    # of how the rest of the graph happens to be composed. Stating it directly
+    # makes node-group ordering a property of the resource that needs it.
+    #
+    # The storage classes are referenced by the chart as plain name strings,
+    # so nothing else orders them ahead of the release; list them explicitly.
+    # This only pins the module-created classes — externally managed storage
+    # class names remain unconstrained.
+    #
+    # This invariant only applies to module-created clusters: module.eks has
+    # count = 0 on the existing-cluster path, where ClickHouse/Keeper node
+    # placement is gated off entirely, so bare module.eks (rather than the
+    # [module.eks, data.aws_eks_cluster.existing] pair used elsewhere for
+    # cluster-dependent blocks) is deliberate — there is nothing to order here
+    # when the caller supplies the cluster.
+    module.eks,
+    kubernetes_storage_class_v1.clickhouse_gp3,
+    kubernetes_storage_class_v1.gp3,
   ]
 }
