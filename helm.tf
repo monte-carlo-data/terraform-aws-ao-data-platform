@@ -394,10 +394,26 @@ resource "helm_release" "ao_data_platform" {
     # permanently — a bound zonal EBS volume pins the StatefulSet pod, silently
     # collapsing the intended cross-zone topology spread. The node groups live
     # inside module.eks (eks_managed_node_groups), so depending on the module
-    # waits for all of them. This edge is already guaranteed transitively via
-    # aws_load_balancer_controller / cert_manager (which both depend on
-    # module.eks); stating it directly keeps the ordering invariant intact even
-    # if either of those releases is ever gated off.
+    # waits for all of them. This edge already holds transitively today (the
+    # release's namespace argument reaches module.eks, and every other entry
+    # above reaches it too, the count-gated ones in complementary pairs that
+    # always resolve to exactly one) — but only incidentally, as a side effect
+    # of how the rest of the graph happens to be composed. Stating it directly
+    # makes node-group ordering a property of the resource that needs it.
+    #
+    # The storage classes are referenced by the chart as plain name strings,
+    # so nothing else orders them ahead of the release; list them explicitly.
+    # This only pins the module-created classes — externally managed storage
+    # class names remain unconstrained.
+    #
+    # This invariant only applies to module-created clusters: module.eks has
+    # count = 0 on the existing-cluster path, where ClickHouse/Keeper node
+    # placement is gated off entirely, so bare module.eks (rather than the
+    # [module.eks, data.aws_eks_cluster.existing] pair used elsewhere for
+    # cluster-dependent blocks) is deliberate — there is nothing to order here
+    # when the caller supplies the cluster.
     module.eks,
+    kubernetes_storage_class_v1.clickhouse_gp3,
+    kubernetes_storage_class_v1.gp3,
   ]
 }
