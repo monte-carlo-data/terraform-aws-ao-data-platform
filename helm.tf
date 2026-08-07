@@ -387,5 +387,17 @@ resource "helm_release" "ao_data_platform" {
     helm_release.cert_manager,
     data.kubernetes_namespace_v1.cert_manager,
     null_resource.eso_resources,
+
+    # Every ClickHouse/Keeper node must exist before the chart schedules those
+    # pods. Their PVCs use a WaitForFirstConsumer storage class, so a pod that
+    # schedules while only one zone has a node binds its volume to that zone
+    # permanently — a bound zonal EBS volume pins the StatefulSet pod, silently
+    # collapsing the intended cross-zone topology spread. The node groups live
+    # inside module.eks (eks_managed_node_groups), so depending on the module
+    # waits for all of them. This edge is already guaranteed transitively via
+    # aws_load_balancer_controller / cert_manager (which both depend on
+    # module.eks); stating it directly keeps the ordering invariant intact even
+    # if either of those releases is ever gated off.
+    module.eks,
   ]
 }
