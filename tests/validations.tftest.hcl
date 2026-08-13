@@ -2292,9 +2292,14 @@ run "trace_export_writer_role_trust_and_policy" {
           Action   = ["s3:PutObject"]
           Resource = ["arn:aws:s3:::test-cluster-us-east-1-trace-export-ingest-123456789012/traces/*"]
         },
+        {
+          Effect   = "Allow"
+          Action   = ["s3:ListBucket"]
+          Resource = ["arn:aws:s3:::test-cluster-us-east-1-trace-export-ingest-123456789012"]
+        },
       ]
     })
-    error_message = "Without a CMK the writer policy must be exactly one statement: s3:PutObject scoped to the ingest prefix."
+    error_message = "Without a CMK the writer policy must be two statements: s3:PutObject scoped to the ingest prefix, plus unconditioned s3:ListBucket on the bucket for HeadBucket."
   }
 }
 
@@ -2523,16 +2528,16 @@ run "trace_export_cmk_widens_encryption_and_policies" {
     error_message = "With a CMK the collector policy must contain exactly four statements (the three standard ones plus kms:Decrypt)."
   }
   assert {
-    condition = jsonencode(jsondecode(aws_iam_role_policy.trace_export_writer[0].policy).Statement[1]) == jsonencode({
+    condition = jsonencode(jsondecode(aws_iam_role_policy.trace_export_writer[0].policy).Statement[2]) == jsonencode({
       Effect   = "Allow"
       Action   = ["kms:GenerateDataKey", "kms:Encrypt"]
       Resource = ["arn:aws:kms:us-east-1:123456789012:key/11111111-2222-3333-4444-555555555555"]
     })
-    error_message = "With a CMK the writer policy must gain a second statement: kms:GenerateDataKey/kms:Encrypt on exactly that key."
+    error_message = "With a CMK the writer policy must gain a third statement: kms:GenerateDataKey/kms:Encrypt on exactly that key."
   }
   assert {
-    condition     = length(jsondecode(aws_iam_role_policy.trace_export_writer[0].policy).Statement) == 2
-    error_message = "With a CMK the writer policy must contain exactly two statements (prefix-scoped PutObject plus the KMS grant)."
+    condition     = length(jsondecode(aws_iam_role_policy.trace_export_writer[0].policy).Statement) == 3
+    error_message = "With a CMK the writer policy must contain exactly three statements (prefix-scoped PutObject, unconditioned ListBucket, plus the KMS grant)."
   }
 }
 
@@ -2600,7 +2605,7 @@ run "trace_export_agent_role_arn_and_cmk_together" {
     error_message = "With agent_role_arn also set, the collector's awss3-receiver policy must still gain the kms:Decrypt statement on the CMK — the agent_role_arn branch (bucket policy only) must not interfere with the collector's KMS grant."
   }
   assert {
-    condition = jsonencode(jsondecode(aws_iam_role_policy.trace_export_writer[0].policy).Statement[1]) == jsonencode({
+    condition = jsonencode(jsondecode(aws_iam_role_policy.trace_export_writer[0].policy).Statement[2]) == jsonencode({
       Effect   = "Allow"
       Action   = ["kms:GenerateDataKey", "kms:Encrypt"]
       Resource = ["arn:aws:kms:us-east-1:123456789012:key/11111111-2222-3333-4444-555555555555"]
