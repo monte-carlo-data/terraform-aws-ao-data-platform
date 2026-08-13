@@ -151,10 +151,12 @@ resource "aws_iam_role" "trace_export_writer" {
   }
 }
 
-# Write-only and prefix-scoped: the writer can PUT under the ingest prefix
-# and nothing else — no reads, no lists, no deletes. With a caller-supplied
-# CMK on the bucket, SSE-KMS PUTs additionally need GenerateDataKey (Encrypt
-# covers non-Bucket-Keys key usage).
+# The writer can PUT under the ingest prefix and list the bucket — no
+# reads, no deletes. PUTs are prefix-scoped; ListBucket is a bucket-level
+# action granted unconditioned for HeadBucket region discovery (see the
+# statement comment for why no prefix condition is possible). With a
+# caller-supplied CMK on the bucket, SSE-KMS PUTs additionally need
+# GenerateDataKey (Encrypt covers non-Bucket-Keys key usage).
 resource "aws_iam_role_policy" "trace_export_writer" {
   count = local.trace_export_ingest_enabled ? 1 : 0
   name  = "trace-export-writer"
@@ -167,6 +169,17 @@ resource "aws_iam_role_policy" "trace_export_writer" {
           Effect   = "Allow"
           Action   = ["s3:PutObject"]
           Resource = ["${local.trace_export_ingest_bucket_arn}/${local.trace_export_ingest_prefix}*"]
+        },
+        {
+          # No s3:prefix condition: the writer's ListBucket grant exists for
+          # HeadBucket (bucket-region discovery on the first write), and
+          # HeadBucket carries no s3:prefix context key — a prefix condition
+          # silently excludes it (StringLike) or is bypassable by omitting
+          # the prefix parameter (StringLikeIfExists). Exposure is key-name
+          # enumeration only; object reads/deletes remain denied.
+          Effect   = "Allow"
+          Action   = ["s3:ListBucket"]
+          Resource = [local.trace_export_ingest_bucket_arn]
         },
       ],
       var.trace_export_ingest.kms_key_arn != null ? [
