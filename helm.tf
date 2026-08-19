@@ -207,6 +207,16 @@ resource "helm_release" "ao_data_platform" {
   create_namespace = false
   wait_for_jobs    = true
 
+  # HA ClickHouse converges slower than helm's 300s default wait: the per-AZ Keeper/
+  # ClickHouse node groups scale up first, then the Keeper quorum must form (voters restart
+  # through leader elections), only then can the ClickHouse replicas pass readiness — their
+  # WaitForFirstConsumer PVCs only bind once a node exists in the pod's zone — and only then
+  # can the schema job (whose ON CLUSTER DDL needs Keeper, and which retries until CH is up)
+  # complete — with wait + wait_for_jobs this whole chain runs inside one helm wait. Give
+  # generous headroom to avoid a false "failed" release on an install that actually succeeds
+  # moments after the timeout.
+  timeout = 900
+
   values = [
     yamlencode(merge({
       clickhouse = merge({
