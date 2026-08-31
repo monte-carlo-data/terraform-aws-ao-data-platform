@@ -288,7 +288,7 @@ The module provisions a per-access-path ClickHouse user model (`ao-data-platform
 | `admin` | break-glass superuser (loopback-only) | opt-in — `helm.clickhouse.admin` |
 | `readonly_user` | human / MCP / JDBC read access | opt-in — `helm.clickhouse.readonly_user` (see below) |
 
-For each provisioned user the module generates a 32-character password (or uses the matching `clickhouse_passwords.*` override), stores it in Secrets Manager KMS-encrypted with the pipeline key, grants the External Secrets Operator read access, and forwards the per-user `externalSecret` config into the chart so ESO syncs the password into Kubernetes. Each user's secret ARN is exposed as a `clickhouse_*_credentials_secret_arn` output.
+For each provisioned user the module generates a 32-character password (or uses the matching `clickhouse_passwords.*` override), stores it in Secrets Manager KMS-encrypted with the pipeline key, grants the External Secrets Operator read access, and forwards the per-user `externalSecret` config into the chart so ESO syncs the password into Kubernetes. Each user's secret ARN is exposed as a `clickhouse_*_credentials_secret_arn` output. As of v3.0.0 generation is ephemeral and the write uses write-only arguments, so no password is stored in Terraform state or plan files.
 
 - Set `helm.clickhouse.otel.restrict_grants = true` to tighten the `otel` ingest user to `INSERT`-only on the telemetry source tables. Flip this only after any external readers have moved to the `monte_carlo` user — see [Upgrading to v2.0.0](#upgrading-to-v200).
 - Enable the gated break-glass `admin` superuser with `helm.clickhouse.admin = { enabled = true }`. It is reachable only over loopback by default (i.e. via `kubectl exec` into the ClickHouse pod). Disabled by default; when disabled no admin secret is created and `clickhouse_admin_credentials_secret_arn` is `null`.
@@ -521,7 +521,8 @@ To use a StorageClass you manage outside this module, set `clickhouse_storage_cl
 | `helm.clickhouse.otel.restrict_grants` | `bool` | `false` | Forwards `clickhouse.otel.restrictGrants` to the chart. When `true`, the `otel` ingest user is restricted to `INSERT` on the telemetry source tables only; `false` keeps it broad. **Requires chart version >= 2.0.0** (ignored by older charts). Flip to `true` only after external readers have moved to the `monte_carlo` user. |
 | `helm.clickhouse.admin` | `object` | `null` | Optionally provisions the gated break-glass superuser (`admin`). Shape: `{ enabled = bool }`. When `enabled = true`, a Secrets Manager secret + ExternalSecret pipeline is created and the chart's admin user is enabled (loopback-only by default — reachable only via pod-exec); the password comes from `clickhouse_passwords.admin` (or is auto-generated). When disabled (default), no admin secret is created. **Requires chart version >= 2.0.0.** Omit (or `null`) to disable. |
 | `helm.clickhouse.readonly_user` | `object` | `null` | Optionally provisions a second SELECT-only ClickHouse user (`readonly_user`, profile `readonly`). Shape: `{ enabled = bool }`. When `enabled = true`, a Secrets Manager secret + ExternalSecret pipeline mirroring the otel user is created and the toggle is forwarded to the chart; the password comes from `clickhouse_passwords.readonly_user` (or is auto-generated). **Requires chart version >= 1.2.0.** Omit (or `null`) to disable. |
-| `clickhouse_passwords` | `object` (sensitive) | `{}` (all auto-generated) | Passwords for the ClickHouse SQL users. Shape: `{ admin = optional(string), otel = optional(string), monte_carlo = optional(string), schema_owner = optional(string), llm_worker = optional(string), readonly_user = optional(string) }`. Any field left null is auto-generated. Marked `sensitive`, so caller-supplied values are redacted in plan/apply output and CI logs — supply via a `.tfvars` file or `TF_VAR_clickhouse_passwords`. Stored in Secrets Manager and synced into the cluster by ESO; never passed through Helm values. Values remain readable in Terraform state — protect state accordingly. |
+| `clickhouse_passwords` | `object` (sensitive) | `{}` (all auto-generated) | Passwords for the ClickHouse SQL users. Shape: `{ admin = optional(string), otel = optional(string), monte_carlo = optional(string), schema_owner = optional(string), llm_worker = optional(string), readonly_user = optional(string) }`. Any field left null is auto-generated. Marked `sensitive`, so caller-supplied values are redacted in plan/apply output and CI logs — supply via a `.tfvars` file or `TF_VAR_clickhouse_passwords`. Stored in Secrets Manager and synced into the cluster by ESO; never passed through Helm values. Marked `ephemeral`, so values are omitted from state and plan files entirely; ephemeral variables still accept ordinary values, so existing callers need no change. The provider does still read the secret during plan/refresh (aws #42383), so plan-time IAM is unchanged. |
+| `clickhouse_password_versions` | `object` | `{}` (all `1`) | Version counter per ClickHouse user driving each secret's `secret_string_wo_version`. Shape: `{ admin = optional(number, 1), otel = optional(number, 1), monte_carlo = optional(number, 1), schema_owner = optional(number, 1), llm_worker = optional(number, 1), readonly_user = optional(number, 1) }`. Because the password is a write-only argument Terraform cannot detect drift on it — the secret is rewritten **only** when the matching version changes. This is the rotation lever: bump one field to rotate one user, all six to rotate the deployment. Bumping a field without supplying the matching `clickhouse_passwords` value writes a freshly generated password. |
 | `helm.opentelemetry_collector.resources` | `object` | `null` | Kubernetes resource requests/limits for the OTel Collector pods. Same shape as `helm.clickhouse.resources`. Omit to use chart defaults. |
 | `helm.opentelemetry_collector.replica_count` | `number` | `null` | Optional override for the OTel Collector replica count. `null` (default) lets the chart control it. **`0` is not honored by the chart** — its collector template treats `0` as unset and deploys the default count; to stop ingest for a maintenance window, act upstream (deny consumption on the SQS queues feeding the awss3 receivers, or pause OTLP senders). Non-zero overrides work as expected. |
 | `helm.opentelemetry_collector.awss3_receivers` | `map(object)` | `{}` | awss3 receivers for the OTel Collector, one entry per SQS-queue/S3-bucket pair. Each enabled entry renders a receiver with component ID `awss3/<key>` appended to the trace pipeline, and the otel-collector IRSA role gets SQS + S3 read permissions covering every enabled receiver. Entry shape: `{ enabled = optional(bool, true), sqs_queue_arn = string, sqs_queue_url = string, sqs_region = optional(string), s3_bucket = string, s3_region = optional(string), s3_prefix = optional(string, "") }`. Keys are restricted to `[a-zA-Z0-9_-]`, and the key `trace-export-ingest` is reserved for enabled entries while `trace_export_ingest` is set (a disabled entry under that key is dropped from the merge and is fine to keep); every receiver needs its own dedicated queue (duplicate `sqs_queue_arn` values are rejected — see [AWS S3 receivers](#aws-s3-receivers-for-the-otel-collector)). |
@@ -573,6 +574,76 @@ aws secretsmanager get-secret-value \
   --secret-id <clickhouse_monte_carlo_credentials_secret_arn> \
   --query SecretString --output text
 ```
+
+## Migrating to v3.0.0
+
+v3.0.0 stops storing ClickHouse passwords in Terraform state. Generation moved to `ephemeral "random_password"` and the Secrets Manager writes moved to `secret_string_wo`. It requires **Terraform >= 1.11**.
+
+> [!WARNING]
+> **Applying v3.0.0 without step 2 below silently rotates every ClickHouse password.** Switching to a write-only argument writes on the first apply, and with no supplied value that write is a freshly generated password. ESO will sync it and the running ClickHouse users will change. Neither the plan diff nor a validation block can detect this — a write-only value cannot appear in a plan (that is the point), and detecting "a secret already exists" would require a data source that reads the plaintext straight back into state. **Read the whole procedure before applying.**
+
+The migration is designed to change no password. Supply the current values for one apply; afterwards Terraform rewrites nothing until you bump a version deliberately.
+
+**1. Bump Terraform to >= 1.11** wherever this module is planned and applied. On Terraform Cloud that is the version setting on each workspace.
+
+**2. Read the current passwords and supply them for the migration apply.**
+
+```bash
+CLUSTER=<your cluster_name>
+for u in admin otel monte-carlo schema-owner llm-worker readonly-user; do
+  printf '%s=%s\n' "$u" "$(aws secretsmanager get-secret-value \
+    --secret-id "$CLUSTER/clickhouse/$u-credentials" \
+    --query SecretString --output text)"
+done
+```
+
+Build a `.tfvars` (never `-var` on a command line) containing every user your deployment provisions. Omit `admin` / `readonly_user` if they are disabled:
+
+```hcl
+clickhouse_passwords = {
+  admin         = "..."
+  otel          = "..."
+  monte_carlo   = "..."
+  schema_owner  = "..."
+  llm_worker    = "..."
+  readonly_user = "..."
+}
+```
+
+Leave `clickhouse_password_versions` unset — the default of `1` is correct for a migration.
+
+**3. Plan, and check it before applying.** Expect exactly:
+
+- each `random_password.clickhouse_*` **forgotten** (no destroy actions)
+- each `aws_secretsmanager_secret_version.clickhouse_*` **updated in place**, gaining `secret_string_wo_version = 1`
+- **nothing else** — no node group, EKS, `helm_release`, or PVC/PV changes
+
+**4. Apply, then verify.**
+
+```bash
+terraform show -json > /tmp/state.json
+make verify-no-plaintext STATE=/tmp/state.json SENTINELS="<the passwords from step 2>"
+rm /tmp/state.json
+```
+
+Confirm the Secrets Manager values are unchanged, the ClickHouse pods did not restart, and a query as the `monte_carlo` user still succeeds.
+
+**5. Remove the `.tfvars` from step 2.** Later applies do not need it.
+
+### Why later plans look like they regenerate passwords
+
+They do regenerate an ephemeral password every plan — and never write it. The write is gated on `clickhouse_password_versions`, which you have not changed, so the secret keeps its value. This is expected and is not drift.
+
+### Rotating afterwards
+
+Bump the relevant field in `clickhouse_password_versions` and apply. Without a matching `clickhouse_passwords` entry the new value is freshly generated; with one, your supplied value is written. Rotation propagates as: Secrets Manager → ESO resync → the ClickHouse operator re-renders `users.xml`. It requires no SQL — passwords are declared in the operator's `users:` section via `valueFrom.secretKeyRef`, not with `ALTER USER`.
+
+> [!WARNING]
+> **Changing a password without bumping its version does nothing, silently.** The version is the only thing that triggers a write. If you edit `clickhouse_passwords.otel` but leave `clickhouse_password_versions.otel` unchanged, the secret keeps its **old** value and the plan shows no diff — Terraform cannot compare a write-only argument, so there is nothing for it to detect or report.
+>
+> This is the more dangerous of the two footguns in this design, because it fails in the direction of false confidence: you may believe a credential has been rotated and retire the old one while it is still the live password. **Always bump the version in the same change as the password.**
+
+Both footguns are unguardable for the same reason — a write-only value cannot appear in a plan, and detecting the current secret value would require a data source that reads the plaintext straight back into state, defeating the entire change. Documentation is the only control, which is why these two warnings are load-bearing rather than decorative.
 
 ## Upgrading
 
