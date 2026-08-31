@@ -427,14 +427,13 @@ run "irsa_role_names_are_region_qualified" {
 # readonly_user. There is no caller-supplied-password gate to pin any more (an
 # ephemeral value cannot drive count, and an unused ephemeral resource is free).
 # What these runs pin is the sink contract: a gated user that is enabled must
-# get both a Secrets Manager secret and a version.
+# get both a Secrets Manager secret and a version — without both, the credential
+# never lands for ESO to sync.
 #
 # cluster.create = false keeps module.eks out of the plan (the secrets are not
 # an EKS dependency); admin.enabled and readonly_user.enabled = true exercise
 # the enabled direction of both gates. The admin-disabled direction is pinned by
 # clickhouse_admin_disabled_creates_no_secret below.
-
-# --- admin + readonly_user enabled create their secrets ---
 
 run "clickhouse_admin_readonly_enabled_create_secrets" {
   command = plan
@@ -504,9 +503,15 @@ run "password_versions_plumb_to_wo_version" {
       llm_worker    = "supplied-llm-worker"
       readonly_user = "supplied-ro"
     }
+    # Every field distinct except monte_carlo, which is left at the default so
+    # the default itself is pinned. Distinct values are what catch cross-wiring:
+    # if two sinks read the same value, swapping them between users would tie one
+    # user's rotation to the other's counter with the suite still green.
     clickhouse_password_versions = {
       admin         = 7
       otel          = 3
+      schema_owner  = 4
+      llm_worker    = 6
       readonly_user = 5
     }
   }
@@ -523,6 +528,14 @@ run "password_versions_plumb_to_wo_version" {
     error_message = "clickhouse_password_versions.readonly_user must drive the readonly_user secret's secret_string_wo_version."
   }
   assert {
+    condition     = aws_secretsmanager_secret_version.clickhouse_schema_owner_password.secret_string_wo_version == 4
+    error_message = "clickhouse_password_versions.schema_owner must drive the schema_owner secret's secret_string_wo_version."
+  }
+  assert {
+    condition     = aws_secretsmanager_secret_version.clickhouse_llm_worker_password.secret_string_wo_version == 6
+    error_message = "clickhouse_password_versions.llm_worker must drive the llm_worker secret's secret_string_wo_version."
+  }
+  assert {
     condition     = aws_secretsmanager_secret_version.clickhouse_monte_carlo_password.secret_string_wo_version == 1
     error_message = "An unset clickhouse_password_versions field must default to 1, not null."
   }
@@ -530,9 +543,11 @@ run "password_versions_plumb_to_wo_version" {
 
 # --- admin is gated: disabled (default) creates no secret ---
 #
-# admin defaults off. With no helm.clickhouse.admin block, neither the password
-# nor the Secrets Manager secret/version may be created — this pins the gate so a
-# regression can't silently resurrect the orphan admin secret.
+# admin defaults off. With no helm.clickhouse.admin block, the Secrets Manager
+# secret/version may not be created — this pins the gate so a regression can't
+# silently resurrect the orphan admin secret. The generator's own absence is no
+# longer assertable: `ephemeral` resource instances are not in the plan state a
+# test can read, so count == 0 on it cannot be checked here.
 
 run "clickhouse_admin_disabled_creates_no_secret" {
   command = plan

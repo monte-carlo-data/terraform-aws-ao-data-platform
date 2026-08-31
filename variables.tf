@@ -911,9 +911,10 @@ variable "trace_export_external_id" {
 variable "clickhouse_passwords" {
   description = <<-EOT
     Passwords for the ClickHouse SQL users. Every field is optional — any
-    password left null is auto-generated. Supplied or generated, each password
-    is stored in Secrets Manager and synced into the cluster by the External
-    Secrets Operator; passwords never pass through Helm values.
+    password left null OR set to the empty string is auto-generated. Supplied or
+    generated, each password is stored in Secrets Manager and synced into the
+    cluster by the External Secrets Operator; passwords never pass through Helm
+    values.
 
     Marked ephemeral and sensitive: values are omitted from Terraform state and
     plan files entirely, and redacted in plan/apply output and CI logs. Supply
@@ -953,7 +954,12 @@ variable "clickhouse_password_versions" {
     matching clickhouse_passwords value writes a freshly generated password.
 
     Leave at the default of 1 for a fresh install and for the write-only
-    migration — see "Migrating to v3.0.0" in this README.
+    migration. Leaving it at 1 does NOT make the migration a no-op: the
+    migration apply writes every secret regardless, so you must supply your
+    CURRENT passwords via clickhouse_passwords in that same apply. Any user you
+    omit has its password replaced by a freshly generated one, silently — the
+    old value is unrecoverable once overwritten. Read "Migrating to v3.0.0" in
+    this README for the procedure before you run it.
   EOT
   type = object({
     admin         = optional(number, 1)
