@@ -4,7 +4,7 @@ This example creates a new VPC, EKS cluster, and deploys ClickHouse and the OTel
 
 ## Prerequisites
 
-- [Terraform](https://www.terraform.io/downloads.html) >= 1.3
+- [Terraform](https://www.terraform.io/downloads.html) >= 1.11
 - [AWS CLI](https://aws.amazon.com/cli/) configured with appropriate credentials
 
 ## Usage

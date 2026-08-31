@@ -4,11 +4,11 @@
 #   aws eks update-kubeconfig --name <eks_cluster_name output> --region us-east-1
 
 terraform {
-  required_version = ">= 1.3"
+  required_version = ">= 1.11"
   required_providers {
     aws = {
       source  = "hashicorp/aws"
-      version = "~> 6.0"
+      version = "~> 6.50"
     }
     kubernetes = {
       source  = "hashicorp/kubernetes"
@@ -50,7 +50,7 @@ provider "helm" {
 module "ao_data_platform" {
   # When using this example outside the repo, replace with the published source:
   #   source  = "monte-carlo-data/ao-data-platform/aws"
-  #   version = "~> 1.0"
+  #   version = "~> 3.0"
   source = "../../"
 
   region = var.region
