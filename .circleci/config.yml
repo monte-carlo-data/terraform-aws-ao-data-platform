@@ -25,7 +25,16 @@ jobs:
       - checkout
       - run:
           name: Install dependencies
-          command: apk add --update make
+          # bash and jq for hack/verify-no-plaintext.sh — the image is Alpine,
+          # which ships neither.
+          command: |
+            apk add --update make
+            apk add --no-cache bash jq
+      - run:
+          # Fast gate, ahead of the slow terraform test: exercises the
+          # plaintext-in-state detector and its fixtures so they cannot rot.
+          name: Plaintext detector self-test
+          command: make selftest-verify-no-plaintext
       - run:
           name: Terraform test
           command: make test

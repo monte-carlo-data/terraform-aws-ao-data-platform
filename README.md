@@ -11,9 +11,12 @@ Terraform module that deploys the Monte Carlo Agent Observability data platform 
 
 ## Prerequisites
 
-- [Terraform](https://www.terraform.io/downloads.html) >= 1.11
+- [Terraform](https://www.terraform.io/downloads.html) >= 1.11 — required for the write-only arguments that keep the ClickHouse passwords out of state
+- Providers: `hashicorp/aws` >= 6.50, `hashicorp/random` >= 3.7, `hashicorp/helm` ~> 2.0, `hashicorp/kubernetes` ~> 2.0
+  - The `aws` and `random` floors also rose in v3.0.0. An existing consumer's `.terraform.lock.hcl` will be pinned below them, so run `terraform init -upgrade` once before planning — see [Upgrading to v3.0.0](#upgrading-to-v300).
 - [AWS CLI](https://aws.amazon.com/cli/) configured with appropriate credentials
 - [kubectl](https://kubernetes.io/docs/tasks/tools/) for cluster access
+- [jq](https://jqlang.github.io/jq/) — only for `hack/verify-no-plaintext.sh`, the state verification step in the v3.0.0 upgrade
 
 > **Note:** `terraform apply` runs `local-exec` provisioners that invoke `aws eks update-kubeconfig` (needed to `kubectl wait` for ESO CRDs and apply the ClusterSecretStore). This modifies the `~/.kube/config` of the machine running Terraform: the cluster's context is added (or refreshed) and becomes the current context.
 
@@ -28,7 +31,7 @@ The `kubernetes` and `helm` providers must be configured in your root module usi
 ```hcl
 terraform {
   required_providers {
-    aws        = { source = "hashicorp/aws", version = "~> 6.0" }
+    aws        = { source = "hashicorp/aws", version = "~> 6.50" }
     kubernetes = { source = "hashicorp/kubernetes", version = "~> 2.0" }
     helm       = { source = "hashicorp/helm", version = "~> 2.0" }
   }
@@ -62,7 +65,7 @@ provider "helm" {
 
 module "ao_data_platform" {
   source  = "monte-carlo-data/ao-data-platform/aws"
-  version = "~> 2.0"
+  version = "~> 3.0"
 
   region                = "us-east-1"
   otel_collector_domain = "otel.acme.com"
@@ -83,7 +86,7 @@ See [`examples/new_cluster/`](examples/new_cluster/) for a complete copy-paste s
 ```hcl
 module "ao_data_platform" {
   source  = "monte-carlo-data/ao-data-platform/aws"
-  version = "~> 2.0"
+  version = "~> 3.0"
 
   region = "us-east-1"
 
@@ -116,7 +119,7 @@ See [`examples/existing_cluster/`](examples/existing_cluster/) for the full conf
 ```hcl
 module "ao_data_platform" {
   source  = "monte-carlo-data/ao-data-platform/aws"
-  version = "~> 2.0"
+  version = "~> 3.0"
 
   region = "us-east-1"
 
@@ -156,7 +159,7 @@ Each managed workload (ClickHouse, OTel Collector, LLM worker) exposes optional 
 ```hcl
 module "ao_data_platform" {
   source  = "monte-carlo-data/ao-data-platform/aws"
-  version = "~> 2.0"
+  version = "~> 3.0"
 
   region                = "us-east-1"
   otel_collector_domain = "otel.acme.com"
@@ -207,7 +210,7 @@ Note: adding, changing, or removing a receiver changes the collector's rendered 
 ```hcl
 module "ao_data_platform" {
   source  = "monte-carlo-data/ao-data-platform/aws"
-  version = "~> 2.0"
+  version = "~> 3.0"
 
   region                = "us-east-1"
   otel_collector_domain = "otel.acme.com"
@@ -248,7 +251,7 @@ Where `awss3_receivers` consumes buckets and queues you manage yourself, the opt
 ```hcl
 module "ao_data_platform" {
   source  = "monte-carlo-data/ao-data-platform/aws"
-  version = "~> 2.0"
+  version = "~> 3.0"
 
   # ... cluster/networking/helm configuration ...
 
@@ -298,7 +301,7 @@ For each provisioned user the module generates a 32-character password (or uses 
 ```hcl
 module "ao_data_platform" {
   source  = "monte-carlo-data/ao-data-platform/aws"
-  version = "~> 2.0"
+  version = "~> 3.0"
 
   region                = "us-east-1"
   otel_collector_domain = "otel.acme.com"
@@ -338,7 +341,7 @@ Leave `helm.clickhouse.readonly_user` unset (or `null`) to disable; existing con
 ```hcl
 module "ao_data_platform" {
   source  = "monte-carlo-data/ao-data-platform/aws"
-  version = "~> 2.0"
+  version = "~> 3.0"
 
   region                = "us-east-1"
   otel_collector_domain = "otel.acme.com"
@@ -383,7 +386,7 @@ For existing clusters (`cluster.create = false`), the module does not manage the
 ```hcl
 module "ao_data_platform" {
   source  = "monte-carlo-data/ao-data-platform/aws"
-  version = "~> 2.0"
+  version = "~> 3.0"
 
   region                = "us-east-1"
   otel_collector_domain = "otel.acme.com"
@@ -434,7 +437,7 @@ By default the module runs a single ClickHouse instance on one dedicated node gr
 ```hcl
 module "ao_data_platform" {
   source  = "monte-carlo-data/ao-data-platform/aws"
-  version = "~> 2.0"
+  version = "~> 3.0"
 
   region                = "us-east-1"
   otel_collector_domain = "otel.acme.com"
@@ -521,7 +524,7 @@ To use a StorageClass you manage outside this module, set `clickhouse_storage_cl
 | `helm.clickhouse.otel.restrict_grants` | `bool` | `false` | Forwards `clickhouse.otel.restrictGrants` to the chart. When `true`, the `otel` ingest user is restricted to `INSERT` on the telemetry source tables only; `false` keeps it broad. **Requires chart version >= 2.0.0** (ignored by older charts). Flip to `true` only after external readers have moved to the `monte_carlo` user. |
 | `helm.clickhouse.admin` | `object` | `null` | Optionally provisions the gated break-glass superuser (`admin`). Shape: `{ enabled = bool }`. When `enabled = true`, a Secrets Manager secret + ExternalSecret pipeline is created and the chart's admin user is enabled (loopback-only by default — reachable only via pod-exec); the password comes from `clickhouse_passwords.admin` (or is auto-generated). When disabled (default), no admin secret is created. **Requires chart version >= 2.0.0.** Omit (or `null`) to disable. |
 | `helm.clickhouse.readonly_user` | `object` | `null` | Optionally provisions a second SELECT-only ClickHouse user (`readonly_user`, profile `readonly`). Shape: `{ enabled = bool }`. When `enabled = true`, a Secrets Manager secret + ExternalSecret pipeline mirroring the otel user is created and the toggle is forwarded to the chart; the password comes from `clickhouse_passwords.readonly_user` (or is auto-generated). **Requires chart version >= 1.2.0.** Omit (or `null`) to disable. |
-| `clickhouse_passwords` | `object` (sensitive) | `{}` (all auto-generated) | Passwords for the ClickHouse SQL users. Shape: `{ admin = optional(string), otel = optional(string), monte_carlo = optional(string), schema_owner = optional(string), llm_worker = optional(string), readonly_user = optional(string) }`. Any field left null is auto-generated. Marked `sensitive`, so caller-supplied values are redacted in plan/apply output and CI logs — supply via a `.tfvars` file or `TF_VAR_clickhouse_passwords`. Stored in Secrets Manager and synced into the cluster by ESO; never passed through Helm values. Marked `ephemeral`, so values are omitted from state and plan files entirely; ephemeral variables still accept ordinary values, so existing callers need no change. The provider does still read the secret during plan/refresh (aws #42383), so plan-time IAM is unchanged. |
+| `clickhouse_passwords` | `object` (sensitive, ephemeral) | `{}` (all auto-generated) | Passwords for the ClickHouse SQL users. Shape: `{ admin = optional(string), otel = optional(string), monte_carlo = optional(string), schema_owner = optional(string), llm_worker = optional(string), readonly_user = optional(string) }`. Any field left null **or set to the empty string** is auto-generated (an empty ClickHouse password is never a legitimate input; this changed in v3.0.0 — see [Upgrading to v3.0.0](#upgrading-to-v300)). Marked `sensitive`, so caller-supplied values are redacted in plan/apply output and CI logs — supply via a `.tfvars` file you do not commit, or `TF_VAR_clickhouse_passwords` / a sensitive workspace variable for VCS-driven runs. Stored in Secrets Manager and synced into the cluster by ESO; never passed through Helm values. Marked `ephemeral`, so values are omitted from state and plan files entirely; ephemeral variables still accept ordinary values, so existing callers need no change. The provider does still read the secret during plan/refresh (aws #42383), so plan-time IAM is unchanged. |
 | `clickhouse_password_versions` | `object` | `{}` (all `1`) | Version counter per ClickHouse user driving each secret's `secret_string_wo_version`. Shape: `{ admin = optional(number, 1), otel = optional(number, 1), monte_carlo = optional(number, 1), schema_owner = optional(number, 1), llm_worker = optional(number, 1), readonly_user = optional(number, 1) }`. Because the password is a write-only argument Terraform cannot detect drift on it — the secret is rewritten **only** when the matching version changes. This is the rotation lever: bump one field to rotate one user, all six to rotate the deployment. Bumping a field without supplying the matching `clickhouse_passwords` value writes a freshly generated password. |
 | `helm.opentelemetry_collector.resources` | `object` | `null` | Kubernetes resource requests/limits for the OTel Collector pods. Same shape as `helm.clickhouse.resources`. Omit to use chart defaults. |
 | `helm.opentelemetry_collector.replica_count` | `number` | `null` | Optional override for the OTel Collector replica count. `null` (default) lets the chart control it. **`0` is not honored by the chart** — its collector template treats `0` as unset and deploys the default count; to stop ingest for a maintenance window, act upstream (deny consumption on the SQS queues feeding the awss3 receivers, or pause OTLP senders). Non-zero overrides work as expected. |
@@ -575,77 +578,156 @@ aws secretsmanager get-secret-value \
   --query SecretString --output text
 ```
 
-## Migrating to v3.0.0
+## Upgrading
 
-v3.0.0 stops storing ClickHouse passwords in Terraform state. Generation moved to `ephemeral "random_password"` and the Secrets Manager writes moved to `secret_string_wo`. It requires **Terraform >= 1.11**.
+### Upgrading to v3.0.0
+
+v3.0.0 stops storing ClickHouse passwords in Terraform state. Generation moved to `ephemeral "random_password"` and the Secrets Manager writes moved to `secret_string_wo`.
+
+**Breaking changes**
+
+- **Version floors rise**: Terraform **>= 1.11** (write-only arguments), `hashicorp/aws` **>= 6.50** and `hashicorp/random` **>= 3.7**. Every existing consumer's `.terraform.lock.hcl` is pinned below the provider floors, so the first command fails on a lock/constraint error until you run `terraform init -upgrade` (step 2). If your own root module pins the AWS provider below 6.50 — e.g. `version = "= 6.20.0"` — that pin has to be raised first; no `init -upgrade` can satisfy two conflicting constraints.
+- `clickhouse_passwords` is now an **`ephemeral`** variable as well as `sensitive`. Ephemeral variables accept ordinary values, so callers need no change, but the value may no longer be used in a non-ephemeral context (for example, echoed back through an output).
+- An **empty string** in `clickhouse_passwords` now auto-generates a password instead of writing an empty secret. Under v2.4.2 `otel = ""` wrote an empty secret; under v3.0.0 it generates one (the module uses `coalesce`, which skips `""` as well as `null`). An empty ClickHouse password is never a legitimate input, so this is deliberate — but if you were relying on it, stop.
+- The first apply **rewrites every ClickHouse secret**. See the warning below; this is what the procedure exists to make safe.
 
 > [!WARNING]
-> **Applying v3.0.0 without step 2 below silently rotates every ClickHouse password.** Switching to a write-only argument writes on the first apply, and with no supplied value that write is a freshly generated password. ESO will sync it and the running ClickHouse users will change. Neither the plan diff nor a validation block can detect this — a write-only value cannot appear in a plan (that is the point), and detecting "a secret already exists" would require a data source that reads the plaintext straight back into state. **Read the whole procedure before applying.**
+> **Applying v3.0.0 without step 3 below silently rotates every ClickHouse password.** Switching to a write-only argument writes on the first apply, and with no supplied value that write is a freshly generated password. ESO will sync it and the running ClickHouse users will change. The plan diff will not warn you: a write-only value cannot appear in a plan (that is the point), and no plan-time guard is shipped — see [Why there is no plan-time guard](#why-there-is-no-plan-time-guard) for what was actually decided and why. **Read the whole procedure before applying.**
 
 The migration is designed to change no password. Supply the current values for one apply; afterwards Terraform rewrites nothing until you bump a version deliberately.
 
-**1. Bump Terraform to >= 1.11** wherever this module is planned and applied. On Terraform Cloud that is the version setting on each workspace.
+**1. Raise the floors** wherever this module is planned and applied: Terraform to >= 1.11, and any AWS/random provider constraints in your own root module to allow `aws >= 6.50` and `random >= 3.7`. On Terraform Cloud, Terraform's version is the version setting on each workspace.
 
-**2. Read the current passwords and supply them for the migration apply.**
+**2. Re-resolve the provider locks.**
 
 ```bash
-CLUSTER=<your cluster_name>
-for u in admin otel monte-carlo schema-owner llm-worker readonly-user; do
+terraform init -upgrade
+```
+
+Without this, the run fails before you ever see a plan: the existing `.terraform.lock.hcl` pins providers that no longer satisfy the module's constraints. Commit the updated lock file. On Terraform Cloud, either run this locally and commit the lock, or let the workspace's next run pick it up — a stale committed lock will keep failing.
+
+**3. Read the current passwords and supply them for the migration apply.**
+
+Do not hand-construct the secret names. Secrets are named from the module's *effective* cluster name, which is `cluster.existing_cluster_name` whenever `cluster.create = false` — building `<cluster_name>/clickhouse/...` by hand returns `ResourceNotFoundException` on every existing-cluster deployment. Drive off the module's own ARN outputs instead. That also skips `admin` and `readonly_user` automatically when they are disabled, because their ARN output is `null`:
+
+```bash
+for u in admin otel monte_carlo schema_owner llm_worker readonly_user; do
+  arn="$(terraform output -raw "clickhouse_${u}_credentials_secret_arn" 2>/dev/null)" || continue
+  [ -n "$arn" ] || continue
   printf '%s=%s\n' "$u" "$(aws secretsmanager get-secret-value \
-    --secret-id "$CLUSTER/clickhouse/$u-credentials" \
-    --query SecretString --output text)"
+    --secret-id "$arn" --query SecretString --output text)"
 done
 ```
 
-Build a `.tfvars` (never `-var` on a command line) containing every user your deployment provisions. Omit `admin` / `readonly_user` if they are disabled:
+This prints live credentials to your terminal — run it somewhere that is not shared, recorded, or shipping its scrollback to a log collector. If your root module does not re-export these outputs, add passthrough `output` blocks for the users you provision (see [After Deployment](#after-deployment) for the output names), or read the ARNs with `terraform state show 'module.<name>.aws_secretsmanager_secret.clickhouse_otel_password'`.
 
-```hcl
-clickhouse_passwords = {
-  admin         = "..."
-  otel          = "..."
-  monte_carlo   = "..."
-  schema_owner  = "..."
-  llm_worker    = "..."
-  readonly_user = "..."
-}
-```
+Supply the values for one apply, using whichever channel fits how you run Terraform. Never `-var` on a command line.
+
+- **Local runs:** a `.tfvars` file, containing only the users your deployment provisions:
+
+  ```hcl
+  clickhouse_passwords = {
+    admin         = "..."
+    otel          = "..."
+    monte_carlo   = "..."
+    schema_owner  = "..."
+    llm_worker    = "..."
+    readonly_user = "..."
+  }
+  ```
+
+  > [!WARNING]
+  > **Do not commit this file.** Add it to `.gitignore` first, write it outside the repository, or use one of the options below. Committing it writes production ClickHouse passwords into git history irreversibly — during the one procedure whose entire purpose is removing plaintext.
+
+- **VCS-driven or Terraform Cloud runs:** do not create a tfvars file at all. There is no safe place to put one in a repository that a run reads from. Use `TF_VAR_clickhouse_passwords` in the run environment, or a **sensitive workspace variable** of category *terraform* named `clickhouse_passwords` holding the same HCL object. Both keep the value out of version control. Delete the variable after step 6.
+- **CI other than TFC:** export `TF_VAR_clickhouse_passwords` from your secret store for the single migration run.
 
 Leave `clickhouse_password_versions` unset — the default of `1` is correct for a migration.
 
-**3. Plan, and check it before applying.** Expect exactly:
+**4. Plan, and check it before applying.** Expect exactly:
 
 - each `random_password.clickhouse_*` **forgotten** (no destroy actions)
 - each `aws_secretsmanager_secret_version.clickhouse_*` **updated in place**, gaining `secret_string_wo_version = 1`
 - **nothing else** — no node group, EKS, `helm_release`, or PVC/PV changes
 
-**4. Apply, then verify.**
+> [!NOTE]
+> **The plan-then-apply split cannot silently lose the passwords you supplied.** Because `clickhouse_passwords` is an ephemeral variable, applying a saved plan without re-supplying it is refused outright rather than treated as "no value" (verified on Terraform 1.12.2):
+>
+> ```
+> The ephemeral input variable "clickhouse_passwords" was set during the plan phase,
+> and so must also be set during the apply phase.
+> ```
+>
+> Terraform therefore guards the worst footgun in this design for free. The practical consequence: if you plan with `-out=saved.tfplan`, you must pass the same `-var-file=` (or export the same `TF_VAR_clickhouse_passwords`) on `terraform apply saved.tfplan` as well, or the apply errors out mid-migration.
+
+**5. Apply, then verify the state has no plaintext.**
+
+Put the passwords in a file, one per line — not on the command line, where they land in shell history and in `ps` argv:
 
 ```bash
+umask 077
+cat > /tmp/sentinels.txt   # one password per line, then Ctrl-D
+
 terraform show -json > /tmp/state.json
-make verify-no-plaintext STATE=/tmp/state.json SENTINELS="<the passwords from step 2>"
-rm /tmp/state.json
+.terraform/modules/ao_data_platform/hack/verify-no-plaintext.sh \
+  /tmp/state.json --sentinel-file /tmp/sentinels.txt
+
+rm -f /tmp/state.json /tmp/sentinels.txt
 ```
 
-Confirm the Secrets Manager values are unchanged, the ClickHouse pods did not restart, and a query as the `monte_carlo` user still succeeds.
+The script ships with the module, so a Registry consumer runs it from where Terraform unpacked it: `.terraform/modules/<module block name>/hack/verify-no-plaintext.sh` (`ao_data_platform` above — substitute your own `module` label, or check `.terraform/modules/modules.json` for the exact directory). It needs `jq` and nothing else, never echoes a sentinel's value, and reports:
 
-**5. Remove the `.tfvars` from step 2.** Later applies do not need it.
+- exit **0** — no plaintext, and every ClickHouse secret version shows `has_secret_string_wo = true`, i.e. the write really did go through the write-only path
+- exit **1** — plaintext found: a `secret_string` argument, a surviving managed `random_password`, or one of your sentinels present in the state
+- exit **2** — usage or input problem (missing file, empty or malformed JSON) — never a silent pass
+- exit **3** — no plaintext, but the write-only path could not be proven. During a migration this means the write did not happen, not that you are safe
 
-### Why later plans look like they regenerate passwords
+On Terraform Cloud, use `terraform state pull > /tmp/state.json` instead of `show -json`. From a checkout of this repository, `make verify-no-plaintext STATE=/tmp/state.json SENTINEL_FILE=/tmp/sentinels.txt` is the same check.
+
+Then confirm the Secrets Manager values are unchanged, the ClickHouse pods did not restart, and a query as the `monte_carlo` user still succeeds.
+
+**6. Remove the passwords you supplied in step 3** — the `.tfvars` file, the environment variable, or the workspace variable. Later applies do not need them.
+
+#### Why later plans look like they regenerate passwords
 
 They do regenerate an ephemeral password every plan — and never write it. The write is gated on `clickhouse_password_versions`, which you have not changed, so the secret keeps its value. This is expected and is not drift.
 
-### Rotating afterwards
+#### Rotating afterwards
 
 Bump the relevant field in `clickhouse_password_versions` and apply. Without a matching `clickhouse_passwords` entry the new value is freshly generated; with one, your supplied value is written. Rotation propagates as: Secrets Manager → ESO resync → the ClickHouse operator re-renders `users.xml`. It requires no SQL — passwords are declared in the operator's `users:` section via `valueFrom.secretKeyRef`, not with `ALTER USER`.
+
+**After any rotation, confirm the secret's version ID changed. This step is mandatory.** `version_id` on `aws_secretsmanager_secret_version` is computed, persisted in state, and is not a secret, so it is a safe positive signal: AWS issues a new version ID on every `PutSecretValue`, and if no write occurred it does not change. Capture it before the apply and compare after:
+
+```bash
+ARN="$(terraform output -raw clickhouse_otel_credentials_secret_arn)"
+# The version ID marked AWSCURRENT is the live one — that is the value to compare.
+aws secretsmanager describe-secret --secret-id "$ARN" \
+  --query 'VersionIdsToStages' --output json
+```
+
+or read it from state (add `[0]` for the count-gated `admin` / `readonly_user` resources):
+
+```bash
+terraform state show \
+  'module.ao_data_platform.aws_secretsmanager_secret_version.clickhouse_otel_password'
+```
+
+An unchanged version ID means no write happened — in practice, the footgun below. **Do not retire the old credential until the version ID has changed.**
 
 > [!WARNING]
 > **Changing a password without bumping its version does nothing, silently.** The version is the only thing that triggers a write. If you edit `clickhouse_passwords.otel` but leave `clickhouse_password_versions.otel` unchanged, the secret keeps its **old** value and the plan shows no diff — Terraform cannot compare a write-only argument, so there is nothing for it to detect or report.
 >
-> This is the more dangerous of the two footguns in this design, because it fails in the direction of false confidence: you may believe a credential has been rotated and retire the old one while it is still the live password. **Always bump the version in the same change as the password.**
+> This is the more dangerous of the two footguns in this design, because it fails in the direction of false confidence: you may believe a credential has been rotated and retire the old one while it is still the live password. **Always bump the version in the same change as the password**, and check the version ID afterwards.
 
-Both footguns are unguardable for the same reason — a write-only value cannot appear in a plan, and detecting the current secret value would require a data source that reads the plaintext straight back into state, defeating the entire change. Documentation is the only control, which is why these two warnings are load-bearing rather than decorative.
+#### Why there is no plan-time guard
 
-## Upgrading
+Not because one is impossible. The AWS provider ships `ephemeral "aws_secretsmanager_secret_version"`, which returns `secret_string` and persists nothing — so reading the current value at plan time would *not* put plaintext back into state. That was a deliberate decision against, for three other reasons:
+
+- **It breaks the fresh install.** The read targets an existing secret by ID. On a first apply the secret does not exist yet, so the read errors instead of reporting "nothing to compare against" — trading a documented footgun for a hard failure on every new deployment.
+- **A precondition may not be allowed to reference it.** Ephemeral values are only valid in ephemeral contexts, and whether `lifecycle.precondition` counts as one is unresolved. An unverified guard is not a guard.
+- **For four of the six users the comparison carries no signal.** `otel`, `monte_carlo`, `schema_owner` and `llm_worker` are auto-generated when not supplied, so the desired value is a freshly minted random on every plan. An equality check against the live secret would therefore differ on *every* plan, forever: permanent noise that operators would learn to ignore, including on the one plan that mattered.
+
+So documentation is the control at plan time, which is why the two warnings above are load-bearing rather than decorative. The verification that does exist is after the fact: the `version_id` check under [Rotating afterwards](#rotating-afterwards) for a rotation, and `hack/verify-no-plaintext.sh` for the state itself.
 
 ### Upgrading to v2.0.0
 
@@ -805,9 +887,13 @@ restarts the CNI pods).
 ## Development
 
 ```bash
-make sanity-check   # fmt check + validate (CI pipeline)
-make test           # variable-validation tests (requires Terraform >= 1.11)
+make sanity-check                # fmt check + validate (CI pipeline)
+make test                        # variable-validation tests (requires Terraform >= 1.11)
+make selftest-verify-no-plaintext  # regression test for the plaintext detector (CI pipeline; needs jq)
+make verify-no-plaintext STATE=state.json SENTINEL_FILE=sentinels.txt
 ```
+
+`make verify-no-plaintext` is the repo-local convenience wrapper around `hack/verify-no-plaintext.sh` — the same script a Registry consumer runs out of `.terraform/modules/<name>/hack/`, documented under [Upgrading to v3.0.0](#upgrading-to-v300). `SENTINEL_FILE` takes one password per line; the legacy `SENTINELS="a b"` form still works but puts secrets on a command line and cannot carry a value containing whitespace.
 
 `make test` runs `terraform test` against `tests/*.tftest.hcl`. Tests cover the input safety nets (`cluster.main_node_group_size` range, the existing-cluster guard) using `mock_provider` — see the test file's preamble for the explicit scope and known coverage gaps. The module requires `required_version >= 1.11`, which already exceeds the `mock_provider` floor of 1.7, so no separate dev-tool requirement applies.
 

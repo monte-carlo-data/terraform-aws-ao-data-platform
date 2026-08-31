@@ -285,9 +285,10 @@ variable "clickhouse_replica_count" {
 
     Must not exceed the number of per-AZ ClickHouse node groups available to place
     replicas on (max(length(clickhouse_availability_zones), 1)). That ceiling is
-    enforced by a precondition on the Helm release rather than a variable validation,
-    because it references two variables (cross-variable validation would require
-    Terraform >= 1.9, and this module supports >= 1.3).
+    enforced by a precondition on the Helm release rather than a variable
+    validation, because it references two variables. The module floor is now
+    Terraform >= 1.11, so cross-variable validation is available and the
+    precondition could be converted; that is left to its own change.
   EOT
   type        = number
   default     = 1
@@ -958,8 +959,8 @@ variable "clickhouse_password_versions" {
     migration apply writes every secret regardless, so you must supply your
     CURRENT passwords via clickhouse_passwords in that same apply. Any user you
     omit has its password replaced by a freshly generated one, silently — the
-    old value is unrecoverable once overwritten. Read "Migrating to v3.0.0" in
-    this README for the procedure before you run it.
+    old value is unrecoverable once overwritten. Read "Upgrading to v3.0.0" in
+    this module's README for the procedure before you run it.
   EOT
   type = object({
     admin         = optional(number, 1)
