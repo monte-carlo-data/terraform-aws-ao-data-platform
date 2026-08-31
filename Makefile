@@ -10,7 +10,7 @@ sanity-check:
 	terraform validate
 
 test:
-	# Run variable-validation tests. Requires Terraform >= 1.7 for mock_provider.
+	# Run variable-validation tests. Requires Terraform >= 1.11 (the module floor).
 	# tests/*.tftest.hcl exercise the input safety nets (range checks on
 	# cluster.main_node_group_size, the existing-cluster guard) — see the
 	# test file's preamble for the explicit scope and known coverage gaps.
