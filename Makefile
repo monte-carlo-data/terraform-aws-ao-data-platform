@@ -23,12 +23,32 @@ verify-no-plaintext:
 	# passwords supplied during a migration apply.
 	#   make verify-no-plaintext STATE=state.json SENTINELS="pw1 pw2"
 	@test -n "$(STATE)" || { echo "STATE=<path/to/state.json> is required"; exit 2; }
-	./hack/verify-no-plaintext.sh "$(STATE)" $(SENTINELS)
+	set -f; ./hack/verify-no-plaintext.sh "$(STATE)" $(SENTINELS)
 
 selftest-verify-no-plaintext:
-	# Regression test for hack/verify-no-plaintext.sh against both fixtures.
+	# Regression test for hack/verify-no-plaintext.sh: both state shapes
+	# (terraform state pull vs. terraform show -json), malformed/empty
+	# input, and the Makefile's defense against sentinel glob-expansion.
 	@! ./hack/verify-no-plaintext.sh tests/fixtures/state-with-plaintext.json SENTINEL-OTEL-0001 2>/dev/null \
-		|| { echo "FAIL: leaking fixture was not detected"; exit 1; }
+		|| { echo "FAIL: leaking fixture (state pull shape) was not detected"; exit 1; }
 	@./hack/verify-no-plaintext.sh tests/fixtures/state-clean.json SENTINEL-OTEL-0001 >/dev/null \
-		|| { echo "FAIL: clean fixture was rejected"; exit 1; }
+		|| { echo "FAIL: clean fixture (state pull shape) was rejected"; exit 1; }
+	@! ./hack/verify-no-plaintext.sh tests/fixtures/state-with-plaintext-show.json SENTINEL-OTEL-0002 2>/dev/null \
+		|| { echo "FAIL: leaking fixture (show -json shape) was not detected"; exit 1; }
+	@./hack/verify-no-plaintext.sh tests/fixtures/state-clean-show.json SENTINEL-OTEL-0002 >/dev/null \
+		|| { echo "FAIL: clean fixture (show -json shape) was rejected"; exit 1; }
+	@tmp="$$(mktemp)"; \
+		printf 'not valid json {{{' > "$$tmp"; \
+		status=0; ./hack/verify-no-plaintext.sh "$$tmp" >/dev/null 2>&1 || status=$$?; \
+		rm -f "$$tmp"; \
+		[ "$$status" -eq 2 ] || { echo "FAIL: malformed input did not exit 2 (got $$status)"; exit 1; }
+	@tmp="$$(mktemp)"; \
+		status=0; ./hack/verify-no-plaintext.sh "$$tmp" >/dev/null 2>&1 || status=$$?; \
+		rm -f "$$tmp"; \
+		[ "$$status" -eq 2 ] || { echo "FAIL: empty input did not exit 2 (got $$status)"; exit 1; }
+	@decoy="P@ssw0rdXYZ123"; \
+		touch -- "$$decoy"; \
+		status=0; $(MAKE) --no-print-directory verify-no-plaintext STATE=tests/fixtures/state-glob-sentinel.json SENTINELS="P@ssw0rd*123" >/dev/null 2>&1 || status=$$?; \
+		rm -f -- "$$decoy"; \
+		[ "$$status" -ne 0 ] || { echo "FAIL: a coincidentally-matching filename glob-expanded the sentinel into a false PASS"; exit 1; }
 	@echo "OK: verify-no-plaintext self-test passed"
