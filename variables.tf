@@ -915,10 +915,15 @@ variable "clickhouse_passwords" {
     is stored in Secrets Manager and synced into the cluster by the External
     Secrets Operator; passwords never pass through Helm values.
 
-    The variable is marked sensitive, so caller-supplied values are redacted
-    in plan/apply output and CI logs. Supply via a .tfvars file or
-    TF_VAR_clickhouse_passwords rather than -var on a command line. Note that
-    Terraform state still contains the values — protect state accordingly.
+    Marked ephemeral and sensitive: values are omitted from Terraform state and
+    plan files entirely, and redacted in plan/apply output and CI logs. Supply
+    via a .tfvars file or TF_VAR_clickhouse_passwords rather than -var on a
+    command line. Ephemeral variables accept ordinary values, so existing
+    callers need no change.
+
+    Note the provider still reads the secret during plan/refresh (aws provider
+    issue #42383), so plan-time IAM is unchanged — write-only removes the value
+    from state and plan files, not from the provider's in-memory plan path.
 
     admin is only used when helm.clickhouse.admin.enabled = true, and
     readonly_user only when helm.clickhouse.readonly_user.enabled = true.
@@ -933,6 +938,32 @@ variable "clickhouse_passwords" {
   })
   default   = {}
   sensitive = true
+  ephemeral = true
+}
+
+variable "clickhouse_password_versions" {
+  description = <<-EOT
+    Version counter per ClickHouse user, driving each secret's
+    secret_string_wo_version. Because the password is a write-only argument,
+    Terraform cannot detect drift on it — the secret is rewritten ONLY when the
+    matching version here changes. This is the rotation lever.
+
+    Bump one field to rotate one user (e.g. admin after a break-glass use);
+    bump all six to rotate the deployment. Bumping a field WITHOUT supplying the
+    matching clickhouse_passwords value writes a freshly generated password.
+
+    Leave at the default of 1 for a fresh install and for the write-only
+    migration — see "Migrating to v3.0.0" in this README.
+  EOT
+  type = object({
+    admin         = optional(number, 1)
+    otel          = optional(number, 1)
+    monte_carlo   = optional(number, 1)
+    schema_owner  = optional(number, 1)
+    llm_worker    = optional(number, 1)
+    readonly_user = optional(number, 1)
+  })
+  default = {}
 }
 
 # --- Storage ---
