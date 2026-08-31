@@ -11,7 +11,7 @@ Terraform module that deploys the Monte Carlo Agent Observability data platform 
 
 ## Prerequisites
 
-- [Terraform](https://www.terraform.io/downloads.html) >= 1.3
+- [Terraform](https://www.terraform.io/downloads.html) >= 1.11
 - [AWS CLI](https://aws.amazon.com/cli/) configured with appropriate credentials
 - [kubectl](https://kubernetes.io/docs/tasks/tools/) for cluster access
 
@@ -738,7 +738,7 @@ make sanity-check   # fmt check + validate (CI pipeline)
 make test           # variable-validation tests (requires Terraform >= 1.7)
 ```
 
-`make test` runs `terraform test` against `tests/*.tftest.hcl`. Tests cover the input safety nets (`cluster.main_node_group_size` range, the existing-cluster guard) using `mock_provider` — see the test file's preamble for the explicit scope and known coverage gaps. The module itself stays at `required_version >= 1.3`; the test floor is a dev-tool requirement only.
+`make test` runs `terraform test` against `tests/*.tftest.hcl`. Tests cover the input safety nets (`cluster.main_node_group_size` range, the existing-cluster guard) using `mock_provider` — see the test file's preamble for the explicit scope and known coverage gaps. The module requires `required_version >= 1.11`, which already exceeds the `mock_provider` floor of 1.7, so no separate dev-tool requirement applies.
 
 To release a new version, create and push a tag: `git tag v0.1.0 && git push origin v0.1.0`
 

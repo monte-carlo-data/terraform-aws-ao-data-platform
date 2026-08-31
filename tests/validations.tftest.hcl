@@ -33,9 +33,9 @@
 //     main_node_group_size_resolved) — simple coalesce chains; regressions
 //     would show up in plan diffs during code review.
 //
-// Requires Terraform >= 1.7 for mock_provider. The module itself stays at
-// required_version >= 1.3; these .tftest.hcl files are dev-only and
-// no-op on older Terraform versions.
+// mock_provider requires Terraform >= 1.7; the module's own floor is >= 1.11
+// (write-only arguments), so the module floor is the binding constraint and
+// these tests carry no extra toolchain requirement.
 
 mock_provider "aws" {
   # data.aws_availability_zones.available is read unconditionally in main.tf
