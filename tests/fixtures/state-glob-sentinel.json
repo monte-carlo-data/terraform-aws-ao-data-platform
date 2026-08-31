@@ -1,0 +1,7 @@
+{
+  "version": 4,
+  "outputs": {
+    "debug_dump": { "value": "P@ssw0rd*123" }
+  },
+  "resources": []
+}

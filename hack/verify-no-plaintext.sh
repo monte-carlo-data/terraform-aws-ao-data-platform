@@ -22,6 +22,13 @@ if [[ ! -f "$state" ]]; then
   exit 2
 fi
 
+# Malformed or empty input must not silently read as "no plaintext found":
+# a truncated capture or an empty redirect has to fail loud, not fail open.
+if ! jq -e . "$state" >/dev/null 2>&1; then
+  echo "not valid (or empty) JSON: $state" >&2
+  exit 2
+fi
+
 fail=0
 
 # A ClickHouse secret sink must carry no plaintext argument.
