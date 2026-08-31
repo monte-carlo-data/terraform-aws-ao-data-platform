@@ -225,3 +225,46 @@ resource "aws_secretsmanager_secret_version" "clickhouse_backup" {
   secret_id     = aws_secretsmanager_secret.clickhouse_backup[0].id
   secret_string = random_password.clickhouse_backup[0].result
 }
+
+# Retire the pre-v3.0.0 managed generators. Their `result` was plaintext in
+# state, which is what YET-2514 fixes; generation is now the `ephemeral`
+# blocks above.
+#
+# `from` carries no index on purpose — it removes every instance, including the
+# `[0]` left by the old `count`. destroy = false because there is nothing to
+# destroy (random_password is a logical resource) and forgetting keeps the
+# migration plan free of destroy lines, which matters when a human is reviewing
+# a plan against a live cell.
+#
+# TRANSITIONAL: delete these blocks in the release after every deployment has
+# applied v3.0.0.
+
+removed {
+  from = random_password.clickhouse_admin
+  lifecycle { destroy = false }
+}
+
+removed {
+  from = random_password.clickhouse_otel
+  lifecycle { destroy = false }
+}
+
+removed {
+  from = random_password.clickhouse_monte_carlo
+  lifecycle { destroy = false }
+}
+
+removed {
+  from = random_password.clickhouse_schema_owner
+  lifecycle { destroy = false }
+}
+
+removed {
+  from = random_password.clickhouse_llm_worker
+  lifecycle { destroy = false }
+}
+
+removed {
+  from = random_password.clickhouse_readonly_user
+  lifecycle { destroy = false }
+}
