@@ -24,6 +24,10 @@ locals {
   # and it no longer needs to — an unused ephemeral resource costs nothing
   # because it has no state. This is why the old nonsensitive() wrappers are
   # gone.
+  #
+  # coalesce (not a != null ternary) also skips the empty string, so `otel = ""`
+  # now generates a password instead of writing an empty secret. Deliberate: an
+  # empty ClickHouse password is never a legitimate input.
   clickhouse_otel_password         = coalesce(var.clickhouse_passwords.otel, ephemeral.random_password.clickhouse_otel.result)
   clickhouse_monte_carlo_password  = coalesce(var.clickhouse_passwords.monte_carlo, ephemeral.random_password.clickhouse_monte_carlo.result)
   clickhouse_schema_owner_password = coalesce(var.clickhouse_passwords.schema_owner, ephemeral.random_password.clickhouse_schema_owner.result)
