@@ -735,7 +735,7 @@ restarts the CNI pods).
 
 ```bash
 make sanity-check   # fmt check + validate (CI pipeline)
-make test           # variable-validation tests (requires Terraform >= 1.7)
+make test           # variable-validation tests (requires Terraform >= 1.11)
 ```
 
 `make test` runs `terraform test` against `tests/*.tftest.hcl`. Tests cover the input safety nets (`cluster.main_node_group_size` range, the existing-cluster guard) using `mock_provider` — see the test file's preamble for the explicit scope and known coverage gaps. The module requires `required_version >= 1.11`, which already exceeds the `mock_provider` floor of 1.7, so no separate dev-tool requirement applies.

@@ -6,8 +6,11 @@ terraform {
   required_providers {
     aws = {
       source = "hashicorp/aws"
-      # >= 6.50 for the fix to aws_secretsmanager_secret_version destroy+recreate
-      # when switching secret_string -> secret_string_wo (provider issue #41635).
+      # >= 6.50 (#48318) for the fix to unnecessary resource replacement when
+      # switching secret_string <-> secret_string_wo without changing the secret
+      # value, plus the "inconsistent final plan" fix for secret_string_wo_version
+      # referencing a resource created/replaced in the same apply. 6.45.0 (#47815)
+      # only partially addressed this (#41635) — do not relax below 6.50.
       version = "~> 6.50"
     }
     helm = {
