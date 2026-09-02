@@ -85,14 +85,20 @@ fi
 fail=0   # exit 1 — plaintext found
 wofail=0 # exit 3 — write-only path not proven
 
-# A ClickHouse secret sink must carry no plaintext argument.
+# A ClickHouse secret sink must carry no plaintext argument. An empty string
+# is treated as absent: the AWS provider leaves secret_string = "" in state
+# after a secret_string_wo migration (confirmed against real Secrets
+# Manager — type str, length 0, does not hash-match the real value), and jq
+# treats "" as truthy, so a bare `// .value // .secret_data` would false-FAIL
+# on every correctly-migrated state.
 if jq -e '
+  def present: if . == null or . == "" then null else . end;
   [ .. | objects
     | select(.type? == "aws_secretsmanager_secret_version"
           or .type? == "azurerm_key_vault_secret"
           or .type? == "google_secret_manager_secret_version")
     | (.instances // [] | .[].attributes // {}), (.values // {})
-    | select((.secret_string // .value // .secret_data) != null)
+    | select(((.secret_string | present) // (.value | present) // (.secret_data | present)) != null)
   ] | length > 0
 ' "$state" >/dev/null 2>&1; then
   echo "FAIL: a secret sink still carries a plaintext argument (secret_string/value/secret_data)" >&2

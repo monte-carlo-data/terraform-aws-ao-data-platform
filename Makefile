@@ -39,10 +39,11 @@ verify-no-plaintext:
 selftest-verify-no-plaintext:
 	# Regression test for hack/verify-no-plaintext.sh. Covers both state shapes
 	# (terraform state pull vs. terraform show -json), the negative gate
-	# (plaintext / managed random_password / sentinels), the positive gate
-	# (has_secret_string_wo proves the write-only path was used), malformed and
-	# empty and missing input, the sentinel-file path, and the Makefile's defense
-	# against sentinel glob-expansion.
+	# (plaintext / managed random_password / sentinels), the post-migration
+	# secret_string = "" remnant that must read as absent (not plaintext), the
+	# positive gate (has_secret_string_wo proves the write-only path was used),
+	# malformed and empty and missing input, the sentinel-file path, and the
+	# Makefile's defense against sentinel glob-expansion.
 	#
 	# Every case asserts an exact exit code so the three meanings stay distinct:
 	# 1 = plaintext found, 2 = usage/input error, 3 = write-only path not proven.
@@ -54,6 +55,14 @@ selftest-verify-no-plaintext:
 		[ "$$status" -eq 1 ] || { echo "FAIL: leaking fixture (show -json shape) expected exit 1, got $$status"; exit 1; }
 	@status=0; ./hack/verify-no-plaintext.sh tests/fixtures/state-clean-show.json SENTINEL-OTEL-0002 >/dev/null 2>&1 || status=$$?; \
 		[ "$$status" -eq 0 ] || { echo "FAIL: clean fixture (show -json shape) expected exit 0, got $$status"; exit 1; }
+	# Post-migration remnant: the AWS provider leaves secret_string = "" (not
+	# absent) after a secret_string_wo write. jq treats "" as truthy, so this
+	# pins the fix that stops the empty string from false-FAILing a genuinely
+	# clean, correctly-migrated state. Covers both state shapes.
+	@status=0; ./hack/verify-no-plaintext.sh tests/fixtures/state-clean-empty-secret-string.json SENTINEL-OTEL-0001 >/dev/null 2>&1 || status=$$?; \
+		[ "$$status" -eq 0 ] || { echo "FAIL: post-migration empty-secret_string fixture (state pull shape) expected exit 0, got $$status"; exit 1; }
+	@status=0; ./hack/verify-no-plaintext.sh tests/fixtures/state-clean-empty-secret-string-show.json SENTINEL-OTEL-0002 >/dev/null 2>&1 || status=$$?; \
+		[ "$$status" -eq 0 ] || { echo "FAIL: post-migration empty-secret_string fixture (show -json shape) expected exit 0, got $$status"; exit 1; }
 	# Positive gate: no plaintext, but nothing was ever written through
 	# secret_string_wo. Must not read as clean.
 	@status=0; ./hack/verify-no-plaintext.sh tests/fixtures/state-no-write.json >/dev/null 2>&1 || status=$$?; \
