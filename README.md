@@ -756,13 +756,22 @@ The old `clickhouse_passwords` entries are already gone — removing them was pa
 **8. Leave `clickhouse_write_only = true` in place, permanently.** Unlike a caller-side staging flag, this one is the deployment's steady state, not a temporary switch. Keep it in the deployment's committed configuration, and repeat steps 4–8 for the next deployment.
 
 > [!WARNING]
-> **Rolling back is a rotation, not an undo.** Setting the flag from `true` back to `false` does not restore the previous arrangement: it moves the deployment onto the legacy path, which recreates the six generators and writes six **freshly generated** passwords, rotating every live ClickHouse credential — and puts the plaintext back into Terraform state.
+> **Unsetting the flag on its own does not roll back — it wedges the deployment.** Clearing `clickhouse_write_only` without supplying passwords moves the deployment onto the legacy path, and that apply **fails partway through**, inside the AWS provider:
 >
-> If you must roll back, treat it exactly like step 4 in reverse, and make all three changes in one commit: read the current values out of Secrets Manager first (the same loop as step 4), **clear `clickhouse_passwords_wo`**, and supply the values via **`clickhouse_passwords`** — the legacy variable — in the *same* apply that unsets the flag. Unsetting the flag on its own is the incident.
+> ```
+> produced an invalid new value for .secret_binary:
+> inconsistent values for sensitive attribute. This is a bug in the provider
+> ```
+>
+> The failure lands *after* the password generators are created but *before* any secret is rewritten. So it rotates nothing — the live credentials survive — but it leaves freshly generated plaintext in Terraform state and, because every later apply re-plans the same transition, **every subsequent apply of this root fails too** until the flag is restored. Restoring it recovers cleanly: the plan becomes generator destroys only, and no secret is touched. *(Verified against AWS, provider v6.50.)*
+>
+> **The supported rollback is to supply the passwords in the same apply.** Treat it exactly like step 4 in reverse, and make all three changes in one commit: read the current values out of Secrets Manager first (the same loop as step 4), **clear `clickhouse_passwords_wo`**, and supply the values via **`clickhouse_passwords`** — the legacy variable — in the *same* apply that unsets the flag. This path is verified to work and it preserves every credential.
+>
+> Note it takes a different shape than the opt-in did: supplying a known value makes Terraform **replace** the secret version (`1 to add, 1 to destroy`) rather than update it in place, so there is a brief moment with no current version. Harmless for a deliberate rollback, but do it in a maintenance window if a consumer is fetching on a tight loop.
 >
 > Clearing `clickhouse_passwords_wo` is not optional: the mirror validation rejects it whenever the flag is unset, so a rollback that only renames the flag fails the plan. Same rename-don't-duplicate rule as step 4, in the other direction.
 >
-> This matters most immediately after a botched opt-in, which is precisely when reaching for a rollback is tempting. In that situation the passwords in Secrets Manager are the freshly generated ones, so read them *after* the botched apply, not from your pre-migration notes.
+> This matters most immediately after a botched opt-in, which is precisely when reaching for a rollback is tempting. Read the values out of Secrets Manager *after* the botched apply rather than from your pre-migration notes — and be aware that if the botched apply was a bare flag flip, it will have failed rather than completed, so the credentials there are still the originals.
 
 #### Why later plans look like they regenerate passwords
 
