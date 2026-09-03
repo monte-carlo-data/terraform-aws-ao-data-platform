@@ -83,28 +83,6 @@ locals {
   oidc_provider_arn = var.cluster.create ? module.eks[0].oidc_provider_arn : aws_iam_openid_connect_provider.cluster[0].arn
   oidc_provider_url = var.cluster.create ? module.eks[0].oidc_provider : trimprefix(data.aws_eks_cluster.existing[0].identity[0].oidc[0].issuer, "https://")
 
-  # Use caller-supplied passwords when provided, otherwise fall back to generated
-  # ones. Either way the value is sensitive (var.clickhouse_passwords is a
-  # sensitive variable; random_password.result is provider-sensitive), so these
-  # locals are redacted everywhere downstream.
-  clickhouse_otel_password         = var.clickhouse_passwords.otel != null ? var.clickhouse_passwords.otel : random_password.clickhouse_otel[0].result
-  clickhouse_monte_carlo_password  = var.clickhouse_passwords.monte_carlo != null ? var.clickhouse_passwords.monte_carlo : random_password.clickhouse_monte_carlo[0].result
-  clickhouse_schema_owner_password = var.clickhouse_passwords.schema_owner != null ? var.clickhouse_passwords.schema_owner : random_password.clickhouse_schema_owner[0].result
-  clickhouse_llm_worker_password   = var.clickhouse_passwords.llm_worker != null ? var.clickhouse_passwords.llm_worker : random_password.clickhouse_llm_worker[0].result
-
-  # admin is a gated break-glass superuser (off by default), so — like
-  # readonly_user — its password, secret, and chart wiring are all conditional
-  # on its enabled flag.
-  clickhouse_admin_enabled = try(var.helm.clickhouse.admin.enabled, false)
-  clickhouse_admin_password = local.clickhouse_admin_enabled ? (
-    var.clickhouse_passwords.admin != null ? var.clickhouse_passwords.admin : random_password.clickhouse_admin[0].result
-  ) : null
-
-  clickhouse_readonly_user_enabled = try(var.helm.clickhouse.readonly_user.enabled, false)
-  clickhouse_readonly_user_password = local.clickhouse_readonly_user_enabled ? (
-    var.clickhouse_passwords.readonly_user != null ? var.clickhouse_passwords.readonly_user : random_password.clickhouse_readonly_user[0].result
-  ) : null
-
   llm_worker_image_repository = var.helm.deploy_charts ? coalesce(
     var.helm.llm_worker.image_repository,
     "${replace(var.helm.chart_registry, "oci://", "")}/ao-llm-worker",

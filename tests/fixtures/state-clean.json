@@ -1,0 +1,11 @@
+{
+  "version": 4,
+  "resources": [
+    {
+      "mode": "managed",
+      "type": "aws_secretsmanager_secret_version",
+      "name": "clickhouse_otel_password",
+      "instances": [{ "attributes": { "has_secret_string_wo": true, "secret_string_wo_version": 1, "version_id": "11111111-2222-3333-4444-555555555555", "secret_id": "arn:aws:secretsmanager:us-east-1:1:secret:x" } }]
+    }
+  ]
+}

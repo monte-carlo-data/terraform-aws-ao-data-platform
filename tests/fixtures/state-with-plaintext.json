@@ -1,0 +1,17 @@
+{
+  "version": 4,
+  "resources": [
+    {
+      "mode": "managed",
+      "type": "random_password",
+      "name": "clickhouse_otel",
+      "instances": [{ "index_key": 0, "attributes": { "result": "SENTINEL-OTEL-0001" } }]
+    },
+    {
+      "mode": "managed",
+      "type": "aws_secretsmanager_secret_version",
+      "name": "clickhouse_otel_password",
+      "instances": [{ "attributes": { "secret_string": "SENTINEL-OTEL-0001", "secret_id": "arn:aws:secretsmanager:us-east-1:1:secret:x" } }]
+    }
+  ]
+}
