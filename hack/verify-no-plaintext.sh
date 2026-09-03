@@ -16,6 +16,14 @@
 #
 # Never echoes a secret: sentinels are reported by position, not by value.
 #
+# SCOPE: this script only makes sense for a deployment that has opted into the
+# write-only path (clickhouse_write_only = true). Both of its rules assume that:
+# a surviving managed random_password is reported as plaintext, and a sink
+# without has_secret_string_wo fails the positive gate. On the legacy path both
+# are the CORRECT state — managed generators and secret_string are what that
+# path uses — so running this against a legacy deployment reports exit 1 or 3 by
+# design, not a defect. Run it after the opt-in apply (README step 6).
+#
 # Exit codes:
 #   0  clean — no plaintext, and every ClickHouse sink used the write-only path
 #   1  plaintext found (a plaintext argument, a managed random_password, or a
