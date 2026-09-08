@@ -130,6 +130,62 @@ locals {
   clickhouse_readonly_user_password_wo = var.clickhouse_write_only && local.clickhouse_readonly_user_enabled ? coalesce(
     var.clickhouse_passwords_wo.readonly_user, one(ephemeral.random_password.clickhouse_readonly_user[*].result)
   ) : null
+
+  # Previous-password locals — the overlap value. Unlike the current-password
+  # locals there is no generator to fall back on: an unsupplied previous password
+  # means "no overlap", which is the steady state, so the fallback is the sentinel
+  # "-" rather than a generated value. Secrets Manager rejects empty strings
+  # (Spike Finding 10), and the ESO template's guard (ne .<user>_previous "-")
+  # treats the sentinel as absent, rendering single-method auth. The sentinel can
+  # never collide with a real password: generated passwords are 32 chars,
+  # alphanumeric only.
+  #
+  # The explicit ternary (rather than coalesce) mirrors the current-password
+  # locals' shape so the pairs read identically.
+  clickhouse_otel_previous_password_legacy = var.clickhouse_write_only ? null : (
+    var.clickhouse_previous_passwords.otel != null ? var.clickhouse_previous_passwords.otel : "-"
+  )
+  clickhouse_otel_previous_password_wo = var.clickhouse_write_only ? (
+    var.clickhouse_previous_passwords_wo.otel != null ? var.clickhouse_previous_passwords_wo.otel : "-"
+  ) : null
+
+  clickhouse_monte_carlo_previous_password_legacy = var.clickhouse_write_only ? null : (
+    var.clickhouse_previous_passwords.monte_carlo != null ? var.clickhouse_previous_passwords.monte_carlo : "-"
+  )
+  clickhouse_monte_carlo_previous_password_wo = var.clickhouse_write_only ? (
+    var.clickhouse_previous_passwords_wo.monte_carlo != null ? var.clickhouse_previous_passwords_wo.monte_carlo : "-"
+  ) : null
+
+  clickhouse_schema_owner_previous_password_legacy = var.clickhouse_write_only ? null : (
+    var.clickhouse_previous_passwords.schema_owner != null ? var.clickhouse_previous_passwords.schema_owner : "-"
+  )
+  clickhouse_schema_owner_previous_password_wo = var.clickhouse_write_only ? (
+    var.clickhouse_previous_passwords_wo.schema_owner != null ? var.clickhouse_previous_passwords_wo.schema_owner : "-"
+  ) : null
+
+  clickhouse_llm_worker_previous_password_legacy = var.clickhouse_write_only ? null : (
+    var.clickhouse_previous_passwords.llm_worker != null ? var.clickhouse_previous_passwords.llm_worker : "-"
+  )
+  clickhouse_llm_worker_previous_password_wo = var.clickhouse_write_only ? (
+    var.clickhouse_previous_passwords_wo.llm_worker != null ? var.clickhouse_previous_passwords_wo.llm_worker : "-"
+  ) : null
+
+  # admin and readonly_user carry their enabled flag in both locals, so both
+  # stay null when the user is disabled (its sink does not exist at all) —
+  # same shape as the current-password locals above.
+  clickhouse_admin_previous_password_legacy = !var.clickhouse_write_only && local.clickhouse_admin_enabled ? (
+    var.clickhouse_previous_passwords.admin != null ? var.clickhouse_previous_passwords.admin : "-"
+  ) : null
+  clickhouse_admin_previous_password_wo = var.clickhouse_write_only && local.clickhouse_admin_enabled ? (
+    var.clickhouse_previous_passwords_wo.admin != null ? var.clickhouse_previous_passwords_wo.admin : "-"
+  ) : null
+
+  clickhouse_readonly_user_previous_password_legacy = !var.clickhouse_write_only && local.clickhouse_readonly_user_enabled ? (
+    var.clickhouse_previous_passwords.readonly_user != null ? var.clickhouse_previous_passwords.readonly_user : "-"
+  ) : null
+  clickhouse_readonly_user_previous_password_wo = var.clickhouse_write_only && local.clickhouse_readonly_user_enabled ? (
+    var.clickhouse_previous_passwords_wo.readonly_user != null ? var.clickhouse_previous_passwords_wo.readonly_user : "-"
+  ) : null
 }
 
 # Generators, legacy path — managed resources whose `result` is in state. count
@@ -290,6 +346,10 @@ resource "aws_secretsmanager_secret_version" "clickhouse_admin_password" {
   secret_string            = local.clickhouse_admin_password_legacy
   secret_string_wo         = local.clickhouse_admin_password_wo
   secret_string_wo_version = var.clickhouse_write_only ? var.clickhouse_password_versions.admin : null
+
+  # The overlap password must land before the current one moves — see the
+  # ordering note above the previous-password secrets.
+  depends_on = [aws_secretsmanager_secret_version.clickhouse_admin_previous_password]
 }
 
 resource "aws_secretsmanager_secret" "clickhouse_otel_password" {
@@ -304,6 +364,10 @@ resource "aws_secretsmanager_secret_version" "clickhouse_otel_password" {
   secret_string            = local.clickhouse_otel_password_legacy
   secret_string_wo         = local.clickhouse_otel_password_wo
   secret_string_wo_version = var.clickhouse_write_only ? var.clickhouse_password_versions.otel : null
+
+  # The overlap password must land before the current one moves — see the
+  # ordering note above the previous-password secrets.
+  depends_on = [aws_secretsmanager_secret_version.clickhouse_otel_previous_password]
 }
 
 resource "aws_secretsmanager_secret" "clickhouse_monte_carlo_password" {
@@ -318,6 +382,10 @@ resource "aws_secretsmanager_secret_version" "clickhouse_monte_carlo_password" {
   secret_string            = local.clickhouse_monte_carlo_password_legacy
   secret_string_wo         = local.clickhouse_monte_carlo_password_wo
   secret_string_wo_version = var.clickhouse_write_only ? var.clickhouse_password_versions.monte_carlo : null
+
+  # The overlap password must land before the current one moves — see the
+  # ordering note above the previous-password secrets.
+  depends_on = [aws_secretsmanager_secret_version.clickhouse_monte_carlo_previous_password]
 }
 
 resource "aws_secretsmanager_secret" "clickhouse_schema_owner_password" {
@@ -332,6 +400,10 @@ resource "aws_secretsmanager_secret_version" "clickhouse_schema_owner_password" 
   secret_string            = local.clickhouse_schema_owner_password_legacy
   secret_string_wo         = local.clickhouse_schema_owner_password_wo
   secret_string_wo_version = var.clickhouse_write_only ? var.clickhouse_password_versions.schema_owner : null
+
+  # The overlap password must land before the current one moves — see the
+  # ordering note above the previous-password secrets.
+  depends_on = [aws_secretsmanager_secret_version.clickhouse_schema_owner_previous_password]
 }
 
 resource "aws_secretsmanager_secret" "clickhouse_llm_worker_password" {
@@ -346,6 +418,10 @@ resource "aws_secretsmanager_secret_version" "clickhouse_llm_worker_password" {
   secret_string            = local.clickhouse_llm_worker_password_legacy
   secret_string_wo         = local.clickhouse_llm_worker_password_wo
   secret_string_wo_version = var.clickhouse_write_only ? var.clickhouse_password_versions.llm_worker : null
+
+  # The overlap password must land before the current one moves — see the
+  # ordering note above the previous-password secrets.
+  depends_on = [aws_secretsmanager_secret_version.clickhouse_llm_worker_previous_password]
 }
 
 resource "aws_secretsmanager_secret" "clickhouse_readonly_user_password" {
@@ -361,5 +437,112 @@ resource "aws_secretsmanager_secret_version" "clickhouse_readonly_user_password"
   secret_id                = aws_secretsmanager_secret.clickhouse_readonly_user_password[0].id
   secret_string            = local.clickhouse_readonly_user_password_legacy
   secret_string_wo         = local.clickhouse_readonly_user_password_wo
+  secret_string_wo_version = var.clickhouse_write_only ? var.clickhouse_password_versions.readonly_user : null
+
+  # The overlap password must land before the current one moves — see the
+  # ordering note above the previous-password secrets.
+  depends_on = [aws_secretsmanager_secret_version.clickhouse_readonly_user_previous_password]
+}
+
+# Secrets Manager — the PREVIOUS ClickHouse password per user (YET-2680).
+#
+# Holds the sentinel "-" in steady state (ESO renders it as absent —
+# single-method auth); holds the outgoing password for the duration of a
+# rotation so the server accepts both. Created for every enabled user so a
+# rotation never creates a secret mid-flight — ESO tolerates a value change, not
+# a missing secret. Gating mirrors the current-password secrets exactly.
+#
+# Ordering is the one correctness property here: each CURRENT sink depends_on its
+# PREVIOUS sink, so the old password is in Secrets Manager before the current one
+# moves. The bad interleave — current rotated, previous not yet written — is the
+# one that locks out every existing client, and this dependency is what excludes
+# it. ESO renders both into one file on its next sync, so the server sees a
+# single transition straight from one method to two.
+
+resource "aws_secretsmanager_secret" "clickhouse_admin_previous_password" {
+  count                   = local.clickhouse_admin_enabled ? 1 : 0
+  name                    = "${local.effective_cluster_name}/clickhouse/admin-previous-credentials"
+  kms_key_id              = aws_kms_key.pipeline_secrets.arn
+  recovery_window_in_days = 0 # See clickhouse_admin_password above.
+  tags                    = var.tags
+}
+
+resource "aws_secretsmanager_secret_version" "clickhouse_admin_previous_password" {
+  count                    = local.clickhouse_admin_enabled ? 1 : 0
+  secret_id                = aws_secretsmanager_secret.clickhouse_admin_previous_password[0].id
+  secret_string            = local.clickhouse_admin_previous_password_legacy
+  secret_string_wo         = local.clickhouse_admin_previous_password_wo
+  secret_string_wo_version = var.clickhouse_write_only ? var.clickhouse_password_versions.admin : null
+}
+
+resource "aws_secretsmanager_secret" "clickhouse_otel_previous_password" {
+  name                    = "${local.effective_cluster_name}/clickhouse/otel-previous-credentials"
+  kms_key_id              = aws_kms_key.pipeline_secrets.arn
+  recovery_window_in_days = 0 # See clickhouse_admin_password above.
+  tags                    = var.tags
+}
+
+resource "aws_secretsmanager_secret_version" "clickhouse_otel_previous_password" {
+  secret_id                = aws_secretsmanager_secret.clickhouse_otel_previous_password.id
+  secret_string            = local.clickhouse_otel_previous_password_legacy
+  secret_string_wo         = local.clickhouse_otel_previous_password_wo
+  secret_string_wo_version = var.clickhouse_write_only ? var.clickhouse_password_versions.otel : null
+}
+
+resource "aws_secretsmanager_secret" "clickhouse_monte_carlo_previous_password" {
+  name                    = "${local.effective_cluster_name}/clickhouse/monte-carlo-previous-credentials"
+  kms_key_id              = aws_kms_key.pipeline_secrets.arn
+  recovery_window_in_days = 0 # See clickhouse_admin_password above.
+  tags                    = var.tags
+}
+
+resource "aws_secretsmanager_secret_version" "clickhouse_monte_carlo_previous_password" {
+  secret_id                = aws_secretsmanager_secret.clickhouse_monte_carlo_previous_password.id
+  secret_string            = local.clickhouse_monte_carlo_previous_password_legacy
+  secret_string_wo         = local.clickhouse_monte_carlo_previous_password_wo
+  secret_string_wo_version = var.clickhouse_write_only ? var.clickhouse_password_versions.monte_carlo : null
+}
+
+resource "aws_secretsmanager_secret" "clickhouse_schema_owner_previous_password" {
+  name                    = "${local.effective_cluster_name}/clickhouse/schema-owner-previous-credentials"
+  kms_key_id              = aws_kms_key.pipeline_secrets.arn
+  recovery_window_in_days = 0 # See clickhouse_admin_password above.
+  tags                    = var.tags
+}
+
+resource "aws_secretsmanager_secret_version" "clickhouse_schema_owner_previous_password" {
+  secret_id                = aws_secretsmanager_secret.clickhouse_schema_owner_previous_password.id
+  secret_string            = local.clickhouse_schema_owner_previous_password_legacy
+  secret_string_wo         = local.clickhouse_schema_owner_previous_password_wo
+  secret_string_wo_version = var.clickhouse_write_only ? var.clickhouse_password_versions.schema_owner : null
+}
+
+resource "aws_secretsmanager_secret" "clickhouse_llm_worker_previous_password" {
+  name                    = "${local.effective_cluster_name}/clickhouse/llm-worker-previous-credentials"
+  kms_key_id              = aws_kms_key.pipeline_secrets.arn
+  recovery_window_in_days = 0 # See clickhouse_admin_password above.
+  tags                    = var.tags
+}
+
+resource "aws_secretsmanager_secret_version" "clickhouse_llm_worker_previous_password" {
+  secret_id                = aws_secretsmanager_secret.clickhouse_llm_worker_previous_password.id
+  secret_string            = local.clickhouse_llm_worker_previous_password_legacy
+  secret_string_wo         = local.clickhouse_llm_worker_previous_password_wo
+  secret_string_wo_version = var.clickhouse_write_only ? var.clickhouse_password_versions.llm_worker : null
+}
+
+resource "aws_secretsmanager_secret" "clickhouse_readonly_user_previous_password" {
+  count                   = local.clickhouse_readonly_user_enabled ? 1 : 0
+  name                    = "${local.effective_cluster_name}/clickhouse/readonly-user-previous-credentials"
+  kms_key_id              = aws_kms_key.pipeline_secrets.arn
+  recovery_window_in_days = 0 # See clickhouse_admin_password above.
+  tags                    = var.tags
+}
+
+resource "aws_secretsmanager_secret_version" "clickhouse_readonly_user_previous_password" {
+  count                    = local.clickhouse_readonly_user_enabled ? 1 : 0
+  secret_id                = aws_secretsmanager_secret.clickhouse_readonly_user_previous_password[0].id
+  secret_string            = local.clickhouse_readonly_user_previous_password_legacy
+  secret_string_wo         = local.clickhouse_readonly_user_previous_password_wo
   secret_string_wo_version = var.clickhouse_write_only ? var.clickhouse_password_versions.readonly_user : null
 }
