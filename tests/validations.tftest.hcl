@@ -3047,3 +3047,39 @@ run "previous_secrets_absent_for_disabled_gated_users" {
     error_message = "A disabled gated user must get no previous-password secret."
   }
 }
+
+# --- previous-password chart wiring (YET-2680) ---
+#
+# Without previousKey the chart renders single-method auth and a rotation
+# silently does nothing on the server — the B secret would be written and never
+# read.
+
+run "previous_keys_reach_the_chart_values" {
+  command = plan
+  variables {
+    cluster = {
+      create                = false
+      name                  = "test-cluster"
+      existing_cluster_name = "test-cluster"
+    }
+    helm = {
+      deploy_charts = false
+      clickhouse = {
+        admin         = { enabled = true }
+        readonly_user = { enabled = true }
+      }
+    }
+  }
+  # Assert every user's key, including the two gated blocks.
+  assert {
+    condition = alltrue([
+      local.clickhouse_user_external_secret.otel.previousKey == "test-cluster/clickhouse/otel-previous-credentials",
+      local.clickhouse_user_external_secret.schemaOwner.previousKey == "test-cluster/clickhouse/schema-owner-previous-credentials",
+      local.clickhouse_user_external_secret.llmWorker.previousKey == "test-cluster/clickhouse/llm-worker-previous-credentials",
+      local.clickhouse_user_external_secret.monteCarlo.previousKey == "test-cluster/clickhouse/monte-carlo-previous-credentials",
+      local.helm_clickhouse_admin_block.admin.externalSecret.previousKey == "test-cluster/clickhouse/admin-previous-credentials",
+      local.helm_clickhouse_readonly_user_block.readonlyUser.externalSecret.previousKey == "test-cluster/clickhouse/readonly-user-previous-credentials",
+    ])
+    error_message = "Every ClickHouse user's chart values must carry previousKey, or the chart renders single-method auth and rotation is a no-op on the server."
+  }
+}

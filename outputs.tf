@@ -85,6 +85,40 @@ output "clickhouse_readonly_user_credentials_secret_arn" {
   value       = local.clickhouse_readonly_user_enabled ? aws_secretsmanager_secret.clickhouse_readonly_user_password[0].arn : null
 }
 
+# Previous-password secrets (YET-2680): hold the outgoing password during a
+# rotation, the sentinel "-" otherwise. The rotation tooling resolves them
+# through these ARNs.
+
+output "clickhouse_admin_previous_credentials_secret_arn" {
+  description = "Secrets Manager ARN for the ClickHouse admin user's previous password (empty outside a rotation). Null when helm.clickhouse.admin is disabled."
+  value       = local.clickhouse_admin_enabled ? aws_secretsmanager_secret.clickhouse_admin_previous_password[0].arn : null
+}
+
+output "clickhouse_otel_previous_credentials_secret_arn" {
+  description = "Secrets Manager ARN for the ClickHouse otel user's previous password (empty outside a rotation)."
+  value       = aws_secretsmanager_secret.clickhouse_otel_previous_password.arn
+}
+
+output "clickhouse_monte_carlo_previous_credentials_secret_arn" {
+  description = "Secrets Manager ARN for the ClickHouse monte_carlo user's previous password (empty outside a rotation)."
+  value       = aws_secretsmanager_secret.clickhouse_monte_carlo_previous_password.arn
+}
+
+output "clickhouse_schema_owner_previous_credentials_secret_arn" {
+  description = "Secrets Manager ARN for the ClickHouse schema_owner user's previous password (empty outside a rotation)."
+  value       = aws_secretsmanager_secret.clickhouse_schema_owner_previous_password.arn
+}
+
+output "clickhouse_llm_worker_previous_credentials_secret_arn" {
+  description = "Secrets Manager ARN for the ClickHouse llm_worker user's previous password (empty outside a rotation)."
+  value       = aws_secretsmanager_secret.clickhouse_llm_worker_previous_password.arn
+}
+
+output "clickhouse_readonly_user_previous_credentials_secret_arn" {
+  description = "Secrets Manager ARN for the previous password of the ClickHouse SQL user `readonly_user` (empty outside a rotation). Null when helm.clickhouse.readonly_user is disabled."
+  value       = local.clickhouse_readonly_user_enabled ? aws_secretsmanager_secret.clickhouse_readonly_user_previous_password[0].arn : null
+}
+
 output "otel_collector_certificate_arn" {
   description = "ACM certificate ARN for the OTel Collector domain. Pass to the ao-data-platform chart for NLB TLS termination."
   value       = var.otel_collector_domain != null ? aws_acm_certificate.otel_collector[0].arn : null
