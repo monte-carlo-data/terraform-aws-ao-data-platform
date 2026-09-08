@@ -2910,3 +2910,41 @@ run "trace_export_agent_role_arn_and_cmk_together" {
     error_message = "With agent_role_arn also set, the writer policy must still gain the kms:GenerateDataKey/kms:Encrypt statement on the CMK — the writer's own grant is unaffected by the bucket-policy-only agent_role_arn branch."
   }
 }
+
+# --- previous-password variables mirror the current-password pair ---
+#
+# Same trap, same guard: supplying the wrong variable for the active path is a
+# silent no-op, and here the consequence is worse than a regenerated password —
+# the operator believes they preserved the old password for the overlap, so they
+# proceed to roll clients while the server never accepted the old one at all.
+
+run "legacy_previous_passwords_with_write_only_flag_rejected" {
+  command = plan
+  variables {
+    cluster = {
+      create                = false
+      name                  = "test-cluster"
+      existing_cluster_name = "test-cluster"
+    }
+    helm                  = { deploy_charts = false }
+    clickhouse_write_only = true
+    # Belongs in clickhouse_previous_passwords_wo on this path.
+    clickhouse_previous_passwords = { otel = "old-otel" }
+  }
+  expect_failures = [var.clickhouse_previous_passwords]
+}
+
+run "write_only_previous_passwords_without_flag_rejected" {
+  command = plan
+  variables {
+    cluster = {
+      create                = false
+      name                  = "test-cluster"
+      existing_cluster_name = "test-cluster"
+    }
+    helm = { deploy_charts = false }
+    # Belongs in clickhouse_previous_passwords on this path.
+    clickhouse_previous_passwords_wo = { otel = "old-otel" }
+  }
+  expect_failures = [var.clickhouse_previous_passwords_wo]
+}

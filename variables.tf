@@ -1073,6 +1073,96 @@ variable "clickhouse_passwords_wo" {
   }
 }
 
+variable "clickhouse_previous_passwords" {
+  description = <<-EOT
+    The PREVIOUS password for each ClickHouse SQL user, kept valid alongside the
+    current one for the duration of a rotation (YET-2680), on the LEGACY path
+    only — i.e. when clickhouse_write_only = false. Setting any field while
+    clickhouse_write_only = true is REJECTED at plan time, mirroring the guard on
+    clickhouse_passwords.
+
+    Every field is optional; a field left null writes the sentinel "-" into the
+    previous-password secret, which is the steady state and renders single-method
+    auth — exactly the behavior before this variable existed.
+
+    Set a field only for the rotation window: supply the CURRENT live password
+    here on the apply that mints a new one, then clear it again on the cleanup
+    apply once every client has moved. Both applies bump the matching
+    clickhouse_password_versions field.
+
+    Sensitive, but non-ephemeral like its current-password counterpart, because
+    an ephemeral value cannot feed secret_string. Terraform state contains these
+    values on this path — which is what the write-only path exists to fix.
+  EOT
+  type = object({
+    admin         = optional(string, null)
+    otel          = optional(string, null)
+    monte_carlo   = optional(string, null)
+    schema_owner  = optional(string, null)
+    llm_worker    = optional(string, null)
+    readonly_user = optional(string, null)
+  })
+  default   = {}
+  sensitive = true
+  nullable  = false
+
+  validation {
+    condition = !var.clickhouse_write_only || nonsensitive(alltrue([
+      var.clickhouse_previous_passwords.admin == null,
+      var.clickhouse_previous_passwords.otel == null,
+      var.clickhouse_previous_passwords.monte_carlo == null,
+      var.clickhouse_previous_passwords.schema_owner == null,
+      var.clickhouse_previous_passwords.llm_worker == null,
+      var.clickhouse_previous_passwords.readonly_user == null,
+    ]))
+    error_message = "clickhouse_previous_passwords serves the legacy path only and is ignored when clickhouse_write_only = true, so the overlap password would silently never be written. Move these values to clickhouse_previous_passwords_wo."
+  }
+}
+
+variable "clickhouse_previous_passwords_wo" {
+  description = <<-EOT
+    The PREVIOUS password for each ClickHouse SQL user on the WRITE-ONLY path
+    only — i.e. when clickhouse_write_only = true. Setting any field while the
+    flag is false is REJECTED at plan time, mirroring clickhouse_passwords_wo.
+
+    Semantics match clickhouse_previous_passwords: null (the default) writes the
+    sentinel "-" — steady state, single-method auth (the ESO template treats the
+    sentinel as absent). Supply the CURRENT
+    live password on the rotation apply, clear it on the cleanup apply, and bump
+    the matching clickhouse_password_versions field on both. That single version
+    field drives BOTH sinks for the user, so a rotation and its cleanup are one
+    apply each.
+
+    Ephemeral as well as sensitive: the value is absent from state and from saved
+    plan files. Supply via a .tfvars file or TF_VAR_clickhouse_previous_passwords_wo,
+    never -var on a command line.
+  EOT
+  type = object({
+    admin         = optional(string, null)
+    otel          = optional(string, null)
+    monte_carlo   = optional(string, null)
+    schema_owner  = optional(string, null)
+    llm_worker    = optional(string, null)
+    readonly_user = optional(string, null)
+  })
+  default   = {}
+  sensitive = true
+  ephemeral = true
+  nullable  = false
+
+  validation {
+    condition = var.clickhouse_write_only || nonsensitive(alltrue([
+      var.clickhouse_previous_passwords_wo.admin == null,
+      var.clickhouse_previous_passwords_wo.otel == null,
+      var.clickhouse_previous_passwords_wo.monte_carlo == null,
+      var.clickhouse_previous_passwords_wo.schema_owner == null,
+      var.clickhouse_previous_passwords_wo.llm_worker == null,
+      var.clickhouse_previous_passwords_wo.readonly_user == null,
+    ]))
+    error_message = "clickhouse_previous_passwords_wo serves the write-only path only and is ignored when clickhouse_write_only = false, so the overlap password would silently never be written. Move these values to clickhouse_previous_passwords."
+  }
+}
+
 variable "clickhouse_password_versions" {
   description = <<-EOT
     Version counter per ClickHouse user, driving each secret's
