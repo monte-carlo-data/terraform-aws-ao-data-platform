@@ -23,6 +23,10 @@
 #   --baseline : a baseline file written by a pre-rotation run without --baseline;
 #                the previous (B) secret's VersionId must have moved since then
 #   --skip-reload: version diff only; no ESO force-sync / mount wait / reload / probe
+#   --create-missing-b: the previous (B) secret does not exist until the cell
+#                adopts the previous-password module; with this flag a baseline
+#                run records it as "absent" instead of failing. Post-rotation
+#                checks must treat that absence as "moved" (it now exists).
 #
 # Exit codes: 0 = B secret moved AND (unless --skip-reload) the expected auth
 # state is live on every CH pod; 1 = the B secret did not move, or the live
@@ -36,7 +40,7 @@ MOUNT_TIMEOUT=120
 usage() {
   cat >&2 <<'EOF'
 usage: rotation-check.sh <cluster> <user-slug> [--baseline FILE] [--region R]
-                          [--namespace NS] [--skip-reload]
+                          [--namespace NS] [--skip-reload] [--create-missing-b]
        rotation-check.sh --fixture CURRENT.json --baseline-fixture BASE.json
 EOF
   exit 2
@@ -51,6 +55,7 @@ REGION_ARG=()
 FIXTURE=""
 BASELINE_FIXTURE=""
 SKIP_RELOAD=false
+CREATE_MISSING_B=false
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -60,6 +65,7 @@ while [ $# -gt 0 ]; do
     --fixture) FIXTURE="$2"; shift 2 ;;
     --baseline-fixture) BASELINE_FIXTURE="$2"; shift 2 ;;
     --skip-reload) SKIP_RELOAD=true; shift ;;
+    --create-missing-b) CREATE_MISSING_B=true; shift ;;
     -h|--help) usage ;;
     -*) echo "unknown flag: $1" >&2; usage ;;
     *)
@@ -103,11 +109,18 @@ CH_USER=${SLUG//-/_}
 A_SECRET="$CLUSTER/clickhouse/$SLUG-credentials"
 B_SECRET="$CLUSTER/clickhouse/$SLUG-previous-credentials"
 
-# AWSCURRENT VersionId of a secret (fails the script if the secret is missing).
+# AWSCURRENT VersionId of a secret (fails the script if the secret is missing,
+# unless the caller opts into tolerating that).
 current_version() {
-  aws secretsmanager describe-secret --secret-id "$1" "${REGION_ARG[@]}" \
-    --query 'VersionIdsToStages' --output json |
-    jq -r 'to_entries[] | select(.value | index("AWSCURRENT")) | .key'
+  local secret_id="$1" allow_missing="${2:-false}"
+  local out
+  if ! out=$(aws secretsmanager describe-secret --secret-id "$secret_id" "${REGION_ARG[@]}" \
+      --query 'VersionIdsToStages' --output json 2>/dev/null); then
+    if $allow_missing; then echo "absent"; return 0; fi
+    echo "secret not found: $secret_id" >&2
+    exit 1
+  fi
+  echo "$out" | jq -r 'to_entries[] | select(.value | index("AWSCURRENT")) | .key'
 }
 
 # sha256 of a secret's value. The digest is all that leaves this function.
@@ -117,7 +130,10 @@ value_digest() {
 }
 
 A_VERSION=$(current_version "$A_SECRET")
-B_VERSION=$(current_version "$B_SECRET")
+# The B secret only exists once the cell adopts the previous-password module.
+# A baseline taken before that adoption must be able to record its absence;
+# --create-missing-b is that opt-in (and no-op on a cell that already has B).
+B_VERSION=$(current_version "$B_SECRET" "$CREATE_MISSING_B")
 
 if [ -z "$BASELINE" ]; then
   # Baseline-capture mode: record versions + digests for the post-rotation run.
@@ -126,7 +142,11 @@ if [ -z "$BASELINE" ]; then
   (umask 077
     {
       printf '%s %s %s\n' "$A_SECRET" "$A_VERSION" "$(value_digest "$A_SECRET")"
-      printf '%s %s %s\n' "$B_SECRET" "$B_VERSION" "$(value_digest "$B_SECRET")"
+      if [ "$B_VERSION" = absent ]; then
+        printf '%s absent -\n' "$B_SECRET"
+      else
+        printf '%s %s %s\n' "$B_SECRET" "$B_VERSION" "$(value_digest "$B_SECRET")"
+      fi
     } > "$OUT")
   echo "baseline written to $OUT (mode 600; versions + digests only)"
   exit 0
@@ -146,12 +166,17 @@ if [ "$A_VERSION" != "$A_BASE_VERSION" ]; then
 else
   echo "A secret unchanged ($A_VERSION) — expected on the cleanup apply"
 fi
-if [ "$B_VERSION" = "$B_BASE_VERSION" ]; then
+if [ "$B_BASE_VERSION" = absent ]; then
+  # Pre-adoption baseline: the rotation both created and wrote B. Its existence
+  # (a non-absent AWSCURRENT) is the whole signal — there is no prior ID to diff.
+  echo "B secret created by the rotation (pre-adoption baseline recorded it absent; now $B_VERSION)."
+elif [ "$B_VERSION" = "$B_BASE_VERSION" ]; then
   echo "FAIL: B secret $B_SECRET did not move (still $B_BASE_VERSION)." >&2
   echo "The apply was a silent no-op — clickhouse_password_versions.$CH_USER was not bumped." >&2
   exit 1
+else
+  echo "B secret moved ($B_BASE_VERSION -> $B_VERSION) — the rotation landed in Secrets Manager."
 fi
-echo "B secret moved ($B_BASE_VERSION -> $B_VERSION) — the rotation landed in Secrets Manager."
 
 if $SKIP_RELOAD; then exit 0; fi
 
