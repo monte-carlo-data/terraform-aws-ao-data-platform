@@ -2910,3 +2910,176 @@ run "trace_export_agent_role_arn_and_cmk_together" {
     error_message = "With agent_role_arn also set, the writer policy must still gain the kms:GenerateDataKey/kms:Encrypt statement on the CMK — the writer's own grant is unaffected by the bucket-policy-only agent_role_arn branch."
   }
 }
+
+# --- previous-password variables mirror the current-password pair ---
+#
+# Same trap, same guard: supplying the wrong variable for the active path is a
+# silent no-op, and here the consequence is worse than a regenerated password —
+# the operator believes they preserved the old password for the overlap, so they
+# proceed to roll clients while the server never accepted the old one at all.
+
+run "legacy_previous_passwords_with_write_only_flag_rejected" {
+  command = plan
+  variables {
+    cluster = {
+      create                = false
+      name                  = "test-cluster"
+      existing_cluster_name = "test-cluster"
+    }
+    helm                  = { deploy_charts = false }
+    clickhouse_write_only = true
+    # Belongs in clickhouse_previous_passwords_wo on this path.
+    clickhouse_previous_passwords = { otel = "old-otel" }
+  }
+  expect_failures = [var.clickhouse_previous_passwords]
+}
+
+run "write_only_previous_passwords_without_flag_rejected" {
+  command = plan
+  variables {
+    cluster = {
+      create                = false
+      name                  = "test-cluster"
+      existing_cluster_name = "test-cluster"
+    }
+    helm = { deploy_charts = false }
+    # Belongs in clickhouse_previous_passwords on this path.
+    clickhouse_previous_passwords_wo = { otel = "old-otel" }
+  }
+  expect_failures = [var.clickhouse_previous_passwords_wo]
+}
+
+# --- previous-password secrets (YET-2680 rotation overlap) ---
+#
+# One version lever drives BOTH sinks for a user, so a rotation and its cleanup
+# are each a single apply. The B secret exists for every enabled user so a
+# rotation never creates a secret mid-flight (ESO tolerates a value change, not
+# a missing secret). Gating mirrors the A-side secrets exactly.
+
+run "previous_secrets_exist_and_share_the_version_lever" {
+  command = plan
+  variables {
+    cluster = {
+      create                = false
+      name                  = "test-cluster"
+      existing_cluster_name = "test-cluster"
+    }
+    helm = {
+      deploy_charts = false
+      clickhouse = {
+        admin         = { enabled = true }
+        readonly_user = { enabled = true }
+      }
+    }
+    clickhouse_write_only = true
+    clickhouse_passwords_wo = {
+      otel = "new-otel"
+    }
+    clickhouse_previous_passwords_wo = {
+      otel = "old-otel"
+    }
+    clickhouse_password_versions = {
+      otel = 3
+    }
+  }
+  # One bump drives BOTH sinks for the user: if the previous sink took its own
+  # counter, a rotation would need two coordinated bumps and a half-applied
+  # rotation would leave the server with one method and clients holding two.
+  assert {
+    condition = alltrue([
+      aws_secretsmanager_secret_version.clickhouse_otel_password.secret_string_wo_version == 3,
+      aws_secretsmanager_secret_version.clickhouse_otel_previous_password.secret_string_wo_version == 3,
+    ])
+    error_message = "The current and previous sinks for a user must share that user's clickhouse_password_versions field."
+  }
+  assert {
+    condition     = aws_secretsmanager_secret.clickhouse_otel_previous_password.name == "test-cluster/clickhouse/otel-previous-credentials"
+    error_message = "The previous-password secret must be named <cluster>/clickhouse/<slug>-previous-credentials — ESO and the rotation tooling both resolve it by name."
+  }
+  # The B secret exists for every enabled user, so a rotation never has to create
+  # a secret mid-flight (a create is what an in-flight ESO sync cannot tolerate).
+  assert {
+    condition = alltrue([
+      length(aws_secretsmanager_secret.clickhouse_admin_previous_password) == 1,
+      length(aws_secretsmanager_secret.clickhouse_readonly_user_previous_password) == 1,
+    ])
+    error_message = "Enabled gated users must get a previous-password secret."
+  }
+  # Same write-only invariant the current-password sinks carry.
+  assert {
+    condition = alltrue([
+      aws_secretsmanager_secret_version.clickhouse_otel_previous_password.secret_string == null,
+      aws_secretsmanager_secret_version.clickhouse_monte_carlo_previous_password.secret_string == null,
+      aws_secretsmanager_secret_version.clickhouse_schema_owner_previous_password.secret_string == null,
+      aws_secretsmanager_secret_version.clickhouse_llm_worker_previous_password.secret_string == null,
+      aws_secretsmanager_secret_version.clickhouse_admin_previous_password[0].secret_string == null,
+      aws_secretsmanager_secret_version.clickhouse_readonly_user_previous_password[0].secret_string == null,
+    ])
+    error_message = "On the write-only path every previous-password sink's secret_string must be null."
+  }
+  # Ordering proxy for the depends_on edge the current sink carries onto the
+  # previous sink (the test framework cannot assert graph edges directly): the
+  # version-lever assert above is it — both sinks exist in the same plan and
+  # share the bump that writes them. The previous sink's secret_string_wo value
+  # itself cannot be asserted: a write-only argument is unknown at plan time, so
+  # any comparison against it fails (even under nonsensitive()). "Never null on
+  # the active path" is instead guaranteed by the *_previous_password_wo locals'
+  # ternary shape, which yields a string unconditionally when the path is active.
+}
+
+run "previous_secrets_absent_for_disabled_gated_users" {
+  command = plan
+  variables {
+    cluster = {
+      create                = false
+      name                  = "test-cluster"
+      existing_cluster_name = "test-cluster"
+    }
+    helm = { deploy_charts = false }
+  }
+  # Mirrors the A-side gating exactly: a disabled user has no secret at all, so
+  # nothing grants ESO read access to a secret the chart will never reference.
+  assert {
+    condition = alltrue([
+      length(aws_secretsmanager_secret.clickhouse_admin_previous_password) == 0,
+      length(aws_secretsmanager_secret.clickhouse_readonly_user_previous_password) == 0,
+    ])
+    error_message = "A disabled gated user must get no previous-password secret."
+  }
+}
+
+# --- previous-password chart wiring (YET-2680) ---
+#
+# Without previousKey the chart renders single-method auth and a rotation
+# silently does nothing on the server — the B secret would be written and never
+# read.
+
+run "previous_keys_reach_the_chart_values" {
+  command = plan
+  variables {
+    cluster = {
+      create                = false
+      name                  = "test-cluster"
+      existing_cluster_name = "test-cluster"
+    }
+    helm = {
+      deploy_charts = false
+      clickhouse = {
+        admin         = { enabled = true }
+        readonly_user = { enabled = true }
+      }
+    }
+  }
+  # Assert every user's key, including the two gated blocks.
+  assert {
+    condition = alltrue([
+      local.clickhouse_user_external_secret.otel.previousKey == "test-cluster/clickhouse/otel-previous-credentials",
+      local.clickhouse_user_external_secret.schemaOwner.previousKey == "test-cluster/clickhouse/schema-owner-previous-credentials",
+      local.clickhouse_user_external_secret.llmWorker.previousKey == "test-cluster/clickhouse/llm-worker-previous-credentials",
+      local.clickhouse_user_external_secret.monteCarlo.previousKey == "test-cluster/clickhouse/monte-carlo-previous-credentials",
+      local.helm_clickhouse_admin_block.admin.externalSecret.previousKey == "test-cluster/clickhouse/admin-previous-credentials",
+      local.helm_clickhouse_readonly_user_block.readonlyUser.externalSecret.previousKey == "test-cluster/clickhouse/readonly-user-previous-credentials",
+    ])
+    error_message = "Every ClickHouse user's chart values must carry previousKey, or the chart renders single-method auth and rotation is a no-op on the server."
+  }
+}

@@ -191,6 +191,11 @@ locals {
       } : user => {
       secretStoreRef = { name = "aws-secrets-manager", kind = "ClusterSecretStore" }
       remoteRef      = { key = "${local.effective_cluster_name}/clickhouse/${slug}" }
+      # The overlap password (YET-2680). Always wired, because the secret always
+      # exists; it is the sentinel "-" in steady state, and the chart's ESO
+      # template renders single-method auth for it. Requires chart >= 5.0.0
+      # (ignored by older charts, which is what makes module adoption inert).
+      previousKey = "${local.effective_cluster_name}/clickhouse/${replace(slug, "-credentials", "-previous-credentials")}"
     }
   }
 
@@ -203,6 +208,8 @@ locals {
       externalSecret = {
         secretStoreRef = { name = "aws-secrets-manager", kind = "ClusterSecretStore" }
         remoteRef      = { key = "${local.effective_cluster_name}/clickhouse/readonly-user-credentials" }
+        # Overlap password for rotations (YET-2680) — see clickhouse_user_external_secret.
+        previousKey = "${local.effective_cluster_name}/clickhouse/readonly-user-previous-credentials"
       }
     }
   } : {}
@@ -217,6 +224,8 @@ locals {
       externalSecret = {
         secretStoreRef = { name = "aws-secrets-manager", kind = "ClusterSecretStore" }
         remoteRef      = { key = "${local.effective_cluster_name}/clickhouse/admin-credentials" }
+        # Overlap password for rotations (YET-2680) — see clickhouse_user_external_secret.
+        previousKey = "${local.effective_cluster_name}/clickhouse/admin-previous-credentials"
       }
     }
   } : {}

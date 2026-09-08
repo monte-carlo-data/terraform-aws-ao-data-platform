@@ -16,7 +16,7 @@ Terraform module that deploys the Monte Carlo Agent Observability data platform 
   - The `aws` and `random` floors also rose in v3.0.0. An existing consumer's `.terraform.lock.hcl` will be pinned below them, so run `terraform init -upgrade` once before planning — see [Upgrading to v3.0.0](#upgrading-to-v300).
 - [AWS CLI](https://aws.amazon.com/cli/) configured with appropriate credentials
 - [kubectl](https://kubernetes.io/docs/tasks/tools/) for cluster access
-- [jq](https://jqlang.github.io/jq/) — only for `hack/verify-no-plaintext.sh`, the state verification step in the v3.0.0 upgrade
+- [jq](https://jqlang.github.io/jq/) — for `hack/verify-no-plaintext.sh` (the state verification step in the v3.0.0 upgrade) and `hack/rotation-check.sh` (see [Rotating a ClickHouse password](#rotating-a-clickhouse-password))
 
 > **Note:** `terraform apply` runs `local-exec` provisioners that invoke `aws eks update-kubeconfig` (needed to `kubectl wait` for ESO CRDs and apply the ClusterSecretStore). This modifies the `~/.kube/config` of the machine running Terraform: the cluster's context is added (or refreshed) and becomes the current context.
 
@@ -293,6 +293,8 @@ The module provisions a per-access-path ClickHouse user model (`ao-data-platform
 
 For each provisioned user the module generates a 32-character password (or uses the matching `clickhouse_passwords.*` override), stores it in Secrets Manager KMS-encrypted with the pipeline key, grants the External Secrets Operator read access, and forwards the per-user `externalSecret` config into the chart so ESO syncs the password into Kubernetes. Each user's secret ARN is exposed as a `clickhouse_*_credentials_secret_arn` output. As of v3.0.0, setting `clickhouse_write_only = true` makes generation ephemeral and the write use write-only arguments, so no password is stored in Terraform state or plan files; the override variable is `clickhouse_passwords_wo` on that path. See [Upgrading to v3.0.0](#upgrading-to-v300).
 
+Each user additionally gets a `<slug>-previous-credentials` secret, which holds the outgoing password for the duration of a rotation and the sentinel `-` the rest of the time — that overlap is what makes a rotation lock nobody out. See [Rotating a ClickHouse password](#rotating-a-clickhouse-password).
+
 - Set `helm.clickhouse.otel.restrict_grants = true` to tighten the `otel` ingest user to `INSERT`-only on the telemetry source tables. Flip this only after any external readers have moved to the `monte_carlo` user — see [Upgrading to v2.0.0](#upgrading-to-v200).
 - Enable the gated break-glass `admin` superuser with `helm.clickhouse.admin = { enabled = true }`. It is reachable only over loopback by default (i.e. via `kubectl exec` into the ClickHouse pod). Disabled by default; when disabled no admin secret is created and `clickhouse_admin_credentials_secret_arn` is `null`.
 
@@ -531,6 +533,8 @@ To use a StorageClass you manage outside this module, set `clickhouse_storage_cl
 | `clickhouse_passwords` | `object` (sensitive) | `{}` (all auto-generated) | Passwords for the ClickHouse SQL users on the **legacy path only** (`clickhouse_write_only = false`, the default). Setting any field while the flag is `true` is **rejected at plan time** by a cross-variable `validation` — not ignored — because on that path the variable is never read and silently ignoring it would regenerate every password; move the values to `clickhouse_passwords_wo`. Shape: `{ admin = optional(string), otel = optional(string), monte_carlo = optional(string), schema_owner = optional(string), llm_worker = optional(string), readonly_user = optional(string) }`. Any field left null is auto-generated; an empty string is treated as supplied and written through as an empty secret, exactly as in v2.4.2 (the write-only variable differs — there `""` means "generate one"). Marked `sensitive`, so caller-supplied values are redacted in plan/apply output and CI logs — supply via a `.tfvars` file you do not commit, or `TF_VAR_clickhouse_passwords` / a sensitive workspace variable for VCS-driven runs. Stored in Secrets Manager and synced into the cluster by ESO; never passed through Helm values. **Not** `ephemeral`, and cannot be: an ephemeral value may not feed `secret_string`, which is an ordinary argument. Terraform state therefore still contains these values — protect state accordingly, or opt into the write-only path. |
 | `clickhouse_passwords_wo` | `object` (sensitive, ephemeral) | `{}` (all auto-generated) | Passwords for the ClickHouse SQL users on the **write-only path only** (`clickhouse_write_only = true`). Setting any field while the flag is unset is **rejected at plan time** — not ignored — by the mirror of the guard on `clickhouse_passwords`. Same shape as `clickhouse_passwords`. Any field left null **or set to the empty string** is auto-generated (an empty ClickHouse password is never a legitimate input). This is the variable you hand a deployment's current passwords to on the apply that opts in. Marked `sensitive` **and** `ephemeral`, so values are omitted from state and plan files entirely — which matters concretely if your CI archives a saved plan (`-out=`), since a non-ephemeral variable would put live passwords in that artifact. Ephemeral variables accept ordinary values, so supply it exactly like the legacy variable (`.tfvars` you do not commit, or `TF_VAR_clickhouse_passwords_wo`); Terraform requires it to be re-supplied on `apply <saved-plan>`, so a plan/apply split cannot lose it. The provider does still read the secret during plan/refresh (aws #42383), so plan-time IAM is unchanged. |
 | `clickhouse_password_versions` | `object` | `{}` (all `1`) | Version counter per ClickHouse user driving each secret's `secret_string_wo_version`. **Write-only path only** — the version companion is rendered solely when `clickhouse_write_only = true`, and this variable has no effect on the legacy path (where Terraform tracks `secret_string` and detects changes to it normally). Shape: `{ admin = optional(number, 1), otel = optional(number, 1), monte_carlo = optional(number, 1), schema_owner = optional(number, 1), llm_worker = optional(number, 1), readonly_user = optional(number, 1) }`. Because a write-only password is invisible to Terraform it cannot detect drift on it — the secret is rewritten **only** when the matching version changes. This is the rotation lever: bump one field to rotate one user, all six to rotate the deployment. Bumping a field without supplying the matching `clickhouse_passwords_wo` value writes a freshly generated password. |
+| `clickhouse_previous_passwords` | `object` (sensitive) | `{}` (all sentinel) | The **previous** password per ClickHouse user, kept valid alongside the current one for the duration of a rotation — **legacy path only** (`clickhouse_write_only = false`). Setting any field while the flag is `true` is **rejected at plan time**, mirroring the guard on `clickhouse_passwords`. Same object shape as `clickhouse_passwords`. A field left null (the default) writes the sentinel `-` into the user's previous-password secret, which renders single-method auth — the behavior before this variable existed. Set a field only for the rotation window: supply the user's **current live** password here on the apply that mints a new one, then clear it on the cleanup apply. Both applies bump the matching `clickhouse_password_versions` field, which drives both of the user's sinks. Sensitive but not `ephemeral` (an ephemeral value cannot feed `secret_string`), so on this path the value is in state. **Requires chart >= 5.0.0 to have any server-side effect**; older charts ignore it. See [Rotating a ClickHouse password](#rotating-a-clickhouse-password). |
+| `clickhouse_previous_passwords_wo` | `object` (sensitive, ephemeral) | `{}` (all sentinel) | The **previous** password per ClickHouse user on the **write-only path only** (`clickhouse_write_only = true`). Setting any field while the flag is unset is **rejected at plan time**, mirroring `clickhouse_passwords_wo`. Semantics match `clickhouse_previous_passwords`; `ephemeral` as well as `sensitive`, so the value reaches neither state nor a saved plan file. Supply via a `.tfvars` file you do not commit or `TF_VAR_clickhouse_previous_passwords_wo` — never `-var` on a command line. See [Rotating a ClickHouse password](#rotating-a-clickhouse-password). |
 | `helm.opentelemetry_collector.resources` | `object` | `null` | Kubernetes resource requests/limits for the OTel Collector pods. Same shape as `helm.clickhouse.resources`. Omit to use chart defaults. |
 | `helm.opentelemetry_collector.replica_count` | `number` | `null` | Optional override for the OTel Collector replica count. `null` (default) lets the chart control it. **`0` is not honored by the chart** — its collector template treats `0` as unset and deploys the default count; to stop ingest for a maintenance window, act upstream (deny consumption on the SQS queues feeding the awss3 receivers, or pause OTLP senders). Non-zero overrides work as expected. |
 | `helm.opentelemetry_collector.awss3_receivers` | `map(object)` | `{}` | awss3 receivers for the OTel Collector, one entry per SQS-queue/S3-bucket pair. Each enabled entry renders a receiver with component ID `awss3/<key>` appended to the trace pipeline, and the otel-collector IRSA role gets SQS + S3 read permissions covering every enabled receiver. Entry shape: `{ enabled = optional(bool, true), sqs_queue_arn = string, sqs_queue_url = string, sqs_region = optional(string), s3_bucket = string, s3_region = optional(string), s3_prefix = optional(string, "") }`. Keys are restricted to `[a-zA-Z0-9_-]`, and the key `trace-export-ingest` is reserved for enabled entries while `trace_export_ingest` is set (a disabled entry under that key is dropped from the merge and is fine to keep); every receiver needs its own dedicated queue (duplicate `sqs_queue_arn` values are rejected — see [AWS S3 receivers](#aws-s3-receivers-for-the-otel-collector)). |
@@ -559,6 +563,7 @@ To use a StorageClass you manage outside this module, set `clickhouse_storage_cl
 | `clickhouse_schema_owner_credentials_secret_arn` | Secrets Manager ARN for the ClickHouse schema_owner user password |
 | `clickhouse_llm_worker_credentials_secret_arn` | Secrets Manager ARN for the ClickHouse llm_worker user password |
 | `clickhouse_readonly_user_credentials_secret_arn` | Secrets Manager ARN for the password of the ClickHouse SQL user `readonly_user` (profile: readonly, SELECT-only). Null when `helm.clickhouse.readonly_user` is disabled. |
+| `clickhouse_<user>_previous_credentials_secret_arn` | One per user (`admin`, `otel`, `monte_carlo`, `schema_owner`, `llm_worker`, `readonly_user`): Secrets Manager ARN of that user's **previous**-password secret, which holds the outgoing password during a rotation and the sentinel `-` otherwise. The `admin` and `readonly_user` ones are null when the matching user is disabled. See [Rotating a ClickHouse password](#rotating-a-clickhouse-password). |
 | `clickhouse_node_group` | Identity of the dedicated ClickHouse node group when active: `{ availability_zone, instance_type, size, label = { key, value }, taint = { key, value, effect } }`. Null when not active (`helm.deploy_charts = false`, `cluster.create = false`, or `manage_legacy_clickhouse_node_group = false`). Useful for verifying the resolved AZ during plan/apply review. |
 | `trace_export_ingest_bucket` | Name of the trace-export ingest bucket. Null when `trace_export_ingest` is unset. |
 | `trace_export_ingest_prefix` | Normalized key prefix the producer must write beneath. Null when `trace_export_ingest` is unset. |
@@ -582,6 +587,88 @@ aws secretsmanager get-secret-value \
   --secret-id <clickhouse_monte_carlo_credentials_secret_arn> \
   --query SecretString --output text
 ```
+
+## Rotating a ClickHouse password
+
+A rotation keeps the **outgoing** password valid alongside the new one for as long as the cutover takes, so no client is ever locked out by the moment of the rotation itself. Each user has two Secrets Manager secrets — `<cluster>/clickhouse/<slug>-credentials` (the current password, "A") and `<cluster>/clickhouse/<slug>-previous-credentials` (the overlap password, "B") — which the chart assembles into ClickHouse's `<auth_methods>` list. Outside a rotation B holds the sentinel `-` and the server has exactly one method, as it always did.
+
+**Requires `ao-data-platform` chart >= 5.0.0.** Older charts ignore the previous-password values entirely: the B secrets are written and never read, which is what makes adopting this module version inert. Supply `clickhouse_previous_passwords_wo` on the write-only path (`clickhouse_write_only = true`) or `clickhouse_previous_passwords` on the legacy path — the same mutually-exclusive pairing as the current-password variables.
+
+> [!IMPORTANT]
+> Three invariants hold for the whole rotation window — from the rotate apply until cleanup has been verified:
+>
+> - **Retain both passwords.** Every failure below recovers with one re-apply *as long as you still have both values*. Do not discard the old one when the new one goes live.
+> - **Never roll the chart back between rotation start and cleanup.** A pre-5.0.0 chart renders single-method auth, which kills the old password instantly for everyone still holding it.
+> - **Never edit a users.d fragment's `include_from` on a running cluster.** A missing `include_from` target is fatal at container start — the pod crash-loops rather than starting with a degraded config.
+
+### The sequence
+
+Rotating one user (`otel` here) is five steps. Rotating all six is the same steps with six fields set instead of one.
+
+**1. Capture a baseline.** Records each secret's `AWSCURRENT` version ID and a sha256 digest, so the post-apply check can prove a write actually happened. The file holds no passwords and lands mode `600`.
+
+```bash
+make rotation-check CLUSTER=ao-dev-us1 SLUG=otel
+# → baseline written to ao-dev-us1-otel-rotation-baseline.txt
+```
+
+**2. The rotate apply.** Read the live password out of Secrets Manager, supply it as the *previous* password, choose the new one, and bump the version — all in one change:
+
+```bash
+aws secretsmanager get-secret-value \
+  --secret-id ao-dev-us1/clickhouse/otel-credentials \
+  --query SecretString --output text          # this is P1; keep it out of shell history
+```
+
+```hcl
+clickhouse_password_versions     = { otel = 2 }      # was 1 — the only thing that triggers a write
+clickhouse_previous_passwords_wo = { otel = "<P1>" } # the outgoing password, kept valid
+clickhouse_passwords_wo          = { otel = "<P2>" } # the new one; omit to have one generated
+```
+
+Supply these through a `.tfvars` file you do not commit, or `TF_VAR_clickhouse_previous_passwords_wo` / `TF_VAR_clickhouse_passwords_wo` — never `-var` on a command line. Then `terraform apply`. The module writes B before A, so the overlap password is in place before the current one moves.
+
+> [!WARNING]
+> **Choose `<P2>` explicitly rather than letting it be generated, or read it back out of Secrets Manager before step 5.** The cleanup apply bumps the same version field, which rewrites *both* sinks — so it needs the live current password re-supplied. Terraform cannot read a write-only value back, and with `clickhouse_passwords_wo.otel` left null the cleanup would mint a *third* password with no overlap left, locking out every client that had just moved to `P2`.
+
+**3. Make it live and verify it.** A secret change alone does **not** reload ClickHouse's users config — Kubernetes swaps a symlink under the mount, which defeats the server's substitution-source watcher. The check below force-syncs the ExternalSecret, waits for the kubelet mount refresh, issues `SYSTEM RELOAD CONFIG` on every ClickHouse pod (instant, restartless, no dropped connections), and then authenticates as the rotated user with *both* passwords:
+
+```bash
+make rotation-check CLUSTER=ao-dev-us1 SLUG=otel \
+  BASELINE=ao-dev-us1-otel-rotation-baseline.txt
+```
+
+Exit `0` means the write landed and both methods are live on every pod. Exit `1` means either the write never happened (the version bump was forgotten — the apply succeeds silently in that case) or the expected auth state is not live after the reload. **Do not proceed to step 4 until this passes**; rolling clients against a server that never learned `P2` is what turns a no-op into an outage. Needs `kubectl` pointed at the cell and AWS credentials that can read the ClickHouse secrets, plus the `admin` user enabled — it is the reload and probe user.
+
+**4. Roll the clients, unhurried.** Any mix of `P1` and `P2` holders is valid for as long as this takes. In-cluster consumers pick up `P2` on their next pod start (roll the collector and llm-worker deliberately, or let churn do it); the schema job gets it at its next helm upgrade; external consumers cut over on their own schedule.
+
+**5. The cleanup apply.** Once the checklist says everyone has moved, bump the version again, re-supply the now-current password, and clear the previous one:
+
+```hcl
+clickhouse_password_versions     = { otel = 3 }      # was 2
+clickhouse_previous_passwords_wo = {}                # back to the sentinel "-"
+clickhouse_passwords_wo          = { otel = "<P2>" } # unchanged value, re-supplied
+```
+
+Apply, then re-run the check — capture a fresh baseline first, since the version IDs moved in step 3:
+
+```bash
+make rotation-check CLUSTER=ao-dev-us1 SLUG=otel     # fresh baseline
+# ... apply ...
+make rotation-check CLUSTER=ao-dev-us1 SLUG=otel BASELINE=ao-dev-us1-otel-rotation-baseline.txt
+```
+
+With B back to the sentinel the check inverts its last assertion: the old password must now be **rejected**. That rejection is the proof that the second auth method is really gone.
+
+### When to run cleanup
+
+There is no technical signal for "everyone has moved off the old password." ClickHouse's session and query logs record the authentication *type*, not which of a user's listed methods matched, so the server cannot tell you whether anything still holds `P1`. Cleanup is therefore gated on an operational checklist plus soak time, not on a query.
+
+Erring late is cheap: the overlap costs nothing while it sits, and the failure mode of erring early is loud and fast to undo — a straggler gets `AUTHENTICATION_FAILED`, and re-supplying the previous password restores it within minutes.
+
+### Rotating on the legacy path
+
+Deployments still on `clickhouse_write_only = false` rotate the same way, with `clickhouse_previous_passwords` and `clickhouse_passwords` in place of the `_wo` variables. Two differences: there is no version lever (Terraform tracks `secret_string` directly, so editing the value is detected and written like any other argument — leave `clickhouse_password_versions` alone), and both passwords land in Terraform state, which is what the write-only path exists to fix. Step 2's "read the live password first" is also unnecessary — it is already in your configuration.
 
 ## Upgrading
 
@@ -781,7 +868,10 @@ On the write-only path they do regenerate an ephemeral password every plan — a
 
 Rotation via `clickhouse_password_versions` applies to deployments on the write-only path (`clickhouse_write_only = true`). On the legacy path there is no version lever: Terraform tracks `secret_string` directly, so editing `clickhouse_passwords` is detected and written like any other argument.
 
-Bump the relevant field in `clickhouse_password_versions` and apply. Without a matching `clickhouse_passwords_wo` entry the new value is freshly generated; with one, your supplied value is written. Rotation propagates as: Secrets Manager → ESO resync → the ClickHouse operator re-renders `users.xml`. It requires no SQL — passwords are declared in the operator's `users:` section via `valueFrom.secretKeyRef`, not with `ALTER USER`.
+Bump the relevant field in `clickhouse_password_versions` and apply. Without a matching `clickhouse_passwords_wo` entry the new value is freshly generated; with one, your supplied value is written. Rotation propagates as: Secrets Manager → ESO resync → the mounted users config → ClickHouse. It requires no SQL — passwords are declared in configuration, not with `ALTER USER`.
+
+> [!IMPORTANT]
+> **On chart >= 5.0.0 the last hop is not automatic, and rotating without an overlap password locks out every client that still holds the old one.** A secret change alone does not reload ClickHouse's users config, and the new password replaces the old one the instant the reload happens. Follow [Rotating a ClickHouse password](#rotating-a-clickhouse-password) instead of this section: it supplies the outgoing password as a second auth method, issues the reload, and verifies both. The `version_id` check below is step 3 of that procedure, automated as `make rotation-check`.
 
 **After any rotation, confirm the secret's version ID changed. This step is mandatory.** `version_id` on `aws_secretsmanager_secret_version` is computed, persisted in state, and is not a secret, so it is a safe positive signal: AWS issues a new version ID on every `PutSecretValue`, and if no write occurred it does not change. Capture it before the apply and compare after:
 
@@ -980,7 +1070,11 @@ make sanity-check                # fmt check + validate (CI pipeline)
 make test                        # variable-validation tests (requires Terraform >= 1.11)
 make selftest-verify-no-plaintext  # regression test for the plaintext detector (CI pipeline; needs jq)
 make verify-no-plaintext STATE=state.json SENTINEL_FILE=sentinels.txt
+make selftest-rotation-check     # regression test for the rotation checker (CI pipeline; needs jq)
+make rotation-check CLUSTER=ao-dev-us1 SLUG=otel [BASELINE=<file>]
 ```
+
+`make rotation-check` wraps `hack/rotation-check.sh`, the post-apply verification for a credential rotation — see [Rotating a ClickHouse password](#rotating-a-clickhouse-password). It talks to AWS and the cell's cluster; `make selftest-rotation-check` exercises its version-diff logic against recorded `describe-secret` fixtures and needs neither.
 
 `make verify-no-plaintext` is the repo-local convenience wrapper around `hack/verify-no-plaintext.sh` — the same script a Registry consumer runs out of `.terraform/modules/<name>/hack/`, documented under [Upgrading to v3.0.0](#upgrading-to-v300). `SENTINEL_FILE` takes one password per line; the legacy `SENTINELS="a b"` form still works but puts secrets on a command line and cannot carry a value containing whitespace.
 

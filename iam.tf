@@ -651,9 +651,22 @@ resource "aws_iam_role_policy" "external_secrets" {
             aws_secretsmanager_secret.clickhouse_monte_carlo_password.arn,
             aws_secretsmanager_secret.clickhouse_schema_owner_password.arn,
             aws_secretsmanager_secret.clickhouse_llm_worker_password.arn,
+            # The overlap passwords (YET-2680). ESO reads both halves to assemble
+            # the auth-methods file; without these it syncs the bundle with the
+            # previous key missing and every rotation renders single-method auth.
+            aws_secretsmanager_secret.clickhouse_otel_previous_password.arn,
+            aws_secretsmanager_secret.clickhouse_monte_carlo_previous_password.arn,
+            aws_secretsmanager_secret.clickhouse_schema_owner_previous_password.arn,
+            aws_secretsmanager_secret.clickhouse_llm_worker_previous_password.arn,
           ],
-          local.clickhouse_admin_enabled ? [aws_secretsmanager_secret.clickhouse_admin_password[0].arn] : [],
-          local.clickhouse_readonly_user_enabled ? [aws_secretsmanager_secret.clickhouse_readonly_user_password[0].arn] : [],
+          local.clickhouse_admin_enabled ? [
+            aws_secretsmanager_secret.clickhouse_admin_password[0].arn,
+            aws_secretsmanager_secret.clickhouse_admin_previous_password[0].arn,
+          ] : [],
+          local.clickhouse_readonly_user_enabled ? [
+            aws_secretsmanager_secret.clickhouse_readonly_user_password[0].arn,
+            aws_secretsmanager_secret.clickhouse_readonly_user_previous_password[0].arn,
+          ] : [],
         )
       },
       {

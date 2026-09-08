@@ -1,4 +1,5 @@
-.PHONY: default sanity-check test verify-no-plaintext selftest-verify-no-plaintext
+.PHONY: default sanity-check test verify-no-plaintext selftest-verify-no-plaintext \
+	rotation-check selftest-rotation-check
 
 default:
 	@echo "Read the readme"
@@ -110,3 +111,35 @@ selftest-verify-no-plaintext:
 		rm -rf "$$tmp"; \
 		[ "$$status" -ne 0 ] && [ "$$matched" -eq 1 ] || { echo "FAIL: a coincidentally-matching filename glob-expanded the sentinel into a false PASS (status=$$status, sentinel reported=$$matched)"; exit 1; }
 	@echo "OK: verify-no-plaintext self-test passed"
+
+rotation-check:
+	# Verify a ClickHouse password rotation actually landed in Secrets Manager and
+	# is live on every ClickHouse pod. CLUSTER and SLUG are required; BASELINE is
+	# the file written by a pre-rotation run (one without BASELINE), which is what
+	# turns the run from baseline capture into a pass/fail check.
+	#   make rotation-check CLUSTER=ao-dev-us1 SLUG=otel                  # capture
+	#   make rotation-check CLUSTER=ao-dev-us1 SLUG=otel BASELINE=~/rot.txt  # check
+	#
+	# Needs kubectl pointed at the cell's cluster and AWS credentials that can read
+	# the ClickHouse secrets. Passwords are never printed; see the script header.
+	@test -n "$(CLUSTER)" || { echo "CLUSTER=<cluster-name> is required"; exit 2; }
+	@test -n "$(SLUG)" || { echo "SLUG=<otel|monte-carlo|schema-owner|llm-worker|admin|readonly-user> is required"; exit 2; }
+	./hack/rotation-check.sh "$(CLUSTER)" "$(SLUG)" $(if $(BASELINE),--baseline "$(BASELINE)",)
+
+selftest-rotation-check:
+	# Regression test for hack/rotation-check.sh against recorded fixtures: the
+	# moved case (exit 0), the unmoved case (exit 1), and usage errors (exit 2).
+	# Fixture mode reads a recorded describe-secret JSON, so this needs no AWS
+	# credentials and no cluster.
+	@status=0; ./hack/rotation-check.sh --fixture tests/fixtures/rotation-versions-after.json \
+		--baseline-fixture tests/fixtures/rotation-versions-before.json >/dev/null 2>&1 || status=$$?; \
+		[ "$$status" -eq 0 ] || { echo "FAIL: a landed rotation expected exit 0, got $$status"; exit 1; }
+	@status=0; ./hack/rotation-check.sh --fixture tests/fixtures/rotation-versions-before.json \
+		--baseline-fixture tests/fixtures/rotation-versions-before.json >/dev/null 2>&1 || status=$$?; \
+		[ "$$status" -eq 1 ] || { echo "FAIL: an unmoved secret expected exit 1, got $$status"; exit 1; }
+	@status=0; ./hack/rotation-check.sh >/dev/null 2>&1 || status=$$?; \
+		[ "$$status" -eq 2 ] || { echo "FAIL: missing arguments expected exit 2, got $$status"; exit 1; }
+	# A fixture flag without its pair is an input error, not a silent pass.
+	@status=0; ./hack/rotation-check.sh --fixture tests/fixtures/rotation-versions-after.json >/dev/null 2>&1 || status=$$?; \
+		[ "$$status" -eq 2 ] || { echo "FAIL: a lone --fixture expected exit 2, got $$status"; exit 1; }
+	@echo "OK: rotation-check self-test passed"
