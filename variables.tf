@@ -640,6 +640,11 @@ variable "helm" {
     "ao-llm-worker"). llm_worker.image_tag pins the image tag; defaults to
     "latest-aws". Pin to a released tag (e.g. "1.1.0-aws") for production.
 
+    llm_worker.env forwards arbitrary extra environment variables to the
+    llm-worker container (e.g. BEDROCK_INFERENCE_PROFILES). Values are rendered
+    as plain (non-secret) env vars; keys already set by this module (CH_HOST,
+    LLM_PROVIDER, AWS_REGION, etc.) cannot be overridden this way.
+
     clickhouse.resources, opentelemetry_collector.resources, and llm_worker.resources
     are optional Kubernetes resource requests/limits passed through to the chart for
     each workload. Each accepts { requests = { ... }, limits = { ... } } with
@@ -742,6 +747,7 @@ variable "helm" {
       bedrock_region   = optional(string, null)
       image_repository = optional(string, null)
       image_tag        = optional(string, "latest-aws")
+      env              = optional(map(string), {})
       resources = optional(object({
         requests = optional(map(string), null)
         limits   = optional(map(string), null)
