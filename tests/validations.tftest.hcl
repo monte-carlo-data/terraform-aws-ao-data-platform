@@ -1336,6 +1336,55 @@ run "llm_worker_replica_override_zero_renders" {
   }
 }
 
+# llm_worker.env must render as a list of {name, value} pairs sorted by key
+# (the chart's llmWorker.env is a plain list spliced into the container spec,
+# so caller map ordering must not affect the rendered plan), and must be
+# omitted entirely when the map is empty (the default).
+run "llm_worker_env_renders_sorted_pairs" {
+  command = plan
+  variables {
+    cluster = {
+      create                = false
+      name                  = "test-cluster"
+      existing_cluster_name = "test-cluster"
+    }
+    helm = {
+      deploy_charts = false
+      llm_worker = {
+        env = {
+          BEDROCK_INFERENCE_PROFILES = "{}"
+          MAX_WORKERS                = "40"
+        }
+      }
+    }
+  }
+  assert {
+    condition = local.helm_llm_worker_env_block.env == [
+      { name = "BEDROCK_INFERENCE_PROFILES", value = "{}" },
+      { name = "MAX_WORKERS", value = "40" },
+    ]
+    error_message = "helm_llm_worker_env_block.env must render as {name, value} pairs sorted by key."
+  }
+}
+
+run "llm_worker_env_omitted_when_empty" {
+  command = plan
+  variables {
+    cluster = {
+      create                = false
+      name                  = "test-cluster"
+      existing_cluster_name = "test-cluster"
+    }
+    helm = {
+      deploy_charts = false
+    }
+  }
+  assert {
+    condition     = length(local.helm_llm_worker_env_block) == 0
+    error_message = "helm_llm_worker_env_block must omit env when llm_worker.env is empty (the default)."
+  }
+}
+
 # --- awss3 receivers: map-key and dedicated-queue validations ---
 #
 # awss3_receivers map keys become OTel component IDs ("awss3/<key>"), so the

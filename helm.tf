@@ -334,7 +334,7 @@ resource "helm_release" "ao_data_platform" {
             "eks.amazonaws.com/role-arn" = aws_iam_role.llm_worker.arn
           }
         }
-      }, local.helm_llm_worker_resources_block, local.helm_llm_worker_replica_block)
+      }, local.helm_llm_worker_resources_block, local.helm_llm_worker_replica_block, local.helm_llm_worker_env_block)
     }, local.helm_keeper_block))
   ]
 
