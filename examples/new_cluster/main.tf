@@ -4,7 +4,7 @@
 #   aws eks update-kubeconfig --name <eks_cluster_name output> --region us-east-1
 
 terraform {
-  required_version = ">= 1.11"
+  required_version = ">= 1.12"
   required_providers {
     aws = {
       source  = "hashicorp/aws"

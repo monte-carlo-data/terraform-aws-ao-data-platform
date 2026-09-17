@@ -1,7 +1,10 @@
 terraform {
-  # >= 1.11 for write-only arguments (secret_string_wo / secret_string_wo_version),
-  # which keep the ClickHouse passwords out of state and plan files (YET-2514).
-  required_version = ">= 1.11"
+  # Write-only arguments (secret_string_wo / secret_string_wo_version) need >= 1.11;
+  # the floor is 1.12 because 1.11 does not short-circuit ||/&& and fails
+  # pre-existing null-guard validations. 1.12 is the oldest version the test
+  # suite passes. The write-only arguments keep the ClickHouse passwords out of
+  # state and plan files (YET-2514).
+  required_version = ">= 1.12"
 
   required_providers {
     aws = {
