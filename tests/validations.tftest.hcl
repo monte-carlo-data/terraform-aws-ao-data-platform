@@ -33,7 +33,7 @@
 //     main_node_group_size_resolved) — simple coalesce chains; regressions
 //     would show up in plan diffs during code review.
 //
-// mock_provider requires Terraform >= 1.7; the module's own floor is >= 1.11
+// mock_provider requires Terraform >= 1.7; the module's own floor is >= 1.12
 // (write-only arguments), so the module floor is the binding constraint and
 // these tests carry no extra toolchain requirement.
 
@@ -499,11 +499,13 @@ run "clickhouse_admin_readonly_enabled_create_secrets" {
 
 # --- clickhouse_password_versions drive the write-only version companions ---
 #
-# secret_string_wo_version is the ONLY part of this design that persists to
-# state, and the only thing that triggers a rewrite of the secret. If it stops
-# tracking the input, rotation silently becomes a no-op — nothing else would
-# fail. The write-only value itself is deliberately unassertable: its absence
-# from the plan is the feature.
+# secret_string_wo_version is the only INPUT in this design that persists to
+# state (the provider also persists the computed has_secret_string_wo and
+# version_id — neither is a secret, and both are what the after-the-fact
+# checks read), and the only thing that triggers a rewrite of the secret. If
+# it stops tracking the input, rotation silently becomes a no-op — nothing
+# else would fail. The write-only value itself is deliberately unassertable:
+# its absence from the plan is the feature.
 #
 # clickhouse_write_only = true is required: the version companion is rendered
 # only on the write-only path (it is null on the legacy path, which
@@ -577,8 +579,15 @@ run "password_versions_plumb_to_wo_version" {
   # state is the plaintext this path exists to remove, so a surviving instance
   # would defeat the whole opt-in.
   assert {
-    condition     = length(random_password.clickhouse_otel) == 0 && length(random_password.clickhouse_admin) == 0
-    error_message = "clickhouse_write_only = true must drop the managed random_password generators to count = 0."
+    condition = alltrue([
+      length(random_password.clickhouse_otel) == 0,
+      length(random_password.clickhouse_monte_carlo) == 0,
+      length(random_password.clickhouse_schema_owner) == 0,
+      length(random_password.clickhouse_llm_worker) == 0,
+      length(random_password.clickhouse_admin) == 0,
+      length(random_password.clickhouse_readonly_user) == 0,
+    ])
+    error_message = "clickhouse_write_only = true must drop every managed random_password generator to count = 0."
   }
   # The core invariant of this path, and the one thing a plan CAN show about it:
   # secret_string must be null on every sink. If a refactor ever fed a password
@@ -598,6 +607,81 @@ run "password_versions_plumb_to_wo_version" {
   }
 }
 
+# A version field below 1 is a plausible typo whose behavior against the
+# provider is undefined — rejected at plan time by the per-field validation on
+# clickhouse_password_versions (which is also nullable = false).
+
+run "password_version_below_one_rejected" {
+  command = plan
+  variables {
+    cluster = {
+      create                = false
+      name                  = "test-cluster"
+      existing_cluster_name = "test-cluster"
+    }
+    helm                  = { deploy_charts = false }
+    clickhouse_write_only = true
+    clickhouse_password_versions = {
+      otel = 0
+    }
+  }
+  expect_failures = [var.clickhouse_password_versions]
+}
+
+# --- write-only path with nothing supplied: gated users generate ---
+#
+# password_versions_plumb_to_wo_version supplies all six passwords, so its
+# coalesce(supplied, one(ephemeral...)) never falls to the generator. This run
+# supplies none with both gated users enabled, so the gated ephemeral
+# generators' compound count gates (write_only && user_enabled) are exercised
+# in the generate direction. The values themselves are unassertable by design —
+# the signal is that the plan succeeds at all: a miscopied gate (e.g. admin's
+# generator keyed off readonly_user's enabled) would make coalesce(null,
+# one([])) a plan error in exactly this shape.
+
+run "write_only_unsupplied_passwords_generate" {
+  command = plan
+  variables {
+    cluster = {
+      create                = false
+      name                  = "test-cluster"
+      existing_cluster_name = "test-cluster"
+    }
+    helm = {
+      deploy_charts = false
+      clickhouse = {
+        admin         = { enabled = true }
+        readonly_user = { enabled = true }
+      }
+    }
+    clickhouse_write_only = true
+    # clickhouse_passwords_wo deliberately unset — all six fields fall to the
+    # ephemeral generators, including both gated ones.
+  }
+  assert {
+    condition = alltrue([
+      aws_secretsmanager_secret_version.clickhouse_otel_password.secret_string_wo_version == 1,
+      aws_secretsmanager_secret_version.clickhouse_monte_carlo_password.secret_string_wo_version == 1,
+      aws_secretsmanager_secret_version.clickhouse_schema_owner_password.secret_string_wo_version == 1,
+      aws_secretsmanager_secret_version.clickhouse_llm_worker_password.secret_string_wo_version == 1,
+      aws_secretsmanager_secret_version.clickhouse_admin_password[0].secret_string_wo_version == 1,
+      aws_secretsmanager_secret_version.clickhouse_readonly_user_password[0].secret_string_wo_version == 1,
+    ])
+    error_message = "With clickhouse_passwords_wo unset, every sink's secret_string_wo_version must default to 1 — an omitted user is generated, not skipped."
+  }
+  assert {
+    condition = alltrue([
+      aws_secretsmanager_secret_version.clickhouse_otel_password.secret_string == null,
+      aws_secretsmanager_secret_version.clickhouse_monte_carlo_password.secret_string == null,
+      aws_secretsmanager_secret_version.clickhouse_schema_owner_password.secret_string == null,
+      aws_secretsmanager_secret_version.clickhouse_llm_worker_password.secret_string == null,
+      aws_secretsmanager_secret_version.clickhouse_admin_password[0].secret_string == null,
+      aws_secretsmanager_secret_version.clickhouse_readonly_user_password[0].secret_string == null,
+    ])
+    error_message = "The write-only path invariant holds with no supplied passwords: every sink's secret_string must be null."
+  }
+}
+
 # --- the two password variables are mutually exclusive with the flag ---
 #
 # Supplying the wrong one for the active path is a silent no-op: the module
@@ -607,11 +691,8 @@ run "password_versions_plumb_to_wo_version" {
 # incident this flag exists to prevent — so it is rejected at plan time by a
 # cross-variable validation on each variable rather than merely documented.
 #
-# This is NOT the guard the README rules out under "Why there is no plan-time
-# guard": that one is about comparing the desired password against the LIVE
-# secret, which needs a read that breaks fresh installs and is pure noise for
-# the four auto-generated users. These validations compare nothing — they test
-# null-ness only, and so leak nothing about any password.
+# Not the guard the README rules out under "Why there is no plan-time guard" —
+# the validation comments in variables.tf own that distinction.
 
 run "legacy_passwords_with_write_only_flag_rejected" {
   command = plan
@@ -623,8 +704,9 @@ run "legacy_passwords_with_write_only_flag_rejected" {
     }
     helm                  = { deploy_charts = false }
     clickhouse_write_only = true
-    # Belongs in clickhouse_passwords_wo on this path.
-    clickhouse_passwords = { otel = "supplied-otel" }
+    # Belongs in clickhouse_passwords_wo on this path. admin, not otel: the two
+    # rejection runs sample different fields of the validation's enumeration.
+    clickhouse_passwords = { admin = "supplied-admin" }
   }
   expect_failures = [var.clickhouse_passwords]
 }
@@ -639,7 +721,8 @@ run "write_only_passwords_without_flag_rejected" {
     }
     helm = { deploy_charts = false }
     # clickhouse_write_only left unset — belongs in clickhouse_passwords here.
-    clickhouse_passwords_wo = { otel = "supplied-otel" }
+    # readonly_user, not otel: the two runs sample different fields.
+    clickhouse_passwords_wo = { readonly_user = "supplied-ro" }
   }
   expect_failures = [var.clickhouse_passwords_wo]
 }
@@ -647,10 +730,10 @@ run "write_only_passwords_without_flag_rejected" {
 # --- the write-only path is opt-in: default off keeps the legacy path ---
 #
 # This is the regression guard for every deployment that has NOT opted in yet.
-# The fleet shares one module pin, so if clickhouse_write_only ever defaulted on
-# (or the version companion leaked onto the legacy path), adopting a new module
-# version would rewrite live ClickHouse secrets on the next apply of every
-# deployment — which is exactly the incident this flag exists to prevent.
+# If clickhouse_write_only ever defaulted on (or the version companion leaked
+# onto the legacy path), adopting a new module version would rewrite live
+# ClickHouse secrets on the next apply of every deployment — which is exactly
+# the incident this flag exists to prevent.
 #
 # Two things pin it, both plan-visible: secret_string_wo_version must be null
 # (no write-only write is being planned at all), and the managed generator must
@@ -804,8 +887,15 @@ run "legacy_empty_string_password_writes_empty_secret" {
     error_message = "An empty-string clickhouse_passwords entry counts as SUPPLIED on the legacy path (v2.4.2 behavior), so no managed generator may be created for it."
   }
   assert {
-    condition     = nonsensitive(aws_secretsmanager_secret_version.clickhouse_otel_password.secret_string) == ""
-    error_message = "An empty-string clickhouse_passwords entry must be written through as an empty secret, exactly as v2.4.2 did — generating a password instead would rotate a live credential on a mere version bump."
+    condition = alltrue([
+      nonsensitive(aws_secretsmanager_secret_version.clickhouse_otel_password.secret_string) == "",
+      nonsensitive(aws_secretsmanager_secret_version.clickhouse_monte_carlo_password.secret_string) == "",
+      nonsensitive(aws_secretsmanager_secret_version.clickhouse_schema_owner_password.secret_string) == "",
+      nonsensitive(aws_secretsmanager_secret_version.clickhouse_llm_worker_password.secret_string) == "",
+      nonsensitive(aws_secretsmanager_secret_version.clickhouse_admin_password[0].secret_string) == "",
+      nonsensitive(aws_secretsmanager_secret_version.clickhouse_readonly_user_password[0].secret_string) == "",
+    ])
+    error_message = "An empty-string clickhouse_passwords entry must be written through as an empty secret on every sink, exactly as v2.4.2 did — generating a password instead would rotate a live credential on a mere version bump."
   }
   # Still the legacy path throughout: an empty string must not smuggle a
   # deployment onto the write-only path.

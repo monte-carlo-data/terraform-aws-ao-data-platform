@@ -344,13 +344,9 @@ resource "helm_release" "ao_data_platform" {
       error_message = "clickhouse_domain and otel_collector_domain are required when helm.deploy_charts = true."
     }
 
-    # Cross-variable check enforced here rather than as a variable validation.
-    # The original reason (cross-variable validation needs Terraform >= 1.9, and
-    # the module floor was >= 1.3) no longer applies now that the floor is 1.11,
-    # so converting these to variable validations — which would fail earlier and
-    # with a better message — is possible. Deliberately left for its own change.
-    # You cannot request more ClickHouse replicas than there are per-AZ node
-    # groups to place them on.
+    # Cross-variable, so enforced as a precondition here rather than as a
+    # variable validation. You cannot request more ClickHouse replicas than
+    # there are per-AZ node groups to place them on.
     precondition {
       condition     = var.clickhouse_replica_count <= max(length(var.clickhouse_availability_zones), 1)
       error_message = "clickhouse_replica_count (${var.clickhouse_replica_count}) must not exceed the number of clickhouse_availability_zones (${length(var.clickhouse_availability_zones)}). You cannot place more replicas than there are single-AZ node groups; with no clickhouse_availability_zones set, only 1 replica is valid."

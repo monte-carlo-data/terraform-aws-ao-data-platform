@@ -1,0 +1,43 @@
+{
+  "format_version": "1.0",
+  "values": {
+    "root_module": {
+      "resources": [
+        {
+          "address": "aws_secretsmanager_secret_version.clickhouse_otel_password",
+          "mode": "managed",
+          "type": "aws_secretsmanager_secret_version",
+          "name": "clickhouse_otel_password",
+          "values": {
+            "has_secret_string_wo": true,
+            "secret_string_wo_version": 1,
+            "version_id": "11111111-2222-3333-4444-555555555555",
+            "secret_id": "arn:aws:secretsmanager:us-east-1:1:secret:x"
+          }
+        },
+        {
+          "address": "aws_secretsmanager_secret_version.app_api_key",
+          "mode": "managed",
+          "type": "aws_secretsmanager_secret_version",
+          "name": "app_api_key",
+          "values": {
+            "secret_string": "app-api-key-plaintext-0004",
+            "version_id": "66666666-7777-8888-9999-000000000000",
+            "secret_id": "arn:aws:secretsmanager:us-east-1:1:secret:y"
+          }
+        },
+        {
+          "address": "random_password.app_token",
+          "mode": "managed",
+          "type": "random_password",
+          "name": "app_token",
+          "values": {
+            "length": 32,
+            "special": false,
+            "result": "app-token-plaintext-0005"
+          }
+        }
+      ]
+    }
+  }
+}

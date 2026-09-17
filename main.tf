@@ -200,6 +200,14 @@ locals {
     }
   }
 
+  # admin is a gated break-glass superuser (off by default), so — like
+  # readonly_user — its password, secret, and chart wiring are all conditional
+  # on its enabled flag. Shared: consumed from secrets.tf, iam.tf, outputs.tf
+  # and the chart wiring below. Must stay known at plan time — see the locals
+  # comment in secrets.tf.
+  clickhouse_admin_enabled         = try(var.helm.clickhouse.admin.enabled, false)
+  clickhouse_readonly_user_enabled = try(var.helm.clickhouse.readonly_user.enabled, false)
+
   # Singleton map merged into clickhouse helm values when readonly_user is enabled.
   # Mirrors the otel ExternalSecret shape: ESO syncs from Secrets Manager into
   # the K8s Secret the chart consumes.
