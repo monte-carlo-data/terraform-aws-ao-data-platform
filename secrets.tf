@@ -1,59 +1,34 @@
 # ClickHouse Passwords — generated when not caller-supplied; stored in Secrets
 # Manager and synced into the cluster by ESO (never passed through Helm values).
 #
-# TWO PATHS, selected per deployment by var.clickhouse_write_only:
-#
-#   legacy (flag false — the default): managed `random_password` generators and
-#   the ordinary `secret_string` argument. Passwords are in Terraform state.
-#   Caller-supplied values come from var.clickhouse_passwords.
-#
-#   write-only (flag true): `ephemeral "random_password"` generators and
-#   `secret_string_wo` + `secret_string_wo_version`. No password reaches state
-#   or plan files (YET-2514). Caller-supplied values come from the ephemeral
-#   var.clickhouse_passwords_wo.
-#
-# The flag exists because a fleet that shares one module pin across many
-# deployments cannot stage the version bump per deployment. Adopting v3.0.0
-# therefore changes nothing until a deployment opts in, and each deployment
-# migrates on its own apply.
+# TWO PATHS, selected per deployment by var.clickhouse_write_only: legacy (flag
+# false, the default) uses managed `random_password` generators and
+# `secret_string` — passwords are in Terraform state; write-only (flag true)
+# uses ephemeral generators and `secret_string_wo` + `secret_string_wo_version`
+# — no password reaches state or plan files (YET-2514). The flag's fleet
+# rationale and the re-mint/no-op behavior: variables.tf and README "Upgrading
+# to v3.0.0".
 #
 # Every sink declares BOTH secret_string and secret_string_wo, with exactly one
-# of them non-null. The provider's mutual exclusion accepts an explicit null, so
-# this validates; declaring both is what makes the opt-in an in-place update of
-# the existing secret version (- secret_string -> null, + secret_string_wo_version
+# non-null (the provider's mutual exclusion accepts an explicit null, so this
+# validates). Declaring both is what makes the opt-in an in-place update of the
+# existing secret version (- secret_string -> null, + secret_string_wo_version
 # = 1) rather than a destroy/create, which would leave a window where ESO cannot
 # fetch the secret.
 #
-# Consequences of the write-only path worth knowing:
-#   - Each plan/apply mints a NEW ephemeral value. It is only ever written when
-#     the matching clickhouse_password_versions field changes, so a steady-state
-#     apply is a no-op despite the regenerated value.
-#   - The *_wo locals are ephemeral (they reference an ephemeral resource), so
-#     Terraform rejects any use of them outside a write-only argument. That is
-#     the invariant this path buys, enforced by the language.
+# The *_wo locals are ephemeral: legal in write-only arguments, provider config,
+# other ephemeral resources, ephemeral outputs and provisioners — never anywhere
+# that would persist them. That invariant is enforced by the language.
 
 locals {
-  # admin is a gated break-glass superuser (off by default), so — like
-  # readonly_user — its password, secret, and chart wiring are all conditional
-  # on its enabled flag. Both flags are non-ephemeral: they derive from
-  # var.helm, so they may legally drive count.
-  clickhouse_admin_enabled         = try(var.helm.clickhouse.admin.enabled, false)
-  clickhouse_readonly_user_enabled = try(var.helm.clickhouse.readonly_user.enabled, false)
-
   # Two locals per user — one per path — each already null on the path it does
-  # not serve, so every sink can wire both unconditionally.
+  # not serve, so every sink can wire both unconditionally. Caller-supplied
+  # password wins; otherwise the generated one. Three load-bearing details:
   #
-  # Caller-supplied password wins; otherwise the generated one. Three details in
-  # these expressions are load-bearing:
-  #
-  #   - The two paths deliberately differ on how a supplied value is tested.
-  #     The legacy locals use a `!= null` ternary, byte-for-byte the v2.4.2
-  #     expression, so `otel = ""` writes an empty secret exactly as it did
-  #     before — a deployment that bumps to v3.0.0 without setting the flag sees
-  #     no behavior change at all, which is the promise this release exists to
-  #     make. The write-only locals use coalesce, which additionally treats ""
-  #     as absent and generates instead; that is the better semantic and the
-  #     path is new, so there is no prior behavior to preserve.
+  #   - The paths deliberately disagree on what "" means: legacy tests `!= null`
+  #     (byte-for-byte v2.4.2), so a supplied "" writes an empty secret;
+  #     write-only uses coalesce, so "" generates instead. See the gate comment
+  #     below and legacy_empty_string_password_writes_empty_secret.
   #   - Every local reads its generator through `one(<generator>[*].result)`,
   #     never `[0]`, because the inactive path leaves its generator at count 0
   #     and a bare [0] index on an empty list is an error. For the legacy locals
@@ -69,24 +44,17 @@ locals {
   # conditional whose predicate is KNOWN, which var.clickhouse_write_only is
   # because it is a literal bool in a deployment's config.
   #
-  # Keep it that way. If the flag is ever wired to something unknown at plan
+  # Keep it that way: if the flag is ever wired to something unknown at plan
   # time (a data source, a resource attribute), both branches get evaluated and
-  # the write-only locals fail — `one()` is not protection against that.
+  # the write-only locals fail — `one()` is not protection against that. The
+  # same known-ness requirement covers the two *_enabled locals (main.tf) that
+  # the gated write-only locals also predicate on.
   #
-  # The same requirement applies to local.clickhouse_admin_enabled and
-  # local.clickhouse_readonly_user_enabled, which the two gated write-only
-  # locals also predicate on: with the flag true, the user disabled and no
-  # password supplied, the branch those locals would be forced onto is again
-  # `coalesce(null, one(<empty>))`. Both derive from var.helm via try(), so they
-  # are always known in practice — but they carry the same constraint as the
-  # flag, and for the same reason.
-  #
-  # One consequence worth naming: the count gates' `== null` checks on
-  # var.clickhouse_passwords are now defensive rather than load-bearing on the
-  # write-only path, because the validation on that variable already forces
-  # every field null whenever the flag is set. Failing one would take a
-  # two-part regression (validation removed AND gate broken). Worth keeping as
-  # a second line, not worth trusting on its own.
+  # On the write-only path the outer `var.clickhouse_write_only ? 0 :` count
+  # gate is the ONLY defence keeping a managed generator's plaintext `result`
+  # out of state — the validation forces every var.clickhouse_passwords field
+  # null there, so the inner `== null` check would evaluate TRUE and CREATE a
+  # generator. It is not a second line of defence.
   clickhouse_otel_password_legacy = var.clickhouse_write_only ? null : (
     var.clickhouse_passwords.otel != null ? var.clickhouse_passwords.otel : one(random_password.clickhouse_otel[*].result)
   )
@@ -140,9 +108,12 @@ locals {
 # The gate keys off `== null` alone, matching v2.4.2 exactly and matching the
 # `!= null` ternary in the legacy locals above: an empty string counts as
 # supplied, so no generator is created and "" is written through as the secret
-# value — same as before v3.0.0. Do not widen this to `|| == ""` without also
-# changing the local; the two have to agree on what "" means, or one of them is
-# left with no value to fall back to.
+# value — same as before v3.0.0. The gate and the local must agree on what ""
+# means, and either mutation alone breaks differently: widening the gate alone
+# to `|| == ""` creates a stray generator whose plaintext `result` sits in
+# state for nothing; switching the local to `coalesce` alone makes
+# `coalesce("", null)` a hard plan error. See
+# legacy_empty_string_password_writes_empty_secret.
 #
 # A deployment that opts in drops these to count = 0, which destroys its own
 # generator instances naturally (random_password is a logical resource, so
