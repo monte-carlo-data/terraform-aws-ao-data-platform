@@ -15,7 +15,7 @@
 #   terraform import 'module.ao_data_platform.aws_iam_openid_connect_provider.cluster[0]' <arn>
 
 terraform {
-  required_version = ">= 1.11"
+  required_version = ">= 1.12"
   required_providers {
     aws = {
       source  = "hashicorp/aws"

@@ -11,7 +11,7 @@ Terraform module that deploys the Monte Carlo Agent Observability data platform 
 
 ## Prerequisites
 
-- [Terraform](https://www.terraform.io/downloads.html) >= 1.11 — required for the write-only arguments the ClickHouse secret sinks declare (used when `clickhouse_write_only = true`; the floor binds either way)
+- [Terraform](https://www.terraform.io/downloads.html) >= 1.12 — required for the write-only arguments the ClickHouse secret sinks declare (used when `clickhouse_write_only = true`; the floor binds either way)
 - Providers your root module configures: `hashicorp/aws` ~> 6.50 (>= 6.50, < 7.0), `hashicorp/helm` ~> 2.0, `hashicorp/kubernetes` ~> 2.0. The module additionally declares `hashicorp/random` ~> 3.7 (>= 3.7, < 4.0), `hashicorp/tls` ~> 4.0 and `hashicorp/null` ~> 3.0, which resolve with the module.
   - The `aws` and `random` floors also rose in v3.0.0. An existing consumer's `.terraform.lock.hcl` is likely pinned below them, so run `terraform init -upgrade` once before planning — see [Upgrading to v3.0.0](#upgrading-to-v300).
 - [AWS CLI](https://aws.amazon.com/cli/) configured with appropriate credentials
@@ -596,7 +596,7 @@ v3.0.0 can keep ClickHouse passwords out of Terraform state: generation moves to
 
 **Breaking changes on adoption** — i.e. what bumping the version alone requires. There is exactly one, and it is a toolchain constraint rather than a behavior change:
 
-- **Version floors rise**: Terraform **>= 1.11** (write-only arguments), `hashicorp/aws` **~> 6.50** (>= 6.50, < 7.0) and `hashicorp/random` **~> 3.7** (>= 3.7, < 4.0). The module declares `secret_string_wo` on every ClickHouse secret version regardless of the flag, so these floors bind on the legacy path too. An existing consumer's `.terraform.lock.hcl` is likely pinned below the provider floors, so the first command fails on a lock/constraint error until you run `terraform init -upgrade`. If your own root module pins the AWS provider outside that range — e.g. `version = "= 6.20.0"` or `~> 7.0` — that pin has to be changed first; no `init -upgrade` can satisfy two conflicting constraints.
+- **Version floors rise**: Terraform **>= 1.12** (write-only arguments), `hashicorp/aws` **~> 6.50** (>= 6.50, < 7.0) and `hashicorp/random` **~> 3.7** (>= 3.7, < 4.0). The module declares `secret_string_wo` on every ClickHouse secret version regardless of the flag, so these floors bind on the legacy path too. An existing consumer's `.terraform.lock.hcl` is likely pinned below the provider floors, so the first command fails on a lock/constraint error until you run `terraform init -upgrade`. If your own root module pins the AWS provider outside that range — e.g. `version = "= 6.20.0"` or `~> 7.0` — that pin has to be changed first; no `init -upgrade` can satisfy two conflicting constraints.
 
 **The three credential variables, and which path each serves**
 
@@ -637,7 +637,7 @@ Only `clickhouse_passwords_wo` is `ephemeral`, and that is load-bearing rather t
 >
 > If you have already adopted with the flag unset but have **not applied**, set the flag before applying; if you have applied, treat it as a rotation and recover the credentials from Secrets Manager.
 
-**2. Raise the floors** wherever this module is planned and applied: Terraform to >= 1.11, and any AWS/random provider constraints in your own root module to stay satisfiable alongside the module's `aws ~> 6.50` and `random ~> 3.7`. On Terraform Cloud, Terraform's version is the version setting on each workspace.
+**2. Raise the floors** wherever this module is planned and applied: Terraform to >= 1.12, and any AWS/random provider constraints in your own root module to stay satisfiable alongside the module's `aws ~> 6.50` and `random ~> 3.7`. On Terraform Cloud, Terraform's version is the version setting on each workspace.
 
 **3. Re-resolve the provider locks.**
 
@@ -991,14 +991,14 @@ restarts the CNI pods).
 
 ```bash
 make sanity-check                # fmt check + validate (CI pipeline)
-make test                        # variable-validation tests (requires Terraform >= 1.11)
+make test                        # variable-validation tests (requires Terraform >= 1.12)
 make selftest-verify-no-plaintext  # regression test for the plaintext detector (CI pipeline; needs jq)
 make verify-no-plaintext STATE=state.json SENTINEL_FILE=sentinels.txt
 ```
 
 `make verify-no-plaintext` is the repo-local convenience wrapper around `hack/verify-no-plaintext.sh` — the same script a Registry consumer runs out of `.terraform/modules/<name>/hack/`, documented under [Upgrading to v3.0.0](#upgrading-to-v300). `SENTINEL_FILE` takes one password per line; the legacy `SENTINELS="a b"` form still works but puts secrets on a command line and cannot carry a value containing whitespace.
 
-`make test` runs `terraform test` against `tests/*.tftest.hcl`. Tests cover the input safety nets (`cluster.main_node_group_size` range, the existing-cluster guard) using `mock_provider` — see the test file's preamble for the explicit scope and known coverage gaps. The module requires `required_version >= 1.11`, which already exceeds the `mock_provider` floor of 1.7, so no separate dev-tool requirement applies.
+`make test` runs `terraform test` against `tests/*.tftest.hcl`. Tests cover the input safety nets (`cluster.main_node_group_size` range, the existing-cluster guard) using `mock_provider` — see the test file's preamble for the explicit scope and known coverage gaps. The module requires `required_version >= 1.12`, which already exceeds the `mock_provider` floor of 1.7, so no separate dev-tool requirement applies.
 
 To release a new version, create and push a tag: `git tag v0.1.0 && git push origin v0.1.0`
 

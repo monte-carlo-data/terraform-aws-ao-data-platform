@@ -33,7 +33,7 @@
 //     main_node_group_size_resolved) — simple coalesce chains; regressions
 //     would show up in plan diffs during code review.
 //
-// mock_provider requires Terraform >= 1.7; the module's own floor is >= 1.11
+// mock_provider requires Terraform >= 1.7; the module's own floor is >= 1.12
 // (write-only arguments), so the module floor is the binding constraint and
 // these tests carry no extra toolchain requirement.
 
