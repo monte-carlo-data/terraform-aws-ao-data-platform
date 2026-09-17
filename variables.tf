@@ -286,9 +286,7 @@ variable "clickhouse_replica_count" {
     Must not exceed the number of per-AZ ClickHouse node groups available to place
     replicas on (max(length(clickhouse_availability_zones), 1)). That ceiling is
     enforced by a precondition on the Helm release rather than a variable
-    validation, because it references two variables. The module floor is now
-    Terraform >= 1.11, so cross-variable validation is available and the
-    precondition could be converted; that is left to its own change.
+    validation, because it references two variables.
   EOT
   type        = number
   default     = 1
@@ -934,7 +932,8 @@ variable "clickhouse_write_only" {
       false -> clickhouse_passwords    (legacy, non-ephemeral)
       true  -> clickhouse_passwords_wo (write-only, ephemeral)
 
-    TRANSITIONAL: this flag should be retired once every consumer has opted in.
+    Deprecated on arrival: v4.0.0 will make the write-only path unconditional
+    and remove both this flag and clickhouse_passwords.
 
     Must stay a statically known value (a literal, or another variable). The
     locals that select between the two paths rely on the conditional
@@ -992,18 +991,10 @@ variable "clickhouse_passwords" {
   # the exact mistake made working from a pre-v3.0.0 runbook. Rejecting it at
   # plan time leaks nothing: the condition tests null-ness only, never a value,
   # and nonsensitive() is applied to the comparison result rather than to any
-  # password. (Not the guard ruled out in the README's "Why there is no
-  # plan-time guard" — that one is about comparing against the LIVE secret,
-  # which is a different and genuinely unavailable check.)
+  # password. The README's "Why there is no plan-time guard" explains why this
+  # is not that guard.
   validation {
-    condition = !var.clickhouse_write_only || nonsensitive(alltrue([
-      var.clickhouse_passwords.admin == null,
-      var.clickhouse_passwords.otel == null,
-      var.clickhouse_passwords.monte_carlo == null,
-      var.clickhouse_passwords.schema_owner == null,
-      var.clickhouse_passwords.llm_worker == null,
-      var.clickhouse_passwords.readonly_user == null,
-    ]))
+    condition     = !var.clickhouse_write_only || nonsensitive(alltrue([for v in values(var.clickhouse_passwords) : v == null]))
     error_message = "clickhouse_passwords serves the legacy path only and is ignored when clickhouse_write_only = true, so setting both would silently regenerate every password. Move these values to clickhouse_passwords_wo."
   }
 }
@@ -1061,14 +1052,7 @@ variable "clickhouse_passwords_wo" {
   # to a deployment still on the legacy path is a silent no-op, and the operator
   # would believe they had supplied the current values when they had not.
   validation {
-    condition = var.clickhouse_write_only || nonsensitive(alltrue([
-      var.clickhouse_passwords_wo.admin == null,
-      var.clickhouse_passwords_wo.otel == null,
-      var.clickhouse_passwords_wo.monte_carlo == null,
-      var.clickhouse_passwords_wo.schema_owner == null,
-      var.clickhouse_passwords_wo.llm_worker == null,
-      var.clickhouse_passwords_wo.readonly_user == null,
-    ]))
+    condition     = var.clickhouse_write_only || nonsensitive(alltrue([for v in values(var.clickhouse_passwords_wo) : v == null]))
     error_message = "clickhouse_passwords_wo serves the write-only path only and is ignored unless clickhouse_write_only = true. Set the flag in the same apply, or move these values to clickhouse_passwords."
   }
 }
@@ -1079,7 +1063,9 @@ variable "clickhouse_password_versions" {
     secret_string_wo_version. WRITE-ONLY path only: the version companion is
     only rendered when clickhouse_write_only = true, and this variable has no
     effect on the legacy path (where Terraform tracks secret_string directly and
-    detects changes to it normally).
+    detects changes to it normally). Unlike the two password variables, this one
+    carries no wrong-path validation — setting it on the legacy path is accepted
+    and silently does nothing.
 
     Because a write-only password is invisible to Terraform, it cannot detect
     drift on it — the secret is rewritten ONLY when the matching version here
@@ -1088,6 +1074,11 @@ variable "clickhouse_password_versions" {
     Bump one field to rotate one user (e.g. admin after a break-glass use);
     bump all six to rotate the deployment. Bumping a field WITHOUT supplying the
     matching clickhouse_passwords_wo value writes a freshly generated password.
+
+    Bumped values are permanent committed configuration, not run-scoped:
+    only ever INCREASE a field. Lowering or removing a bumped field is itself
+    a secret_string_wo_version change and rewrites the secret with a newly
+    generated password.
 
     Leave at the default of 1 for a fresh install and for the apply that opts
     into the write-only path. Leaving it at 1 does NOT make that apply a no-op:
@@ -1105,7 +1096,13 @@ variable "clickhouse_password_versions" {
     llm_worker    = optional(number, 1)
     readonly_user = optional(number, 1)
   })
-  default = {}
+  default  = {}
+  nullable = false
+
+  validation {
+    condition     = alltrue([for v in values(var.clickhouse_password_versions) : v >= 1])
+    error_message = "Every field of clickhouse_password_versions must be >= 1. A version of 0 or negative is not a meaningful secret_string_wo_version; bump a field by 1 to rotate that user's password."
+  }
 }
 
 # --- Storage ---
