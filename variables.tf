@@ -642,10 +642,14 @@ variable "helm" {
     Kubernetes resolves duplicate container env names by last-one-wins, so a
     key matching one the chart already sets (CH_HOST, CH_PORT, LLM_PROVIDER,
     AWS_REGION, etc.) silently overrides it. Avoid those names unless
-    overriding is the intent. Supported on every published chart version:
-    1.5.0 is both the earliest version to carry it and the earliest version
-    ever published (confirmed against the actual OCI artifact on Docker Hub,
-    not just git history) — there is no released chart missing it.
+    overriding is the intent. Supported since chart 1.5.0, confirmed against
+    the actual published OCI artifact on the public registry
+    (oci://registry-1.docker.io/montecarlodata) this module's chart_registry
+    examples point at — every deployment using that registry has it, since
+    1.5.0 is the oldest version it offers. Chart versions before 1.5.0
+    existed only on a private pre-release registry (this module's docs
+    reference 1.2.0/1.3.0 behavior from it); whether they carried this field
+    is unknown and out of scope for a deployment on the public registry.
 
     clickhouse.resources, opentelemetry_collector.resources, and llm_worker.resources
     are optional Kubernetes resource requests/limits passed through to the chart for
