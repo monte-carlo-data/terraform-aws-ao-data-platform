@@ -438,14 +438,12 @@ run "llm_worker_bedrock_policy_covers_both_profile_types" {
     }
   }
   assert {
-    condition = alltrue([
-      for arn in [
-        "arn:aws:bedrock:*::foundation-model/*",
-        "arn:aws:bedrock:*:*:inference-profile/*",
-        "arn:aws:bedrock:*:*:application-inference-profile/*",
-      ] : contains(jsondecode(aws_iam_role_policy.llm_worker_bedrock.policy).Statement[0].Resource, arn)
+    condition = jsonencode(jsondecode(aws_iam_role_policy.llm_worker_bedrock.policy).Statement[0].Resource) == jsonencode([
+      "arn:aws:bedrock:*::foundation-model/*",
+      "arn:aws:bedrock:*:*:inference-profile/*",
+      "arn:aws:bedrock:*:*:application-inference-profile/*",
     ])
-    error_message = "llm_worker_bedrock policy must grant InvokeModel on foundation models, system-defined inference profiles, AND application inference profiles."
+    error_message = "llm_worker_bedrock policy must grant InvokeModel on exactly foundation models, system-defined inference profiles, AND application inference profiles — no more, no less."
   }
 }
 
@@ -1363,10 +1361,9 @@ run "llm_worker_replica_override_zero_renders" {
   }
 }
 
-# llm_worker.env must render as a list of {name, value} pairs sorted by key
-# (the chart's llmWorker.env is a plain list spliced into the container spec,
-# so caller map ordering must not affect the rendered plan), and must be
-# omitted entirely when the map is empty (the default).
+# llm_worker.env must render as a list of {name, value} pairs in pinned key
+# order (main.tf), and must be omitted entirely when the map is empty (the
+# default).
 run "llm_worker_env_renders_sorted_pairs" {
   command = plan
   variables {
@@ -1390,7 +1387,7 @@ run "llm_worker_env_renders_sorted_pairs" {
       { name = "BEDROCK_INFERENCE_PROFILES", value = "{}" },
       { name = "MAX_WORKERS", value = "40" },
     ]
-    error_message = "helm_llm_worker_env_block.env must render as {name, value} pairs sorted by key."
+    error_message = "helm_llm_worker_env_block.env must render as {name, value} pairs in pinned key order."
   }
 }
 

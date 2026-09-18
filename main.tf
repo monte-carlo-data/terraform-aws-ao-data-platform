@@ -176,9 +176,10 @@ locals {
   helm_llm_worker_resources_block = var.helm.llm_worker.resources != null ? {
     resources = { for k, v in var.helm.llm_worker.resources : k => v if v != null }
   } : {}
-  # The chart's llmWorker.env is a list of {name, value} pairs rendered
-  # directly into the container spec; sorted by key so the plan is stable
-  # regardless of the caller's map ordering.
+  # The chart consumes llmWorker.env as a list spliced into the container
+  # spec, so element order is diff-significant — key order is pinned
+  # explicitly (via sort(keys(...))) rather than left to incidental
+  # map-iteration order.
   helm_llm_worker_env_block = length(var.helm.llm_worker.env) > 0 ? {
     env = [for k in sort(keys(var.helm.llm_worker.env)) : { name = k, value = var.helm.llm_worker.env[k] }]
   } : {}
