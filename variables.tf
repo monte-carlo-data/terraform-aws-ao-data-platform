@@ -638,8 +638,13 @@ variable "helm" {
 
     llm_worker.env forwards arbitrary extra environment variables to the
     llm-worker container (e.g. BEDROCK_INFERENCE_PROFILES). Values are rendered
-    as plain (non-secret) env vars; keys already set by this module (CH_HOST,
-    LLM_PROVIDER, AWS_REGION, etc.) cannot be overridden this way.
+    as plain (non-secret) env vars, appended after the chart's own entries —
+    Kubernetes resolves duplicate container env names by last-one-wins, so a
+    key matching one the chart already sets (CH_HOST, CH_PORT, LLM_PROVIDER,
+    AWS_REGION, etc.) silently overrides it. Avoid those names unless
+    overriding is the intent. Confirmed available since chart 1.5.0 (the
+    earliest version with inspectable source); not verified for versions
+    1.3.0-1.4.x.
 
     clickhouse.resources, opentelemetry_collector.resources, and llm_worker.resources
     are optional Kubernetes resource requests/limits passed through to the chart for
