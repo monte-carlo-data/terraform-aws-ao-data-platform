@@ -232,7 +232,8 @@ resource "aws_iam_role_policy" "llm_worker_bedrock" {
       ]
       "Resource" : [
         "arn:aws:bedrock:*::foundation-model/*",
-        "arn:aws:bedrock:*:*:inference-profile/*"
+        "arn:aws:bedrock:*:*:inference-profile/*",
+        "arn:aws:bedrock:*:*:application-inference-profile/*"
       ]
     }]
   })
