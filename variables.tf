@@ -644,9 +644,10 @@ variable "helm" {
     Kubernetes resolves duplicate container env names by last-one-wins, so a
     key matching one the chart already sets (CH_HOST, CH_PORT, LLM_PROVIDER,
     AWS_REGION, etc.) silently overrides it. Avoid those names unless
-    overriding is the intent. Confirmed available since chart 1.5.0 (the
-    earliest version with inspectable source); not verified for versions
-    1.3.0-1.4.x.
+    overriding is the intent. Supported on every published chart version:
+    1.5.0 is both the earliest version to carry it and the earliest version
+    ever published (confirmed against the actual OCI artifact on Docker Hub,
+    not just git history) — there is no released chart missing it.
 
     clickhouse.resources, opentelemetry_collector.resources, and llm_worker.resources
     are optional Kubernetes resource requests/limits passed through to the chart for
