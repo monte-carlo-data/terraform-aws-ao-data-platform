@@ -8,34 +8,37 @@
 //
 // What's NOT covered here:
 //   - "Accepted value" cases (e.g., main_node_group_size = 1 passes). These
-//     would require Terraform to plan past variable validation into module
-//     resolution, which pulls in the EKS module's data sources (IAM, KMS,
-//     OIDC, etc.). Mocking that surface is brittle and high-maintenance.
-//     Every real apply exercises the accepted path.
-//   - The postcondition on data.aws_subnets.ch_node_group_az_subnets and the
-//     matching per-AZ ha_node_group_az_subnets postcondition (AZ must match a
-//     private subnet) — also requires real-or-mocked subnet data. Exercised by
-//     every apply.
-//   - The clustered/HA ENABLED-path node-group shapes: keeper node-group count
-//     = AZ count, one ClickHouse node group per AZ (all desired = 1). These
-//     need module.eks + subnet data in the plan (the same brittle surface as
-//     above), so they are exercised by real applies + code review. Likewise the
+//     would require Terraform to plan past variable validation into module.eks's
+//     OWN internals (IAM, KMS, OIDC, etc., inside the third-party module itself,
+//     not reachable by override_module). Mocking that surface is brittle and
+//     high-maintenance. Every real apply exercises the accepted path.
+//   - The AWS provider's own zero/multi-subnet-match error on
+//     data.aws_subnet.dedicated_node_group_az_subnet — override_data sets
+//     attribute values directly, bypassing the provider's own matching logic, so
+//     this needs real-or-mocked subnet data instead. Exercised by every apply.
+//   - The clustered/HA ENABLED-path node-group shapes (keeper node-group count =
+//     AZ count, one ClickHouse node group per AZ, the right single-element
+//     subnet_ids on each) ARE covered below
+//     (dedicated_node_group_subnet_wiring), via override_module on module.eks +
+//     per-AZ override_data on the subnet lookup — no real cluster needed. The
 //     placement-gated Helm-release preconditions (legacy node-group retirement
-//     guard, volume-AZ match guard): their failing path requires cluster.create
-//     = true, which drags module.eks into the plan. The rest of the HA surface
-//     IS covered below: the DISABLED path by ha_topology_inert_by_default, the
+//     guard, volume-AZ match guard) are NOT: their failing path also requires
+//     cluster.create = true; a follow-up could reach them with the same
+//     override_module technique. The rest of the HA surface IS covered below:
+//     the DISABLED path by ha_topology_inert_by_default, the
 //     clickhouse_replica_count <= AZ-count precondition by
 //     replica_count_exceeding_az_count_rejected (it reads only variables, so
 //     the keeper-precondition technique reaches it), and the pure
-//     variable-derived locals (helm_keeper_block, ha_node_group_azs, the
+//     variable-derived locals (helm_keeper_block, dedicated_node_group_azs, the
 //     pause-ingest replica overrides) by the enabled-path runs at the end.
 //   - The resolution locals (clickhouse_az_resolved,
 //     main_node_group_size_resolved) — simple coalesce chains; regressions
 //     would show up in plan diffs during code review.
 //
-// mock_provider requires Terraform >= 1.7; the module's own floor is >= 1.12
-// (write-only arguments), so the module floor is the binding constraint and
-// these tests carry no extra toolchain requirement.
+// override_module/override_data and mock_provider require Terraform >= 1.7;
+// the module's own floor is >= 1.12 (write-only arguments) on this combined
+// branch, so the module floor is the binding constraint and these tests carry
+// no extra toolchain requirement.
 
 mock_provider "aws" {
   # data.aws_availability_zones.available is read unconditionally in main.tf
@@ -1264,6 +1267,10 @@ run "ha_topology_inert_by_default" {
     condition     = length(local.helm_keeper_block) == 0
     error_message = "helm_keeper_block must be empty when keeper_availability_zones is unset."
   }
+  assert {
+    condition     = length(local.private_subnet_id_by_az) == 0
+    error_message = "private_subnet_id_by_az must be empty when no keeper topology / charts are configured — data.aws_subnet.dedicated_node_group_az_subnet must not read in this path."
+  }
 }
 
 # --- enabled-path HA locals derive purely from the AZ lists ---
@@ -1299,6 +1306,166 @@ run "ha_locals_derive_from_az_lists" {
   assert {
     condition     = length(local.ha_node_group_azs) == 3 && toset(local.ha_node_group_azs) == toset(["us-east-1a", "us-east-1b", "us-east-1c"])
     error_message = "ha_node_group_azs must be the deduplicated union of the ClickHouse and keeper AZ lists."
+  }
+  assert {
+    condition     = length(data.aws_subnet.dedicated_node_group_az_subnet) == 0
+    error_message = "The per-AZ subnet lookup must not read when placement (deploy_charts && cluster.create) is disabled, even with non-empty AZ lists — this run must not be indistinguishable from ha_topology_inert_by_default (which has empty AZ lists) for the wrong reason."
+  }
+}
+
+# --- enabled-path node-group wiring: override_module reaches it without a real cluster ---
+#
+# cluster.create = true (required for clickhouse_node_placement_enabled) pulls
+# module.eks's real resources into the plan; override_module replaces it with
+# the handful of outputs this module's OWN resources actually read (the
+# module.eks[0].* references in main.tf/outputs.tf), so nothing inside the
+# third-party module needs mocking. override_data supplies each per-AZ subnet
+# ID the new lookup would otherwise read from AWS. This pins the exact shape a
+# refactor could break silently: keeper node-group count = AZ count, one
+# ClickHouse HA node group per AZ, the legacy node group's own AZ, and the
+# right single-element subnet_ids on each -- dropping the legacy AZ or
+# swapping the ClickHouse/keeper maps fails this run.
+
+run "dedicated_node_group_subnet_wiring" {
+  command = plan
+
+  override_module {
+    target = module.eks
+    outputs = {
+      cluster_endpoint                   = "https://test-cluster.eks.us-east-1.amazonaws.com"
+      cluster_certificate_authority_data = "dGVzdC1jYQ=="
+      oidc_provider_arn                  = "arn:aws:iam::123456789012:oidc-provider/oidc.eks.us-east-1.amazonaws.com/id/TESTOIDC"
+      oidc_provider                      = "oidc.eks.us-east-1.amazonaws.com/id/TESTOIDC"
+      cluster_security_group_id          = "sg-0123456789abcdef0"
+      cluster_name                       = "test-cluster"
+    }
+  }
+
+  override_data {
+    target = data.aws_subnet.dedicated_node_group_az_subnet["us-east-1a"]
+    values = { id = "subnet-aaaa1111" }
+  }
+  override_data {
+    target = data.aws_subnet.dedicated_node_group_az_subnet["us-east-1b"]
+    values = { id = "subnet-bbbb2222" }
+  }
+  override_data {
+    target = data.aws_subnet.dedicated_node_group_az_subnet["us-east-1c"]
+    values = { id = "subnet-cccc3333" }
+  }
+
+  variables {
+    cluster = {
+      create             = true
+      name               = "test-cluster"
+      node_instance_type = "r5.xlarge"
+    }
+    networking = {
+      create_vpc                  = false
+      existing_vpc_id             = "vpc-12345678"
+      existing_private_subnet_ids = ["subnet-aaaa1111", "subnet-bbbb2222", "subnet-cccc3333"]
+    }
+    helm = {
+      deploy_charts  = true
+      chart_registry = "oci://registry-1.docker.io/montecarlodata"
+      chart_version  = "4.6.0"
+    }
+    clickhouse_domain     = "clickhouse.test.example.com"
+    otel_collector_domain = "otel.test.example.com"
+    # No existing volume to preserve in this synthetic scenario -- skip the
+    # volume-AZ-match precondition so clickhouse_availability_zones can omit
+    # the legacy AZ (see below) without tripping it.
+    enforce_clickhouse_volume_az_match = false
+    # Deliberately excludes us-east-1a (the legacy NG's default AZ) from both HA
+    # lists, so the legacy AZ is exercised by nothing but the legacy gating path
+    # itself -- a regression that drops or misroutes it can't hide behind an
+    # AZ the HA lists would have covered anyway.
+    clickhouse_availability_zones = ["us-east-1b"]
+    keeper_availability_zones     = ["us-east-1c"]
+  }
+
+  assert {
+    condition     = length(local.keeper_node_groups) == 1
+    error_message = "keeper_node_groups must have one entry per keeper_availability_zones AZ."
+  }
+  assert {
+    condition     = jsonencode(local.keeper_node_groups["keeper-us-east-1c"].subnet_ids) == jsonencode(["subnet-cccc3333"])
+    error_message = "Each keeper node group's subnet_ids must be the single subnet resolved for its own AZ."
+  }
+  assert {
+    condition     = length(local.clickhouse_ha_node_groups) == 1
+    error_message = "clickhouse_ha_node_groups must have one entry per clickhouse_availability_zones AZ."
+  }
+  assert {
+    condition     = jsonencode(local.clickhouse_ha_node_groups["clickhouse-us-east-1b"].subnet_ids) == jsonencode(["subnet-bbbb2222"])
+    error_message = "Each ClickHouse HA node group's subnet_ids must be the single subnet resolved for its own AZ."
+  }
+  assert {
+    condition     = jsonencode(local.clickhouse_node_group_subnet_ids) == jsonencode(["subnet-aaaa1111"])
+    error_message = "The legacy ClickHouse node group's subnet_ids must resolve to clickhouse_az_resolved's own subnet (us-east-1a here, the default AZ) even though neither HA list includes it."
+  }
+}
+
+# --- retiring the legacy node group must stop demanding a subnet in its AZ ---
+#
+# manage_legacy_clickhouse_node_group = false retires the legacy node group
+# (eks.tf), but clickhouse_az_resolved defaults to the region's first AZ
+# regardless -- without this gate, a plan would still require a subnet there
+# for a node group that no longer exists.
+
+run "legacy_node_group_retirement_skips_its_az" {
+  command = plan
+
+  override_module {
+    target = module.eks
+    outputs = {
+      cluster_endpoint                   = "https://test-cluster.eks.us-east-1.amazonaws.com"
+      cluster_certificate_authority_data = "dGVzdC1jYQ=="
+      oidc_provider_arn                  = "arn:aws:iam::123456789012:oidc-provider/oidc.eks.us-east-1.amazonaws.com/id/TESTOIDC"
+      oidc_provider                      = "oidc.eks.us-east-1.amazonaws.com/id/TESTOIDC"
+      cluster_security_group_id          = "sg-0123456789abcdef0"
+      cluster_name                       = "test-cluster"
+    }
+  }
+
+  override_data {
+    target = data.aws_subnet.dedicated_node_group_az_subnet["us-east-1b"]
+    values = { id = "subnet-bbbb2222" }
+  }
+
+  variables {
+    cluster = {
+      create             = true
+      name               = "test-cluster"
+      node_instance_type = "r5.xlarge"
+    }
+    networking = {
+      create_vpc                  = false
+      existing_vpc_id             = "vpc-12345678"
+      existing_private_subnet_ids = ["subnet-aaaa1111", "subnet-bbbb2222"]
+    }
+    helm = {
+      deploy_charts  = true
+      chart_registry = "oci://registry-1.docker.io/montecarlodata"
+      chart_version  = "4.6.0"
+    }
+    clickhouse_domain                   = "clickhouse.test.example.com"
+    otel_collector_domain               = "otel.test.example.com"
+    manage_legacy_clickhouse_node_group = false
+    # A completed migration: the HA replacement is up, so retiring the legacy
+    # group is valid (see the helm_release precondition this satisfies). No
+    # existing volume to preserve in this synthetic scenario.
+    clickhouse_availability_zones      = ["us-east-1b"]
+    enforce_clickhouse_volume_az_match = false
+  }
+
+  assert {
+    condition     = length(local.dedicated_node_group_azs) == 1 && !contains(local.dedicated_node_group_azs, local.clickhouse_az_resolved)
+    error_message = "dedicated_node_group_azs must not require a subnet for the legacy AZ (us-east-1a) once manage_legacy_clickhouse_node_group = false retires that node group — nothing consumes it, only the HA AZ (us-east-1b) should remain."
+  }
+  assert {
+    condition     = length(local.clickhouse_node_group_subnet_ids) == 0
+    error_message = "clickhouse_node_group_subnet_ids must be empty once the legacy node group is retired."
   }
 }
 
