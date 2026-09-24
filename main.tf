@@ -44,36 +44,28 @@ locals {
   # cost-shrunk single-node main pool when HA isn't a requirement.
   main_node_group_size_resolved = coalesce(var.cluster.main_node_group_size, 2)
 
-  # nonsensitive() unwraps the sensitivity tag that data.aws_subnets.ids
-  # carries in some aws-provider versions — without it, the resulting list
-  # poisons the EKS module's for_each over node-group subnet_ids with an
-  # "Invalid for_each argument" error. Safe here: subnet IDs aren't secret.
-  clickhouse_node_group_subnet_ids = local.clickhouse_node_placement_enabled ? nonsensitive(tolist(setintersection(
-    toset(data.aws_subnets.ch_node_group_az_subnets[0].ids),
-    toset(local.effective_private_subnet_ids)
-  ))) : []
-
   # Union of the explicit CH + keeper AZ names — the set of AZs the HA topology
-  # needs a single-AZ subnet for. Drives the per-AZ data.aws_subnets fan-out in
-  # vpc.tf. Empty (no HA node groups) when neither list is set.
+  # needs a single-AZ subnet for. Empty (no HA node groups) when neither list
+  # is set.
   ha_node_group_azs = distinct(concat(var.clickhouse_availability_zones, var.keeper_availability_zones))
 
-  # Per-AZ subnet lists for the HA node groups, keyed by AZ name. Each is the
-  # AZ's subnets intersected with the cluster's private subnets (excludes any
-  # public subnet in the same AZ). nonsensitive() for the same reason as
-  # clickhouse_node_group_subnet_ids above — the values feed the EKS module's
-  # for_each over node-group subnet_ids. Empty maps when placement is disabled.
+  # AZ -> private subnet ID. Keys mirror vpc.tf's dedicated_node_group_azs (same
+  # AZs, same gate), so every lookup below hits.
+  private_subnet_id_by_az = {
+    for az, subnet in data.aws_subnet.dedicated_node_group_az_subnet : az => subnet.id
+  }
+
+  # Single-element subnet_ids list for the legacy CH NG. Gated the same as
+  # vpc.tf's dedicated_node_group_azs (clickhouse_az_resolved is only a key
+  # there when the legacy group is still managed) — locals evaluate eagerly, so
+  # gating only the vpc.tf side would leave this indexing a dropped key.
+  clickhouse_node_group_subnet_ids = local.legacy_clickhouse_node_group_enabled ? [local.private_subnet_id_by_az[local.clickhouse_az_resolved]] : []
+
   clickhouse_subnet_ids_by_az = local.clickhouse_node_placement_enabled ? {
-    for az in var.clickhouse_availability_zones : az => nonsensitive(tolist(setintersection(
-      toset(data.aws_subnets.ha_node_group_az_subnets[az].ids),
-      toset(local.effective_private_subnet_ids)
-    )))
+    for az in var.clickhouse_availability_zones : az => [local.private_subnet_id_by_az[az]]
   } : {}
   keeper_subnet_ids_by_az = local.clickhouse_node_placement_enabled ? {
-    for az in var.keeper_availability_zones : az => nonsensitive(tolist(setintersection(
-      toset(data.aws_subnets.ha_node_group_az_subnets[az].ids),
-      toset(local.effective_private_subnet_ids)
-    )))
+    for az in var.keeper_availability_zones : az => [local.private_subnet_id_by_az[az]]
   } : {}
 
   cluster_endpoint       = var.cluster.create ? module.eks[0].cluster_endpoint : data.aws_eks_cluster.existing[0].endpoint
