@@ -207,7 +207,13 @@ variable "clickhouse_availability_zones" {
 
     When create_vpc = true, entries must be a subset of the AZs the module's private
     subnets were placed in (the first N of the available-AZ data source) — otherwise
-    the per-AZ subnet postcondition fails at plan time.
+    the plan fails with the AWS provider's own "no matching EC2 Subnet found" on
+    data.aws_subnet.dedicated_node_group_az_subnet["<az>"]. One hint that error won't
+    give you: var.clickhouse_node_group.availability_zone, left unset, defaults to the
+    region's first AZ — a failure on an AZ you never explicitly configured usually
+    means setting that variable instead. Also keep each AZ to a single private subnet
+    (see networking.existing_private_subnet_ids): a second subnet in the same AZ fails
+    the same lookup with "returned more than one result".
 
     Empty (default) creates no per-AZ CH node groups: the module keeps only the legacy
     single ClickHouse node group. Set this (e.g. 2 AZs for RF=2) to stand up the HA
@@ -415,8 +421,10 @@ variable "networking" {
     there instead of auto-discovering subnets — in a VPC without
     kubernetes.io/role/internal-elb subnet tags, discovery falls back to a
     lexicographic per-AZ pick that can land ENIs in unrelated subnets sharing the
-    VPC. The controller accepts at most one subnet per AZ in that annotation, so
-    keep existing_private_subnet_ids to one subnet per AZ.
+    VPC. Keep existing_private_subnet_ids to one subnet per AZ: the LB controller
+    accepts at most one subnet per AZ in that annotation, and separately, the
+    dedicated ClickHouse/Keeper node groups' subnet lookup now hard-fails the plan
+    ("returned more than one result") if an AZ has two.
 
     control_plane_subnet_ids mirrors the upstream EKS module input of the same name:
     when set, it alone populates the cluster's vpc_config (control-plane ENI
