@@ -422,6 +422,31 @@ run "irsa_role_names_are_region_qualified" {
   }
 }
 
+# The llm-worker's Bedrock policy must cover both inference-profile ARN types:
+# "inference-profile" (system-defined cross-region profiles) and
+# "application-inference-profile" (the cost-attribution profiles a caller
+# provisions and forwards via helm.llm_worker.env). These are distinct AWS
+# resource types with distinct ARN prefixes — granting only one silently
+# AccessDenies every InvokeModel call resolved through the other.
+run "llm_worker_bedrock_policy_covers_both_profile_types" {
+  command = plan
+  variables {
+    cluster = {
+      create                = false
+      name                  = "test-cluster"
+      existing_cluster_name = "test-cluster"
+    }
+  }
+  assert {
+    condition = jsonencode(jsondecode(aws_iam_role_policy.llm_worker_bedrock.policy).Statement[0].Resource) == jsonencode([
+      "arn:aws:bedrock:*::foundation-model/*",
+      "arn:aws:bedrock:*:*:inference-profile/*",
+      "arn:aws:bedrock:*:*:application-inference-profile/*",
+    ])
+    error_message = "llm_worker_bedrock policy must grant InvokeModel on exactly foundation models, system-defined inference profiles, AND application inference profiles — no more, no less."
+  }
+}
+
 # --- gated users create their secrets ---
 #
 # What these runs pin is the sink contract: a gated user that is enabled must
@@ -1333,6 +1358,54 @@ run "llm_worker_replica_override_zero_renders" {
   assert {
     condition     = length(local.helm_otel_replica_block) == 0
     error_message = "helm_otel_replica_block must omit replicaCount when opentelemetry_collector.replica_count is null."
+  }
+}
+
+# llm_worker.env must render as a list of {name, value} pairs in pinned key
+# order (main.tf), and must be omitted entirely when the map is empty (the
+# default).
+run "llm_worker_env_renders_sorted_pairs" {
+  command = plan
+  variables {
+    cluster = {
+      create                = false
+      name                  = "test-cluster"
+      existing_cluster_name = "test-cluster"
+    }
+    helm = {
+      deploy_charts = false
+      llm_worker = {
+        env = {
+          BEDROCK_INFERENCE_PROFILES = "{}"
+          MAX_WORKERS                = "40"
+        }
+      }
+    }
+  }
+  assert {
+    condition = local.helm_llm_worker_env_block.env == [
+      { name = "BEDROCK_INFERENCE_PROFILES", value = "{}" },
+      { name = "MAX_WORKERS", value = "40" },
+    ]
+    error_message = "helm_llm_worker_env_block.env must render as {name, value} pairs in pinned key order."
+  }
+}
+
+run "llm_worker_env_omitted_when_empty" {
+  command = plan
+  variables {
+    cluster = {
+      create                = false
+      name                  = "test-cluster"
+      existing_cluster_name = "test-cluster"
+    }
+    helm = {
+      deploy_charts = false
+    }
+  }
+  assert {
+    condition     = length(local.helm_llm_worker_env_block) == 0
+    error_message = "helm_llm_worker_env_block must omit env when llm_worker.env is empty (the default)."
   }
 }
 

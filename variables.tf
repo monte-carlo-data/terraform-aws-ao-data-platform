@@ -638,6 +638,21 @@ variable "helm" {
     "ao-llm-worker"). llm_worker.image_tag pins the image tag; defaults to
     "latest-aws". Pin to a released tag (e.g. "1.1.0-aws") for production.
 
+    llm_worker.env forwards arbitrary extra environment variables to the
+    llm-worker container (e.g. BEDROCK_INFERENCE_PROFILES). Values are rendered
+    as plain (non-secret) env vars, appended after the chart's own entries —
+    Kubernetes resolves duplicate container env names by last-one-wins, so a
+    key matching one the chart already sets (CH_HOST, CH_PORT, LLM_PROVIDER,
+    AWS_REGION, etc.) silently overrides it. Avoid those names unless
+    overriding is the intent. Supported since chart 1.5.0, confirmed against
+    the actual published OCI artifact on the public registry
+    (oci://registry-1.docker.io/montecarlodata) this module's chart_registry
+    examples point at — every deployment using that registry has it, since
+    1.5.0 is the oldest version it offers. Chart versions before 1.5.0
+    existed only on a private pre-release registry (this module's docs
+    reference 1.2.0/1.3.0 behavior from it); whether they carried this field
+    is unknown and out of scope for a deployment on the public registry.
+
     clickhouse.resources, opentelemetry_collector.resources, and llm_worker.resources
     are optional Kubernetes resource requests/limits passed through to the chart for
     each workload. Each accepts { requests = { ... }, limits = { ... } } with
@@ -740,6 +755,7 @@ variable "helm" {
       bedrock_region   = optional(string, null)
       image_repository = optional(string, null)
       image_tag        = optional(string, "latest-aws")
+      env              = optional(map(string), {})
       resources = optional(object({
         requests = optional(map(string), null)
         limits   = optional(map(string), null)
