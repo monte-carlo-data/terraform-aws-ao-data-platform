@@ -275,6 +275,47 @@ These are IAM identity-policy grants on module-managed, same-account roles, so t
 
 **Teardown.** Unsetting the block (or destroying) removes the whole leg; the bucket sets `force_destroy`, so in-flight transit objects do not block removal. Notifications already in the queue at teardown are simply discarded with it.
 
+### ClickHouse backup storage
+
+Enable this optional block to prepare storage and credentials for ClickHouse
+backups. Existing deployments create no backup resources unless it is set.
+
+```hcl
+clickhouse_backup = {
+  bucket_name = "example-clickhouse-backups-123456789012-us-east-1"
+  # service_account_name = "clickhouse-backup" # default
+}
+```
+
+The module creates:
+
+- A dedicated S3 bucket with public access blocked, S3-managed encryption for
+  stored files, and a policy rejecting unencrypted connections. There are no
+  automatic file-expiry rules; the backup software must manage retention.
+- A separate IAM role that can list, read, write, delete, and abort incomplete
+  uploads only in that bucket. Only the named service account in this cluster's
+  `montecarlo` namespace can assume it. Existing workload roles are unchanged.
+- A generated 32-character password at
+  `<cluster>/clickhouse/backup-credentials` in Secrets Manager, encrypted with
+  the module's existing secrets key.
+
+The `clickhouse_backup` output provides the bucket, role, intended service
+account, SQL username, and secret ARN. It does not expose the password. Like the
+module's other generated credentials, the password remains in Terraform state;
+keep that state private.
+
+This prepares the resources for the backup installation. It does not create the
+ClickHouse `backup` user, deliver its password, attach the AWS role to a running
+service, or schedule backups. The backup installation must create the named
+service account with an `eks.amazonaws.com/role-arn` annotation using the output
+role ARN, then assign it to the service that uploads the backup files. These
+steps do not require rebuilding the EKS cluster.
+
+The bucket has `force_destroy = false`: removing this configuration will fail
+while backup files remain. Delete files deliberately before deleting the bucket.
+The password secret follows the existing module convention of immediate deletion
+when Terraform removes it.
+
 ### Least-privilege ClickHouse users
 
 The module provisions a per-access-path ClickHouse user model (`ao-data-platform` chart `>= 2.0.0`), where each component authenticates as a user scoped to what it does. Four users are always provisioned; two are opt-in.
@@ -532,8 +573,13 @@ To use a StorageClass you manage outside this module, set `clickhouse_storage_cl
 | `helm.llm_worker.resources` | `object` | `null` | Kubernetes resource requests/limits for the LLM-worker pods. Same shape as `helm.clickhouse.resources`. Omit to use chart defaults. |
 | `trace_export_ingest` | `object` | `null` | Optional trace-export ingest leg — see [Trace-export ingest leg](#trace-export-ingest-leg). Shape: `{ producer_execution_role_arn = string, agent_role_arn = optional(string), bucket_name = optional(string), prefix = optional(string, "traces/"), lifecycle_days = optional(number, 3), kms_key_arn = optional(string) }`. `producer_execution_role_arn` is the external role trusted to assume the writer role (exact ARN or role-name wildcard; literal account ID enforced); the trust condition's `sts:ExternalId` value comes from the separate `trace_export_external_id` variable, which is required when this block is set. `agent_role_arn` optionally grants one additional role `s3:PutObject` on the prefix via the bucket policy. `prefix` accepts multi-segment values (`"traces/tenant-a/"`) and is normalized to one trailing `/`. `kms_key_arn` switches the bucket to SSE-KMS (Bucket Keys on) and widens writer/collector policies accordingly. Unset (default), no resources are created and the plan is unchanged from previous releases. |
 | `trace_export_external_id` | `string` (sensitive) | `null` | The `sts:ExternalId` value the external producer supplies when assuming the trace-export writer role (min 8 chars). Required when `trace_export_ingest` is set. Marked `sensitive`, so caller-supplied values are redacted in plan/apply output and CI logs — supply via a `.tfvars` file or `TF_VAR_trace_export_external_id`. Values remain readable in Terraform state — protect state accordingly. |
+| `clickhouse_backup` | `object` | `null` | Optional backup bucket, scoped IAM role, and stored password. Requires `bucket_name`; `service_account_name` defaults to `clickhouse-backup`. See [ClickHouse backup storage](#clickhouse-backup-storage). |
 
 ## Outputs
+
+The `clickhouse_backup` output is an object containing `bucket_name`, `bucket_arn`,
+`iam_role_arn`, `namespace`, `service_account_name`, `username`, and
+`password_secret_arn`. It is null when backup storage is disabled.
 
 | Name | Description |
 |------|-------------|
