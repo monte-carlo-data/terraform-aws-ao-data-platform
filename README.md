@@ -289,12 +289,15 @@ clickhouse_backup = {
 
 The module creates:
 
-- A dedicated S3 bucket with public access blocked, S3-managed encryption for
-  stored files, and a policy rejecting unencrypted connections. There are no
+- A dedicated S3 bucket with public access blocked, AWS KMS encryption by
+  default, and a policy rejecting unencrypted connections. A separate KMS key
+  encrypts backup files, with automatic key rotation enabled. There are no
   automatic file-expiry rules; the backup software must manage retention.
 - A separate IAM role that can list, read, write, delete, and abort incomplete
-  uploads only in that bucket. Only the named service account in this cluster's
-  `montecarlo` namespace can assume it. Existing workload roles are unchanged.
+  uploads only in that bucket, plus `kms:GenerateDataKey` and `kms:Decrypt` on
+  the backup key for uploads and restores. Only the named service account in
+  this cluster's `montecarlo` namespace can assume it. Existing workload roles
+  are unchanged.
 - A generated 32-character password at
   `<cluster>/clickhouse/backup-credentials` in Secrets Manager, encrypted with
   the module's existing secrets key.
@@ -314,7 +317,12 @@ steps do not require rebuilding the EKS cluster.
 The bucket has `force_destroy = false`: removing this configuration will fail
 while backup files remain. Delete files deliberately before deleting the bucket.
 The password secret follows the existing module convention of immediate deletion
-when Terraform removes it.
+when Terraform removes it. Removing the backup key schedules its deletion after
+seven days; keep that key if any retained backup files still need it.
+
+Changing an existing bucket's default encryption affects new uploads only;
+existing files keep their previous encryption. Backup clients can use the bucket
+default by leaving their encryption settings unset.
 
 ### Least-privilege ClickHouse users
 

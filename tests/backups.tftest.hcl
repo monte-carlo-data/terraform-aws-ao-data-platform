@@ -47,6 +47,14 @@ mock_provider "aws" {
   }
 
   override_resource {
+    target = aws_kms_key.clickhouse_backup[0]
+    values = {
+      key_id = "11111111-1111-1111-1111-111111111111"
+      arn    = "arn:aws:kms:us-east-1:123456789012:key/11111111-1111-1111-1111-111111111111"
+    }
+  }
+
+  override_resource {
     target = aws_secretsmanager_secret.clickhouse_backup[0]
     values = {
       id  = "arn:aws:secretsmanager:us-east-1:123456789012:secret:test-cluster/clickhouse/backup-credentials-ABCDEF"
@@ -102,13 +110,15 @@ run "backup_disabled_by_default" {
       length(aws_s3_bucket_ownership_controls.clickhouse_backup) == 0,
       length(aws_s3_bucket_server_side_encryption_configuration.clickhouse_backup) == 0,
       length(aws_s3_bucket_policy.clickhouse_backup) == 0,
+      length(aws_kms_key.clickhouse_backup) == 0,
+      length(aws_kms_alias.clickhouse_backup) == 0,
       length(aws_iam_role.clickhouse_backup) == 0,
       length(aws_iam_role_policy.clickhouse_backup) == 0,
       length(random_password.clickhouse_backup) == 0,
       length(aws_secretsmanager_secret.clickhouse_backup) == 0,
       length(aws_secretsmanager_secret_version.clickhouse_backup) == 0,
     ])
-    error_message = "Existing callers must not receive backup storage, access, or credentials unless they enable backups."
+    error_message = "Existing callers must not receive backup storage, encryption keys, access, or credentials unless they enable backups."
   }
 
   assert {
@@ -144,8 +154,24 @@ run "backup_storage_is_private_and_not_force_deleted" {
   }
 
   assert {
-    condition     = one(one(aws_s3_bucket_server_side_encryption_configuration.clickhouse_backup[0].rule).apply_server_side_encryption_by_default).sse_algorithm == "AES256"
-    error_message = "Backup objects must use S3-managed encryption by default."
+    condition = (
+      one(one(aws_s3_bucket_server_side_encryption_configuration.clickhouse_backup[0].rule).apply_server_side_encryption_by_default).sse_algorithm == "aws:kms" &&
+      one(one(aws_s3_bucket_server_side_encryption_configuration.clickhouse_backup[0].rule).apply_server_side_encryption_by_default).kms_master_key_id == aws_kms_key.clickhouse_backup[0].arn &&
+      aws_kms_key.clickhouse_backup[0].arn != aws_kms_key.pipeline_secrets.arn
+    )
+    error_message = "Backup files must use their own KMS key by default, separate from the key used for passwords."
+  }
+
+  assert {
+    condition = (
+      length(aws_kms_key.clickhouse_backup) == 1 &&
+      length(aws_kms_alias.clickhouse_backup) == 1 &&
+      aws_kms_key.clickhouse_backup[0].enable_key_rotation &&
+      aws_kms_key.clickhouse_backup[0].deletion_window_in_days == 7 &&
+      aws_kms_alias.clickhouse_backup[0].name == "alias/test-cluster-clickhouse-backup" &&
+      aws_kms_alias.clickhouse_backup[0].target_key_id == aws_kms_key.clickhouse_backup[0].key_id
+    )
+    error_message = "Enabling backups must create one named KMS key with automatic rotation and a seven-day deletion waiting period."
   }
 
   assert {
@@ -195,7 +221,7 @@ run "backup_role_trusts_only_the_selected_service_account" {
   }
 }
 
-run "backup_role_can_only_read_and_write_its_backup_bucket" {
+run "backup_role_can_only_use_its_backup_bucket_and_key" {
   command = plan
 
   variables {
@@ -204,10 +230,10 @@ run "backup_role_can_only_read_and_write_its_backup_bucket" {
 
   assert {
     condition = (
-      length(jsondecode(aws_iam_role_policy.clickhouse_backup[0].policy).Statement) == 2 &&
+      length(jsondecode(aws_iam_role_policy.clickhouse_backup[0].policy).Statement) == 3 &&
       alltrue([for statement in jsondecode(aws_iam_role_policy.clickhouse_backup[0].policy).Statement : statement.Effect == "Allow"])
     )
-    error_message = "The backup role must contain only its two S3 grants, without additional secret, key, or account-wide permissions."
+    error_message = "The backup role must contain only its two S3 grants and one backup-key grant, without secret or account-wide permissions."
   }
 
   assert {
@@ -226,6 +252,16 @@ run "backup_role_can_only_read_and_write_its_backup_bucket" {
       toset(flatten([statement.Resource])) == toset(["arn:aws:s3:::test-clickhouse-backups/*"])
     ])
     error_message = "Object permissions must permit backup and restore operations only within this backup bucket."
+  }
+
+  assert {
+    condition = anytrue([
+      for statement in jsondecode(aws_iam_role_policy.clickhouse_backup[0].policy).Statement :
+      statement.Sid == "BackupEncryptionKey" &&
+      toset(flatten([statement.Action])) == toset(["kms:GenerateDataKey", "kms:Decrypt"]) &&
+      toset(flatten([statement.Resource])) == toset([aws_kms_key.clickhouse_backup[0].arn])
+    ])
+    error_message = "Key permissions must allow only generating data keys and decrypting with the dedicated backup key."
   }
 }
 

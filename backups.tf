@@ -33,13 +33,32 @@ resource "aws_s3_bucket_ownership_controls" "clickhouse_backup" {
   }
 }
 
+# Keep backup-file encryption separate from the key used for stored passwords.
+# AWS's default key policy allows this account to grant access through IAM.
+resource "aws_kms_key" "clickhouse_backup" {
+  count = local.clickhouse_backup_enabled ? 1 : 0
+
+  description             = "${local.effective_cluster_name} ClickHouse backup files"
+  deletion_window_in_days = 7
+  enable_key_rotation     = true
+  tags                    = var.tags
+}
+
+resource "aws_kms_alias" "clickhouse_backup" {
+  count = local.clickhouse_backup_enabled ? 1 : 0
+
+  name          = "alias/${local.effective_cluster_name}-clickhouse-backup"
+  target_key_id = aws_kms_key.clickhouse_backup[0].key_id
+}
+
 resource "aws_s3_bucket_server_side_encryption_configuration" "clickhouse_backup" {
   count = local.clickhouse_backup_enabled ? 1 : 0
 
   bucket = aws_s3_bucket.clickhouse_backup[0].id
   rule {
     apply_server_side_encryption_by_default {
-      sse_algorithm = "AES256"
+      sse_algorithm     = "aws:kms"
+      kms_master_key_id = aws_kms_key.clickhouse_backup[0].arn
     }
   }
 }
@@ -115,6 +134,12 @@ resource "aws_iam_role_policy" "clickhouse_backup" {
           "s3:AbortMultipartUpload",
         ]
         Resource = "${aws_s3_bucket.clickhouse_backup[0].arn}/*"
+      },
+      {
+        Sid      = "BackupEncryptionKey"
+        Effect   = "Allow"
+        Action   = ["kms:GenerateDataKey", "kms:Decrypt"]
+        Resource = aws_kms_key.clickhouse_backup[0].arn
       },
     ]
   })
