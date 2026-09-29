@@ -300,7 +300,11 @@ The module creates:
   are unchanged.
 - A generated 32-character password at
   `<cluster>/clickhouse/backup-credentials` in Secrets Manager, encrypted with
-  the module's existing secrets key.
+  the module's existing secrets key. When the module installs External Secrets
+  Operator, its role can read this password so the backup installation can
+  deliver it to Kubernetes. If that operator is managed separately, grant its
+  role access to the backup secret and the secrets key before configuring
+  password delivery.
 
 The `clickhouse_backup` output provides the bucket, role, intended service
 account, SQL username, and secret ARN. It does not expose the password. Like the

@@ -61,6 +61,36 @@ mock_provider "aws" {
       arn = "arn:aws:secretsmanager:us-east-1:123456789012:secret:test-cluster/clickhouse/backup-credentials-ABCDEF"
     }
   }
+
+  override_resource {
+    target = aws_secretsmanager_secret.clickhouse_otel_password
+    values = { arn = "arn:aws:secretsmanager:us-east-1:123456789012:secret:test-cluster/clickhouse/otel-credentials-ABCDEF" }
+  }
+
+  override_resource {
+    target = aws_secretsmanager_secret.clickhouse_monte_carlo_password
+    values = { arn = "arn:aws:secretsmanager:us-east-1:123456789012:secret:test-cluster/clickhouse/monte-carlo-credentials-ABCDEF" }
+  }
+
+  override_resource {
+    target = aws_secretsmanager_secret.clickhouse_schema_owner_password
+    values = { arn = "arn:aws:secretsmanager:us-east-1:123456789012:secret:test-cluster/clickhouse/schema-owner-credentials-ABCDEF" }
+  }
+
+  override_resource {
+    target = aws_secretsmanager_secret.clickhouse_llm_worker_password
+    values = { arn = "arn:aws:secretsmanager:us-east-1:123456789012:secret:test-cluster/clickhouse/llm-worker-credentials-ABCDEF" }
+  }
+
+  override_resource {
+    target = aws_secretsmanager_secret.clickhouse_admin_password[0]
+    values = { arn = "arn:aws:secretsmanager:us-east-1:123456789012:secret:test-cluster/clickhouse/admin-credentials-ABCDEF" }
+  }
+
+  override_resource {
+    target = aws_secretsmanager_secret.clickhouse_readonly_user_password[0]
+    values = { arn = "arn:aws:secretsmanager:us-east-1:123456789012:secret:test-cluster/clickhouse/readonly-user-credentials-ABCDEF" }
+  }
 }
 
 mock_provider "tls" {
@@ -124,6 +154,29 @@ run "backup_disabled_by_default" {
   assert {
     condition     = output.clickhouse_backup == null
     error_message = "The backup output must be null when the feature is disabled."
+  }
+
+  assert {
+    condition = (
+      length(jsondecode(aws_iam_role_policy.external_secrets[0].policy).Statement) == 2 &&
+      alltrue([for statement in jsondecode(aws_iam_role_policy.external_secrets[0].policy).Statement : statement.Effect == "Allow"]) &&
+      anytrue([
+        for statement in jsondecode(aws_iam_role_policy.external_secrets[0].policy).Statement :
+        toset(flatten([statement.Action])) == toset(["secretsmanager:GetSecretValue", "secretsmanager:DescribeSecret"]) &&
+        toset(flatten([statement.Resource])) == toset([
+          aws_secretsmanager_secret.clickhouse_otel_password.arn,
+          aws_secretsmanager_secret.clickhouse_monte_carlo_password.arn,
+          aws_secretsmanager_secret.clickhouse_schema_owner_password.arn,
+          aws_secretsmanager_secret.clickhouse_llm_worker_password.arn,
+        ])
+      ]) &&
+      anytrue([
+        for statement in jsondecode(aws_iam_role_policy.external_secrets[0].policy).Statement :
+        toset(flatten([statement.Action])) == toset(["kms:Decrypt"]) &&
+        toset(flatten([statement.Resource])) == toset([aws_kms_key.pipeline_secrets.arn])
+      ])
+    )
+    error_message = "With backups disabled, External Secrets must retain only its original four password reads and its existing secrets-key decrypt permission."
   }
 }
 
@@ -294,5 +347,76 @@ run "backup_password_is_generated_and_stored_in_the_existing_key" {
       username             = "backup"
     }
     error_message = "Expose the storage and identity references needed for the backup job, without exposing its password."
+  }
+}
+
+run "external_secrets_reads_backup_password_without_expanding_other_access" {
+  command = plan
+
+  variables {
+    clickhouse_backup = { bucket_name = "test-clickhouse-backups" }
+    helm = {
+      deploy_charts = false
+      clickhouse = {
+        admin         = { enabled = true }
+        readonly_user = { enabled = true }
+      }
+    }
+  }
+
+  assert {
+    condition = (
+      length(jsondecode(aws_iam_role_policy.external_secrets[0].policy).Statement) == 2 &&
+      alltrue([for statement in jsondecode(aws_iam_role_policy.external_secrets[0].policy).Statement : statement.Effect == "Allow"])
+    )
+    error_message = "External Secrets must keep exactly its password-read grant and existing secrets-key grant, with no additional grants."
+  }
+
+  assert {
+    condition = anytrue([
+      for statement in jsondecode(aws_iam_role_policy.external_secrets[0].policy).Statement :
+      toset(flatten([statement.Action])) == toset(["secretsmanager:GetSecretValue", "secretsmanager:DescribeSecret"]) &&
+      toset(flatten([statement.Resource])) == toset([
+        aws_secretsmanager_secret.clickhouse_otel_password.arn,
+        aws_secretsmanager_secret.clickhouse_monte_carlo_password.arn,
+        aws_secretsmanager_secret.clickhouse_schema_owner_password.arn,
+        aws_secretsmanager_secret.clickhouse_llm_worker_password.arn,
+        aws_secretsmanager_secret.clickhouse_admin_password[0].arn,
+        aws_secretsmanager_secret.clickhouse_readonly_user_password[0].arn,
+        aws_secretsmanager_secret.clickhouse_backup[0].arn,
+      ])
+    ])
+    error_message = "External Secrets must read the backup password alongside all existing passwords, including optional users, without write access or access to unrelated secrets."
+  }
+
+  assert {
+    condition = anytrue([
+      for statement in jsondecode(aws_iam_role_policy.external_secrets[0].policy).Statement :
+      toset(flatten([statement.Action])) == toset(["kms:Decrypt"]) &&
+      toset(flatten([statement.Resource])) == toset([aws_kms_key.pipeline_secrets.arn])
+    ])
+    error_message = "External Secrets must still decrypt with only the passwords' existing KMS key, without receiving access to the backup-files key."
+  }
+}
+
+run "backup_storage_supports_an_externally_managed_secrets_operator" {
+  command = plan
+
+  variables {
+    clickhouse_backup = { bucket_name = "test-clickhouse-backups" }
+    helm = {
+      deploy_charts                     = false
+      install_external_secrets_operator = false
+    }
+  }
+
+  assert {
+    condition = (
+      length(aws_iam_role.external_secrets) == 0 &&
+      length(aws_iam_role_policy.external_secrets) == 0 &&
+      length(aws_secretsmanager_secret.clickhouse_backup) == 1 &&
+      length(aws_iam_role.clickhouse_backup) == 1
+    )
+    error_message = "Backup storage and its password must still be available when the caller manages External Secrets separately, without creating an operator role or policy."
   }
 }
