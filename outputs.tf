@@ -11,6 +11,16 @@ output "clickhouse_backup" {
   } : null
 }
 
+output "clickhouse_backup_monitoring" {
+  description = "Backup alert topic, alarms, and monitor role. Email alerts require the recipient to confirm the SNS subscription after apply. Null while monitoring is disabled."
+  value = local.clickhouse_backup_monitoring_enabled ? {
+    topic_arn            = aws_sns_topic.clickhouse_backup[0].arn
+    alarm_names          = local.clickhouse_backup_alarm_names
+    iam_role_arn         = aws_iam_role.clickhouse_backup_monitor[0].arn
+    service_account_name = "clickhouse-backup-monitor"
+  } : null
+}
+
 output "eks_cluster_name" {
   description = "EKS cluster name. Use with: aws eks update-kubeconfig --name <value> --region <region>"
 

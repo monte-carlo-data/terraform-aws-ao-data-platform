@@ -358,6 +358,14 @@ resource "helm_release" "ao_data_platform" {
     }
 
     precondition {
+      condition = !var.helm.clickhouse.backup.cleanup.enabled || var.helm.chart_path != null || (
+        local.clickhouse_backup_chart_version[0] > 5 ||
+        (local.clickhouse_backup_chart_version[0] == 5 && local.clickhouse_backup_chart_version[1] >= 3)
+      )
+      error_message = "Backup cleanup requires chart_version >= 5.3.0 or a local chart_path containing cleanup support."
+    }
+
+    precondition {
       condition     = var.clickhouse_domain != null && var.otel_collector_domain != null
       error_message = "clickhouse_domain and otel_collector_domain are required when helm.deploy_charts = true."
     }
@@ -415,6 +423,8 @@ resource "helm_release" "ao_data_platform" {
     helm_release.cert_manager,
     data.kubernetes_namespace_v1.cert_manager,
     null_resource.eso_resources,
+    # Install the monitor only after its metrics permission is attached.
+    aws_iam_role_policy.clickhouse_backup_monitor,
 
     # Every ClickHouse/Keeper node must exist before the chart schedules those
     # pods. Their PVCs use a WaitForFirstConsumer storage class, so a pod that

@@ -745,6 +745,13 @@ variable "helm" {
       backup = optional(object({
         enabled = optional(bool, false)
         suspend = optional(bool, false)
+        cleanup = optional(object({
+          enabled         = optional(bool, false)
+          dry_run         = optional(bool, true)
+          keep_last       = optional(number, 2)
+          keep_days       = optional(number, 0)
+          timeout_seconds = optional(number, 1800)
+        }), {})
       }), {})
     }), {})
 
@@ -818,6 +825,23 @@ variable "helm" {
   }
 
   validation {
+    condition     = !var.helm.clickhouse.backup.cleanup.enabled || var.helm.clickhouse.backup.enabled
+    error_message = "Backup cleanup requires helm.clickhouse.backup.enabled = true."
+  }
+
+  validation {
+    condition = (
+      var.helm.clickhouse.backup.cleanup.keep_last >= 1 &&
+      floor(var.helm.clickhouse.backup.cleanup.keep_last) == var.helm.clickhouse.backup.cleanup.keep_last &&
+      var.helm.clickhouse.backup.cleanup.keep_days >= 0 &&
+      floor(var.helm.clickhouse.backup.cleanup.keep_days) == var.helm.clickhouse.backup.cleanup.keep_days &&
+      var.helm.clickhouse.backup.cleanup.timeout_seconds >= 60 &&
+      floor(var.helm.clickhouse.backup.cleanup.timeout_seconds) == var.helm.clickhouse.backup.cleanup.timeout_seconds
+    )
+    error_message = "Backup cleanup keep_last must be a positive whole number, keep_days a nonnegative whole number, and timeout_seconds a whole number of at least 60."
+  }
+
+  validation {
     condition     = alltrue([for name, r in var.helm.opentelemetry_collector.awss3_receivers : can(regex("^[a-zA-Z0-9_-]+$", name))])
     error_message = "helm.opentelemetry_collector.awss3_receivers keys may only contain alphanumeric characters, hyphens, and underscores — each key becomes the OTel component ID \"awss3/<key>\" in the rendered collector config."
   }
@@ -869,6 +893,40 @@ variable "clickhouse_backup" {
       can(regex("^[a-z0-9]([-a-z0-9]*[a-z0-9])?$", var.clickhouse_backup.service_account_name))
     )
     error_message = "clickhouse_backup.service_account_name must be a lowercase Kubernetes name of at most 63 characters, using letters, digits, and hyphens."
+  }
+}
+
+variable "clickhouse_backup_monitoring" {
+  description = <<-EOT
+    Optional scheduled-backup alerts. Creates a separate role for a Kubernetes
+    monitor, CloudWatch alarms, and an SNS email subscription. The monitor can
+    publish metrics only; it cannot read passwords or change backup files.
+    Requires installed backups and chart 5.3.0 or later (or a local chart).
+
+    max_age_seconds allows 4 hours between scheduled backups plus 15 minutes
+    for completion by default. Manual backups do not reset this timer. After
+    apply, the recipient must confirm the AWS subscription email before any
+    alerts can arrive. Null creates no monitoring resources or chart values.
+  EOT
+  type = object({
+    alert_email     = string
+    max_age_seconds = optional(number, 15300)
+  })
+  default = null
+
+  validation {
+    condition = var.clickhouse_backup_monitoring == null ? true : (
+      can(regex("^[^[:space:]@]+@[^[:space:]@]+\\.[^[:space:]@]+$", var.clickhouse_backup_monitoring.alert_email))
+    )
+    error_message = "clickhouse_backup_monitoring.alert_email must be an email address."
+  }
+
+  validation {
+    condition = var.clickhouse_backup_monitoring == null ? true : (
+      var.clickhouse_backup_monitoring.max_age_seconds >= 300 &&
+      floor(var.clickhouse_backup_monitoring.max_age_seconds) == var.clickhouse_backup_monitoring.max_age_seconds
+    )
+    error_message = "clickhouse_backup_monitoring.max_age_seconds must be a whole number of at least 300 seconds."
   }
 }
 

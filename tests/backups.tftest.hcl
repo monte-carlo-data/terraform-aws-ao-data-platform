@@ -62,6 +62,21 @@ mock_provider "aws" {
   }
 
   override_resource {
+    target = aws_iam_role.clickhouse_backup_monitor[0]
+    values = { arn = "arn:aws:iam::123456789012:role/test-backup-monitor" }
+  }
+
+  override_resource {
+    target = aws_sns_topic.clickhouse_backup[0]
+    values = { arn = "arn:aws:sns:us-east-1:123456789012:test-backup-alerts" }
+  }
+
+  override_data {
+    target = data.aws_caller_identity.clickhouse_backup_monitor[0]
+    values = { account_id = "123456789012" }
+  }
+
+  override_resource {
     target = aws_kms_key.pipeline_secrets
     values = { arn = "arn:aws:kms:us-east-1:123456789012:key/00000000-0000-0000-0000-000000000000" }
   }
@@ -174,6 +189,13 @@ run "backup_disabled_by_default" {
       length(aws_secretsmanager_secret_version.clickhouse_backup) == 0,
       length(random_password.clickhouse_backup_api) == 0,
       length(kubernetes_secret_v1.clickhouse_backup_api) == 0,
+      length(aws_iam_role.clickhouse_backup_monitor) == 0,
+      length(aws_iam_role_policy.clickhouse_backup_monitor) == 0,
+      length(aws_sns_topic.clickhouse_backup) == 0,
+      length(aws_sns_topic_subscription.clickhouse_backup_email) == 0,
+      length(aws_sns_topic_policy.clickhouse_backup) == 0,
+      length(aws_cloudwatch_metric_alarm.clickhouse_backup) == 0,
+      output.clickhouse_backup_monitoring == null,
       length(keys(local.helm_clickhouse_backup_block)) == 0,
     ])
     error_message = "Existing callers must not receive backup storage, encryption keys, access, or credentials unless they enable backups."
@@ -676,6 +698,209 @@ run "local_chart_accepts_a_packaged_snapshot" {
     condition     = helm_release.ao_data_platform[0].chart == abspath("tests/fixtures/local-chart-0.0.0.tgz")
     error_message = "An existing packaged chart must be accepted for reproducible local testing."
   }
+}
+
+run "backup_monitoring_limits_access_and_wires_external_alarms" {
+  command = plan
+  variables {
+    clickhouse_backup            = { bucket_name = "test-clickhouse-backups" }
+    clickhouse_backup_monitoring = { alert_email = "backups@example.com" }
+    clickhouse_domain            = "clickhouse.example.com"
+    otel_collector_domain        = "otel.example.com"
+    helm = {
+      chart_registry = "oci://registry-1.docker.io/montecarlodata"
+      chart_version  = "5.3.0"
+      clickhouse     = { backup = { enabled = true } }
+    }
+  }
+
+  assert {
+    condition = jsondecode(aws_iam_role_policy.clickhouse_backup_monitor[0].policy).Statement == [{
+      Effect    = "Allow"
+      Action    = "cloudwatch:PutMetricData"
+      Resource  = "*"
+      Condition = { StringEquals = { "cloudwatch:namespace" = "AO/ClickHouseBackup" } }
+    }]
+    error_message = "The monitor must only publish backup metrics, with no backup-file, password, or notification access."
+  }
+
+  assert {
+    condition = jsondecode(aws_iam_role.clickhouse_backup_monitor[0].assume_role_policy).Statement == [{
+      Effect    = "Allow"
+      Principal = { Federated = "arn:aws:iam::123456789012:oidc-provider/oidc.eks.us-east-1.amazonaws.com/id/TESTOIDC" }
+      Action    = "sts:AssumeRoleWithWebIdentity"
+      Condition = {
+        StringEquals = {
+          "oidc.eks.us-east-1.amazonaws.com/id/TESTOIDC:sub" = "system:serviceaccount:montecarlo:clickhouse-backup-monitor"
+          "oidc.eks.us-east-1.amazonaws.com/id/TESTOIDC:aud" = "sts.amazonaws.com"
+        }
+      }
+    }]
+    error_message = "Only the dedicated monitoring service account may assume the metrics role."
+  }
+
+  assert {
+    condition = (
+      aws_sns_topic_subscription.clickhouse_backup_email[0].protocol == "email" &&
+      aws_sns_topic_subscription.clickhouse_backup_email[0].endpoint == "backups@example.com" &&
+      aws_sns_topic_subscription.clickhouse_backup_email[0].topic_arn == aws_sns_topic.clickhouse_backup[0].arn &&
+      jsondecode(aws_sns_topic_policy.clickhouse_backup[0].policy).Statement[0].Principal.Service == "cloudwatch.amazonaws.com" &&
+      jsondecode(aws_sns_topic_policy.clickhouse_backup[0].policy).Statement[0].Action == "sns:Publish" &&
+      jsondecode(aws_sns_topic_policy.clickhouse_backup[0].policy).Statement[0].Resource == aws_sns_topic.clickhouse_backup[0].arn &&
+      jsondecode(aws_sns_topic_policy.clickhouse_backup[0].policy).Statement[0].Condition.StringEquals["aws:SourceAccount"] == "123456789012" &&
+      toset(jsondecode(aws_sns_topic_policy.clickhouse_backup[0].policy).Statement[0].Condition.ArnEquals["aws:SourceArn"]) == toset([
+        "arn:aws:cloudwatch:us-east-1:123456789012:alarm:test-cluster-us-east-1-clickhouse-backup-failed",
+        "arn:aws:cloudwatch:us-east-1:123456789012:alarm:test-cluster-us-east-1-clickhouse-backup-overdue",
+        "arn:aws:cloudwatch:us-east-1:123456789012:alarm:test-cluster-us-east-1-clickhouse-backup-monitor",
+      ])
+    )
+    error_message = "Only these three alarms in the same account should be allowed to publish to the chosen email topic."
+  }
+
+  assert {
+    condition = (
+      length(aws_cloudwatch_metric_alarm.clickhouse_backup) == 3 &&
+      alltrue([for alarm in aws_cloudwatch_metric_alarm.clickhouse_backup : (
+        alarm.namespace == "AO/ClickHouseBackup" && alarm.period == 300 && alarm.threshold == 1 &&
+        alarm.dimensions == tomap({ Cluster = "test-cluster", Namespace = "montecarlo", CronJob = "otel-backup" }) &&
+        toset(alarm.alarm_actions) == toset([aws_sns_topic.clickhouse_backup[0].arn]) &&
+        toset(alarm.ok_actions) == toset([aws_sns_topic.clickhouse_backup[0].arn])
+      )]) &&
+      aws_cloudwatch_metric_alarm.clickhouse_backup["failed"].metric_name == "BackupJobFailed" &&
+      aws_cloudwatch_metric_alarm.clickhouse_backup["failed"].comparison_operator == "GreaterThanOrEqualToThreshold" &&
+      aws_cloudwatch_metric_alarm.clickhouse_backup["failed"].evaluation_periods == 1 &&
+      aws_cloudwatch_metric_alarm.clickhouse_backup["failed"].treat_missing_data == "notBreaching" &&
+      aws_cloudwatch_metric_alarm.clickhouse_backup["overdue"].metric_name == "BackupOverdue" &&
+      aws_cloudwatch_metric_alarm.clickhouse_backup["overdue"].comparison_operator == "GreaterThanOrEqualToThreshold" &&
+      aws_cloudwatch_metric_alarm.clickhouse_backup["overdue"].evaluation_periods == 1 &&
+      aws_cloudwatch_metric_alarm.clickhouse_backup["overdue"].treat_missing_data == "notBreaching" &&
+      aws_cloudwatch_metric_alarm.clickhouse_backup["monitor"].metric_name == "MonitorHealthy" &&
+      aws_cloudwatch_metric_alarm.clickhouse_backup["monitor"].comparison_operator == "LessThanThreshold" &&
+      aws_cloudwatch_metric_alarm.clickhouse_backup["monitor"].evaluation_periods == 3 &&
+      aws_cloudwatch_metric_alarm.clickhouse_backup["monitor"].datapoints_to_alarm == 3 &&
+      aws_cloudwatch_metric_alarm.clickhouse_backup["monitor"].treat_missing_data == "breaching"
+    )
+    error_message = "Alarms must detect failed/overdue scheduled backups and separately alert if the five-minute monitor stops reporting."
+  }
+
+  assert {
+    condition = jsonencode(yamldecode(helm_release.ao_data_platform[0].values[0]).clickhouse.backup.monitoring) == jsonencode({
+      enabled = true
+      aws = {
+        region      = "us-east-1"
+        roleArn     = "arn:aws:iam::123456789012:role/test-backup-monitor"
+        clusterName = "test-cluster"
+      }
+      maxAgeSeconds = 15300
+    })
+    error_message = "The chart must use the dedicated metrics role and the same cluster identity as the alarms."
+  }
+}
+
+run "cleanup_is_explicit_and_defaults_to_a_dry_run" {
+  command = plan
+  variables {
+    clickhouse_backup     = { bucket_name = "test-clickhouse-backups" }
+    clickhouse_domain     = "clickhouse.example.com"
+    otel_collector_domain = "otel.example.com"
+    helm = {
+      chart_registry = "oci://registry-1.docker.io/montecarlodata"
+      chart_version  = "5.3.0"
+      clickhouse     = { backup = { enabled = true, cleanup = { enabled = true } } }
+    }
+  }
+  assert {
+    condition = jsonencode(yamldecode(helm_release.ao_data_platform[0].values[0]).clickhouse.backup.cleanup) == jsonencode({
+      enabled = true, dryRun = true, keepLast = 2, keepDays = 0, timeoutSeconds = 1800
+    })
+    error_message = "Cleanup must remain a dry run until explicitly enabled for deletion."
+  }
+  assert {
+    condition     = !can(yamldecode(helm_release.ao_data_platform[0].values[0]).clickhouse.backup.monitoring)
+    error_message = "Cleanup alone must not create monitoring settings."
+  }
+}
+
+run "cleanup_and_monitoring_support_a_local_chart_and_explicit_settings" {
+  command = plan
+  variables {
+    clickhouse_backup            = { bucket_name = "test-clickhouse-backups" }
+    clickhouse_backup_monitoring = { alert_email = "backups@example.com", max_age_seconds = 16000 }
+    clickhouse_domain            = "clickhouse.example.com"
+    otel_collector_domain        = "otel.example.com"
+    helm = {
+      chart_registry = "oci://registry-1.docker.io/montecarlodata"
+      chart_version  = "5.2.0"
+      chart_path     = "tests/fixtures/local-chart"
+      clickhouse = { backup = { enabled = true, cleanup = {
+        enabled = true, dry_run = false, keep_last = 3, keep_days = 30, timeout_seconds = 600
+      } } }
+    }
+  }
+  assert {
+    condition = (
+      jsonencode(yamldecode(helm_release.ao_data_platform[0].values[0]).clickhouse.backup.cleanup) == jsonencode({
+        enabled = true, dryRun = false, keepLast = 3, keepDays = 30, timeoutSeconds = 600
+      }) &&
+      yamldecode(helm_release.ao_data_platform[0].values[0]).clickhouse.backup.monitoring.maxAgeSeconds == 16000
+    )
+    error_message = "Explicit cleanup and monitoring settings must reach a local chart without changing the existing storage."
+  }
+}
+
+run "monitoring_rejects_missing_scheduled_backups" {
+  command = plan
+  variables { clickhouse_backup_monitoring = { alert_email = "backups@example.com" } }
+  expect_failures = [aws_iam_role.clickhouse_backup_monitor]
+}
+
+run "monitoring_rejects_published_charts_without_monitoring_support" {
+  command = plan
+  variables {
+    clickhouse_backup            = { bucket_name = "test-clickhouse-backups" }
+    clickhouse_backup_monitoring = { alert_email = "backups@example.com" }
+    clickhouse_domain            = "clickhouse.example.com"
+    otel_collector_domain        = "otel.example.com"
+    helm = {
+      chart_registry = "oci://registry-1.docker.io/montecarlodata"
+      chart_version  = "5.2.0"
+      clickhouse     = { backup = { enabled = true } }
+    }
+  }
+  expect_failures = [aws_iam_role.clickhouse_backup_monitor]
+}
+
+run "cleanup_rejects_published_charts_without_cleanup_support" {
+  command = plan
+  variables {
+    clickhouse_backup     = { bucket_name = "test-clickhouse-backups" }
+    clickhouse_domain     = "clickhouse.example.com"
+    otel_collector_domain = "otel.example.com"
+    helm = {
+      chart_registry = "oci://registry-1.docker.io/montecarlodata"
+      chart_version  = "5.2.0"
+      clickhouse     = { backup = { enabled = true, cleanup = { enabled = true } } }
+    }
+  }
+  expect_failures = [helm_release.ao_data_platform]
+}
+
+run "monitoring_requires_an_email_and_valid_age" {
+  command = plan
+  variables { clickhouse_backup_monitoring = { alert_email = "not-an-email", max_age_seconds = 0 } }
+  expect_failures = [var.clickhouse_backup_monitoring]
+}
+
+run "cleanup_rejects_zero_kept_backups" {
+  command = plan
+  variables { helm = { deploy_charts = false, clickhouse = { backup = { cleanup = { keep_last = 0 } } } } }
+  expect_failures = [var.helm]
+}
+
+run "cleanup_rejects_timeouts_below_one_minute" {
+  command = plan
+  variables { helm = { deploy_charts = false, clickhouse = { backup = { cleanup = { timeout_seconds = 59 } } } } }
+  expect_failures = [var.helm]
 }
 
 run "local_chart_override_keeps_registry_required" {

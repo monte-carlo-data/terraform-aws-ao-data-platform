@@ -246,8 +246,28 @@ locals {
   # chart values and a password for its controls, using the existing AWS resources.
   clickhouse_backup_install_enabled = var.helm.deploy_charts && var.helm.clickhouse.backup.enabled && local.clickhouse_backup_enabled
   clickhouse_backup_chart_version   = try([for component in regex("^v?([0-9]+)\\.([0-9]+)\\.", var.helm.chart_version) : tonumber(component)], [0, 0])
+  helm_clickhouse_backup_cleanup = var.helm.clickhouse.backup.cleanup.enabled ? {
+    cleanup = {
+      enabled        = true
+      dryRun         = var.helm.clickhouse.backup.cleanup.dry_run
+      keepLast       = var.helm.clickhouse.backup.cleanup.keep_last
+      keepDays       = var.helm.clickhouse.backup.cleanup.keep_days
+      timeoutSeconds = var.helm.clickhouse.backup.cleanup.timeout_seconds
+    }
+  } : {}
+  helm_clickhouse_backup_monitoring = local.clickhouse_backup_monitoring_enabled ? {
+    monitoring = {
+      enabled = true
+      aws = {
+        region      = var.region
+        roleArn     = aws_iam_role.clickhouse_backup_monitor[0].arn
+        clusterName = local.effective_cluster_name
+      }
+      maxAgeSeconds = var.clickhouse_backup_monitoring.max_age_seconds
+    }
+  } : {}
   helm_clickhouse_backup_block = local.clickhouse_backup_install_enabled ? {
-    backup = {
+    backup = merge({
       enabled  = true
       provider = "aws"
       aws = {
@@ -263,7 +283,7 @@ locals {
       }
       api      = { existingSecret = kubernetes_secret_v1.clickhouse_backup_api[0].metadata[0].name }
       schedule = { suspend = var.helm.clickhouse.backup.suspend }
-    }
+    }, local.helm_clickhouse_backup_cleanup, local.helm_clickhouse_backup_monitoring)
   } : {}
 
   # Singleton maps merged into clickhouse helm values when the dedicated CH

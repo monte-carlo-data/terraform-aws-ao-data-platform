@@ -347,6 +347,48 @@ directory containing `Chart.yaml` also works, but Terraform does not reliably
 notice edits under an unchanged path. Leave `chart_path` unset for published
 deployments.
 
+Chart 5.3.0 or later also supports cleanup after a successful scheduled backup:
+
+```hcl
+# Inside helm.clickhouse.backup, alongside enabled = true:
+cleanup = {
+  enabled   = true
+  dry_run   = true # Inspect the proposed deletions before setting false.
+  keep_last = 2    # Short development test; also keep any full backups these need.
+  keep_days = 0    # Set 30 to also keep the last 30 days for a real deployment.
+}
+
+# At module level, separate from helm:
+clickhouse_backup_monitoring = {
+  alert_email = "backups@example.com"
+  # max_age_seconds = 15300 # Four hours plus 15 minutes to finish.
+}
+```
+
+Cleanup is disabled by default. When enabled, it defaults to a dry run, keeping
+the newest two backups and the earlier backups they depend on. `keep_days`
+additionally keeps backups within that age; no S3 file-expiry rule is created.
+`timeout_seconds` defaults to 1800 and must be at least 60. Cleanup runs inside
+the scheduled backup Job, so a cleanup error also fails that Job and reaches
+the same failure alert.
+
+Monitoring is independent of that Job: a separate check runs every five minutes
+and reads Kubernetes' record of scheduled backup results. Manual backups do not
+reset the last-success time. Its AWS role can only publish backup metrics; it
+cannot read passwords or change backup files. CloudWatch sends email when a
+scheduled backup or cleanup fails, when no scheduled backup finishes within the
+allowed time, or when the monitor itself stops reporting. The monitor alarm uses
+three five-minute periods; CloudWatch also looks at earlier measurements, so a
+missing report can take longer than 15 minutes to trigger an alert. Verify the
+observed delivery time during the development test. Recovery sends an email too.
+The CloudWatch check continues outside the cluster if Kubernetes stops running.
+**After apply, confirm the AWS SNS email
+subscription**; messages cannot arrive until that confirmation is complete.
+
+Leave `clickhouse_backup_monitoring` unset to create no monitoring resources.
+Cleanup and monitoring both require chart 5.3.0 or a local chart with this
+support. Existing backup installations can keep chart 5.2.0 when both are off.
+
 The bucket has `force_destroy = false`: removing this configuration will fail
 while backup files remain. Delete files deliberately before deleting the bucket.
 The password secret follows the existing module convention of immediate deletion
@@ -615,12 +657,16 @@ To use a StorageClass you manage outside this module, set `clickhouse_storage_cl
 | `trace_export_ingest` | `object` | `null` | Optional trace-export ingest leg — see [Trace-export ingest leg](#trace-export-ingest-leg). Shape: `{ producer_execution_role_arn = string, agent_role_arn = optional(string), bucket_name = optional(string), prefix = optional(string, "traces/"), lifecycle_days = optional(number, 3), kms_key_arn = optional(string) }`. `producer_execution_role_arn` is the external role trusted to assume the writer role (exact ARN or role-name wildcard; literal account ID enforced); the trust condition's `sts:ExternalId` value comes from the separate `trace_export_external_id` variable, which is required when this block is set. `agent_role_arn` optionally grants one additional role `s3:PutObject` on the prefix via the bucket policy. `prefix` accepts multi-segment values (`"traces/tenant-a/"`) and is normalized to one trailing `/`. `kms_key_arn` switches the bucket to SSE-KMS (Bucket Keys on) and widens writer/collector policies accordingly. Unset (default), no resources are created and the plan is unchanged from previous releases. |
 | `trace_export_external_id` | `string` (sensitive) | `null` | The `sts:ExternalId` value the external producer supplies when assuming the trace-export writer role (min 8 chars). Required when `trace_export_ingest` is set. Marked `sensitive`, so caller-supplied values are redacted in plan/apply output and CI logs — supply via a `.tfvars` file or `TF_VAR_trace_export_external_id`. Values remain readable in Terraform state — protect state accordingly. |
 | `clickhouse_backup` | `object` | `null` | Optional backup bucket, scoped IAM role, and stored password. Requires `bucket_name`; `service_account_name` defaults to `clickhouse-backup`. See [ClickHouse backup storage](#clickhouse-backup-storage). |
+| `clickhouse_backup_monitoring` | `object` | `null` | Optional independent scheduled-backup checks and email alerts. Requires `alert_email`; `max_age_seconds` defaults to `15300`. Confirm the SNS subscription email after apply. |
 
 ## Outputs
 
 The `clickhouse_backup` output is an object containing `bucket_name`, `bucket_arn`,
 `iam_role_arn`, `namespace`, `service_account_name`, `username`, and
 `password_secret_arn`. It is null when backup storage is disabled.
+
+The `clickhouse_backup_monitoring` output contains `topic_arn`, `alarm_names`,
+`iam_role_arn`, and `service_account_name`. It is null when monitoring is disabled.
 
 | Name | Description |
 |------|-------------|
