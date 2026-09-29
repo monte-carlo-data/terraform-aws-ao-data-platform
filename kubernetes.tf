@@ -8,6 +8,18 @@ resource "kubernetes_namespace_v1" "montecarlo" {
   depends_on = [module.eks, data.aws_eks_cluster.existing]
 }
 
+resource "kubernetes_secret_v1" "clickhouse_backup_api" {
+  count = local.clickhouse_backup_install_enabled ? 1 : 0
+
+  metadata {
+    name      = "ao-clickhouse-backup-api"
+    namespace = kubernetes_namespace_v1.montecarlo.metadata[0].name
+  }
+
+  type = "Opaque"
+  data = { password = random_password.clickhouse_backup_api[0].result }
+}
+
 # gp3 StorageClass — cluster-wide EBS storage class used by the ao-data-platform chart.
 # EKS clusters ship with gp2 by default; gp3 offers better baseline performance at the same cost.
 

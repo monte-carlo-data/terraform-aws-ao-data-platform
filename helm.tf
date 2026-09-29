@@ -201,8 +201,8 @@ resource "helm_release" "ao_data_platform" {
   count = var.helm.deploy_charts ? 1 : 0
 
   name             = "ao-data-platform"
-  chart            = "${var.helm.chart_registry}/ao-data-platform"
-  version          = var.helm.chart_version
+  chart            = var.helm.chart_path == null ? "${var.helm.chart_registry}/ao-data-platform" : abspath(pathexpand(var.helm.chart_path))
+  version          = var.helm.chart_path == null ? var.helm.chart_version : null
   namespace        = kubernetes_namespace_v1.montecarlo.metadata[0].name
   create_namespace = false
   wait_for_jobs    = true
@@ -281,7 +281,7 @@ resource "helm_release" "ao_data_platform" {
             "service.beta.kubernetes.io/load-balancer-source-ranges" = join(",", local.clickhouse_nlb_source_ranges)
           } : {})
         }
-      }, local.helm_clickhouse_resources_block, local.helm_clickhouse_admin_block, local.helm_clickhouse_readonly_user_block, local.helm_clickhouse_node_selector_block, local.helm_clickhouse_tolerations_block)
+      }, local.helm_clickhouse_resources_block, local.helm_clickhouse_admin_block, local.helm_clickhouse_readonly_user_block, local.helm_clickhouse_backup_block, local.helm_clickhouse_node_selector_block, local.helm_clickhouse_tolerations_block)
       "opentelemetry-collector" = merge({
         serviceAccount = {
           annotations = {
@@ -339,6 +339,24 @@ resource "helm_release" "ao_data_platform" {
   ]
 
   lifecycle {
+    precondition {
+      condition     = !var.helm.clickhouse.backup.enabled || local.clickhouse_backup_enabled
+      error_message = "helm.clickhouse.backup.enabled requires clickhouse_backup storage. Keep the existing bucket, role, and stored password configured."
+    }
+
+    precondition {
+      condition = !var.helm.clickhouse.backup.enabled || var.helm.chart_path != null || (
+        local.clickhouse_backup_chart_version[0] > 5 ||
+        (local.clickhouse_backup_chart_version[0] == 5 && local.clickhouse_backup_chart_version[1] >= 2)
+      )
+      error_message = "Scheduled backups require chart_version >= 5.2.0 or a local chart_path containing backup support; older published charts ignore the backup settings."
+    }
+
+    precondition {
+      condition     = !local.clickhouse_backup_install_enabled || try(var.clickhouse_backup.service_account_name != "default", true)
+      error_message = "Scheduled backups require a dedicated service account; clickhouse_backup.service_account_name cannot be default."
+    }
+
     precondition {
       condition     = var.clickhouse_domain != null && var.otel_collector_domain != null
       error_message = "clickhouse_domain and otel_collector_domain are required when helm.deploy_charts = true."

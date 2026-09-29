@@ -311,12 +311,41 @@ account, SQL username, and secret ARN. It does not expose the password. Like the
 module's other generated credentials, the password remains in Terraform state;
 keep that state private.
 
-This prepares the resources for the backup installation. It does not create the
+The storage block alone prepares resources. It does not create the
 ClickHouse `backup` user, deliver its password, attach the AWS role to a running
 service, or schedule backups. The backup installation must create the named
 service account with an `eks.amazonaws.com/role-arn` annotation using the output
 role ARN, then assign it to the service that uploads the backup files. These
 steps do not require rebuilding the EKS cluster.
+
+To install scheduled backups, keep the storage block and add `backup` under the
+existing `helm.clickhouse` settings. Use chart 5.2.0 or later, or a local chart
+containing backup support:
+
+```hcl
+clickhouse = {
+  backup = {
+    enabled = true
+    suspend = true # Install first; set false when ready for scheduled jobs.
+  }
+}
+```
+
+The module supplies the existing bucket, AWS role, service account, and stored
+database password to the chart. It also creates a separate Kubernetes password
+for the backup controls. That password stays unchanged across normal applies;
+it is kept in private Terraform state and never passed through Helm values.
+Changing it requires restarting the backup containers. The database password
+continues to use the chart's existing password delivery and rotation process.
+
+For development before the chart is published, set `helm.chart_path` to a local
+`.tgz` chart package. Keep `chart_registry` and `chart_version` set; the registry
+still supplies the worker image. The local package overrides the published chart
+and version. Give each edited package a new filename, such as
+`ao-data-platform-5.2.0-ao1299.gCOMMIT.tgz`, so Terraform sees the change. A chart
+directory containing `Chart.yaml` also works, but Terraform does not reliably
+notice edits under an unchanged path. Leave `chart_path` unset for published
+deployments.
 
 The bucket has `force_destroy = false`: removing this configuration will fail
 while backup files remain. Delete files deliberately before deleting the bucket.

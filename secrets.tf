@@ -40,6 +40,14 @@ resource "random_password" "clickhouse_readonly_user" {
   special = false
 }
 
+# Separate from the rotating ClickHouse password: the backup API reads this
+# once at startup. A normal plan or chart upgrade keeps this value unchanged.
+resource "random_password" "clickhouse_backup_api" {
+  count   = local.clickhouse_backup_install_enabled ? 1 : 0
+  length  = 32
+  special = false
+}
+
 # KMS — customer-managed key for all Secrets Manager secrets.
 
 resource "aws_kms_key" "pipeline_secrets" {

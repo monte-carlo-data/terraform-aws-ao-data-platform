@@ -242,6 +242,30 @@ locals {
     }
   } : {}
 
+  # Storage remains independently enabled. Installing the software adds only
+  # chart values and a password for its controls, using the existing AWS resources.
+  clickhouse_backup_install_enabled = var.helm.deploy_charts && var.helm.clickhouse.backup.enabled && local.clickhouse_backup_enabled
+  clickhouse_backup_chart_version   = try([for component in regex("^v?([0-9]+)\\.([0-9]+)\\.", var.helm.chart_version) : tonumber(component)], [0, 0])
+  helm_clickhouse_backup_block = local.clickhouse_backup_install_enabled ? {
+    backup = {
+      enabled  = true
+      provider = "aws"
+      aws = {
+        bucket  = aws_s3_bucket.clickhouse_backup[0].id
+        region  = var.region
+        roleArn = aws_iam_role.clickhouse_backup[0].arn
+        path    = "clickhouse"
+      }
+      serviceAccount = { name = var.clickhouse_backup.service_account_name }
+      externalSecret = {
+        secretStoreRef = { name = "aws-secrets-manager", kind = "ClusterSecretStore" }
+        remoteRef      = { key = aws_secretsmanager_secret.clickhouse_backup[0].name }
+      }
+      api      = { existingSecret = kubernetes_secret_v1.clickhouse_backup_api[0].metadata[0].name }
+      schedule = { suspend = var.helm.clickhouse.backup.suspend }
+    }
+  } : {}
+
   # Singleton maps merged into clickhouse helm values when the dedicated CH
   # node group is enabled. Wires the K8s-side nodeSelector + toleration to
   # match the taint applied on the node group above. Split into two singletons

@@ -589,6 +589,19 @@ variable "helm" {
     Nothing in the module gates this at apply time; a 1.2.x caller will apply
     cleanly and hit the original scheduler deadlock at runtime.
 
+    chart_path: optional local chart directory or .tgz package for development
+    before a chart is published. Prefer a package with a new filename after each
+    change, so Terraform notices the new chart. Keep chart_registry and
+    chart_version set; the registry also supplies the default worker image.
+    The local chart takes precedence over the published chart and version.
+
+    clickhouse.backup.enabled installs scheduled backups using the existing
+    clickhouse_backup storage block. Disabled by default. Requires deploy_charts
+    and chart >= 5.2.0 (or a local chart containing backup support).
+    Set clickhouse.backup.suspend to pause the scheduled jobs while keeping the
+    setup installed. The module creates a separate Kubernetes
+    password for the backup controls; it never passes that password in Helm values.
+
     The clustered/HA Keeper topology (keeper_availability_zones) requires
     chart_version >= "2.3.0" — the first chart version exposing the keeper.*
     values; an older chart ignores them, leaving the keeper node groups empty.
@@ -708,6 +721,7 @@ variable "helm" {
     deploy_charts                        = optional(bool, true)
     chart_registry                       = optional(string, null)
     chart_version                        = optional(string, null)
+    chart_path                           = optional(string, null)
     install_cert_manager                 = optional(bool, true)
     install_aws_load_balancer_controller = optional(bool, true)
     install_external_secrets_operator    = optional(bool, true)
@@ -728,6 +742,10 @@ variable "helm" {
       readonly_user = optional(object({
         enabled = bool
       }), null)
+      backup = optional(object({
+        enabled = optional(bool, false)
+        suspend = optional(bool, false)
+      }), {})
     }), {})
 
     opentelemetry_collector = optional(object({
@@ -783,6 +801,20 @@ variable "helm" {
   validation {
     condition     = !var.helm.deploy_charts || var.helm.chart_version != null
     error_message = "helm.chart_version is required when deploy_charts = true."
+  }
+
+  validation {
+    condition = var.helm.chart_path == null ? true : (
+      trimspace(var.helm.chart_path) != "" &&
+      (fileexists("${pathexpand(var.helm.chart_path)}/Chart.yaml") ||
+      (endswith(var.helm.chart_path, ".tgz") && fileexists(pathexpand(var.helm.chart_path))))
+    )
+    error_message = "helm.chart_path must name an existing .tgz package or a directory containing Chart.yaml. Use this override only for development."
+  }
+
+  validation {
+    condition     = !var.helm.clickhouse.backup.enabled || var.helm.deploy_charts
+    error_message = "helm.clickhouse.backup.enabled requires helm.deploy_charts = true."
   }
 
   validation {

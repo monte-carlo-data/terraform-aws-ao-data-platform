@@ -1,0 +1,4 @@
+apiVersion: v2
+name: ao-data-platform-test-fixture
+version: 0.0.0
+description: Local path fixture for mocked Terraform plans; not a deployable chart.

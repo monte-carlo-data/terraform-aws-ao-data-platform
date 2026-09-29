@@ -5,6 +5,26 @@
 mock_provider "aws" {
   override_during = plan
 
+  override_resource {
+    target = aws_acm_certificate.clickhouse[0]
+    values = { arn = "arn:aws:acm:us-east-1:123456789012:certificate/clickhouse" }
+  }
+
+  override_resource {
+    target = aws_acm_certificate.otel_collector[0]
+    values = { arn = "arn:aws:acm:us-east-1:123456789012:certificate/otel" }
+  }
+
+  override_resource {
+    target = aws_iam_role.otel_collector
+    values = { arn = "arn:aws:iam::123456789012:role/otel" }
+  }
+
+  override_resource {
+    target = aws_iam_role.llm_worker
+    values = { arn = "arn:aws:iam::123456789012:role/worker" }
+  }
+
   override_data {
     target = data.aws_availability_zones.available
     values = { names = ["us-east-1a", "us-east-1b", "us-east-1c"] }
@@ -107,6 +127,11 @@ mock_provider "random" {
     target = random_password.clickhouse_backup[0]
     values = { result = "00000000000000000000000000000000" }
   }
+
+  override_resource {
+    target = random_password.clickhouse_backup_api[0]
+    values = { result = "11111111111111111111111111111111" }
+  }
 }
 
 mock_provider "helm" {}
@@ -147,6 +172,9 @@ run "backup_disabled_by_default" {
       length(random_password.clickhouse_backup) == 0,
       length(aws_secretsmanager_secret.clickhouse_backup) == 0,
       length(aws_secretsmanager_secret_version.clickhouse_backup) == 0,
+      length(random_password.clickhouse_backup_api) == 0,
+      length(kubernetes_secret_v1.clickhouse_backup_api) == 0,
+      length(keys(local.helm_clickhouse_backup_block)) == 0,
     ])
     error_message = "Existing callers must not receive backup storage, encryption keys, access, or credentials unless they enable backups."
   }
@@ -185,6 +213,15 @@ run "backup_storage_is_private_and_not_force_deleted" {
 
   variables {
     clickhouse_backup = { bucket_name = "test-clickhouse-backups" }
+  }
+
+  assert {
+    condition = (
+      length(random_password.clickhouse_backup_api) == 0 &&
+      length(kubernetes_secret_v1.clickhouse_backup_api) == 0 &&
+      length(keys(local.helm_clickhouse_backup_block)) == 0
+    )
+    error_message = "Existing storage-only callers must not install backups or create API credentials."
   }
 
   assert {
@@ -419,4 +456,234 @@ run "backup_storage_supports_an_externally_managed_secrets_operator" {
     )
     error_message = "Backup storage and its password must still be available when the caller manages External Secrets separately, without creating an operator role or policy."
   }
+}
+
+run "scheduled_backups_use_existing_storage_and_a_separate_api_password" {
+  command = plan
+
+  variables {
+    clickhouse_backup     = { bucket_name = "test-clickhouse-backups", service_account_name = "custom-backup" }
+    clickhouse_domain     = "clickhouse.example.com"
+    otel_collector_domain = "otel.example.com"
+    helm = {
+      chart_registry = "oci://registry-1.docker.io/montecarlodata"
+      chart_version  = "5.2.0"
+      clickhouse     = { backup = { enabled = true } }
+    }
+  }
+
+  assert {
+    condition = (
+      length(random_password.clickhouse_backup_api) == 1 &&
+      length(kubernetes_secret_v1.clickhouse_backup_api) == 1 &&
+      random_password.clickhouse_backup_api[0].length == 32 &&
+      random_password.clickhouse_backup_api[0].special == false &&
+      random_password.clickhouse_backup_api[0].keepers == null &&
+      kubernetes_secret_v1.clickhouse_backup_api[0].metadata[0].name == "ao-clickhouse-backup-api" &&
+      kubernetes_secret_v1.clickhouse_backup_api[0].metadata[0].namespace == "montecarlo" &&
+      kubernetes_secret_v1.clickhouse_backup_api[0].type == "Opaque" &&
+      nonsensitive(kubernetes_secret_v1.clickhouse_backup_api[0].data.password) == "11111111111111111111111111111111" &&
+      nonsensitive(kubernetes_secret_v1.clickhouse_backup_api[0].data.password) != nonsensitive(aws_secretsmanager_secret_version.clickhouse_backup[0].secret_string)
+    )
+    error_message = "Installing backups must create one separate, stable 32-character API password in the existing namespace, with no rotation triggers."
+  }
+
+  assert {
+    condition     = issensitive(kubernetes_secret_v1.clickhouse_backup_api[0].data)
+    error_message = "Terraform must keep the Kubernetes password value sensitive."
+  }
+
+  assert {
+    condition = jsonencode(yamldecode(helm_release.ao_data_platform[0].values[0]).clickhouse.backup) == jsonencode({
+      enabled  = true
+      provider = "aws"
+      aws = {
+        bucket  = "test-clickhouse-backups"
+        region  = "us-east-1"
+        roleArn = "arn:aws:iam::123456789012:role/test-cluster-us-east-1-clickhouse-backup"
+        path    = "clickhouse"
+      }
+      serviceAccount = { name = "custom-backup" }
+      externalSecret = {
+        secretStoreRef = { name = "aws-secrets-manager", kind = "ClusterSecretStore" }
+        remoteRef      = { key = "test-cluster/clickhouse/backup-credentials" }
+      }
+      api      = { existingSecret = "ao-clickhouse-backup-api" }
+      schedule = { suspend = false }
+    })
+    error_message = "The chart must use the existing bucket, role, stored database password and trusted service account; only the separate API secret's name belongs in values."
+  }
+
+  assert {
+    condition = (
+      !strcontains(helm_release.ao_data_platform[0].values[0], "11111111111111111111111111111111") &&
+      !strcontains(helm_release.ao_data_platform[0].values[0], "00000000000000000000000000000000") &&
+      !issensitive(helm_release.ao_data_platform[0].values[0])
+    )
+    error_message = "Neither password value may enter the Helm release values."
+  }
+
+  assert {
+    condition = (
+      helm_release.ao_data_platform[0].chart == "oci://registry-1.docker.io/montecarlodata/ao-data-platform" &&
+      helm_release.ao_data_platform[0].version == "5.2.0" &&
+      length(aws_s3_bucket.clickhouse_backup) == 1 &&
+      length(aws_iam_role.clickhouse_backup) == 1 &&
+      length(aws_secretsmanager_secret.clickhouse_backup) == 1 &&
+      jsondecode(aws_iam_role.clickhouse_backup[0].assume_role_policy).Statement[0].Condition.StringEquals["oidc.eks.us-east-1.amazonaws.com/id/TESTOIDC:sub"] == "system:serviceaccount:montecarlo:custom-backup"
+    )
+    error_message = "Published chart selection and the existing AWS storage resources must remain in use."
+  }
+}
+
+run "storage_with_chart_installation_stays_off_without_backup_opt_in" {
+  command = plan
+  variables {
+    clickhouse_backup     = { bucket_name = "test-clickhouse-backups" }
+    clickhouse_domain     = "clickhouse.example.com"
+    otel_collector_domain = "otel.example.com"
+    helm = {
+      chart_registry = "oci://registry-1.docker.io/montecarlodata"
+      chart_version  = "5.1.0"
+    }
+  }
+  assert {
+    condition = (
+      !can(yamldecode(helm_release.ao_data_platform[0].values[0]).clickhouse.backup) &&
+      length(random_password.clickhouse_backup_api) == 0 &&
+      length(kubernetes_secret_v1.clickhouse_backup_api) == 0
+    )
+    error_message = "Current applied callers must receive no backup chart values or API resources until they opt in."
+  }
+}
+
+run "scheduled_backups_can_be_installed_with_the_schedule_paused" {
+  command = plan
+  variables {
+    clickhouse_backup     = { bucket_name = "test-clickhouse-backups" }
+    clickhouse_domain     = "clickhouse.example.com"
+    otel_collector_domain = "otel.example.com"
+    helm = {
+      chart_registry = "oci://registry-1.docker.io/montecarlodata"
+      chart_version  = "5.2.0"
+      clickhouse     = { backup = { enabled = true, suspend = true } }
+    }
+  }
+  assert {
+    condition = (
+      yamldecode(helm_release.ao_data_platform[0].values[0]).clickhouse.backup.schedule.suspend &&
+      length(kubernetes_secret_v1.clickhouse_backup_api) == 1
+    )
+    error_message = "Pausing jobs must preserve the installed setup and API password."
+  }
+}
+
+run "scheduled_backups_require_existing_storage" {
+  command = plan
+  variables {
+    clickhouse_domain     = "clickhouse.example.com"
+    otel_collector_domain = "otel.example.com"
+    helm = {
+      chart_registry = "oci://registry-1.docker.io/montecarlodata"
+      chart_version  = "5.2.0"
+      clickhouse     = { backup = { enabled = true } }
+    }
+  }
+  expect_failures = [helm_release.ao_data_platform]
+}
+
+run "scheduled_backups_reject_the_default_service_account" {
+  command = plan
+  variables {
+    clickhouse_backup     = { bucket_name = "test-clickhouse-backups", service_account_name = "default" }
+    clickhouse_domain     = "clickhouse.example.com"
+    otel_collector_domain = "otel.example.com"
+    helm = {
+      chart_registry = "oci://registry-1.docker.io/montecarlodata"
+      chart_version  = "5.2.0"
+      clickhouse     = { backup = { enabled = true } }
+    }
+  }
+  expect_failures = [helm_release.ao_data_platform]
+}
+
+run "scheduled_backups_require_chart_deployment" {
+  command = plan
+  variables {
+    helm = {
+      deploy_charts = false
+      clickhouse    = { backup = { enabled = true } }
+    }
+  }
+  expect_failures = [var.helm]
+}
+
+run "local_chart_override_preserves_worker_image_registry" {
+  command = plan
+  variables {
+    clickhouse_backup     = { bucket_name = "test-clickhouse-backups" }
+    clickhouse_domain     = "clickhouse.example.com"
+    otel_collector_domain = "otel.example.com"
+    helm = {
+      chart_registry = "oci://registry-1.docker.io/montecarlodata"
+      chart_version  = "5.1.0"
+      chart_path     = "tests/fixtures/local-chart"
+      clickhouse     = { backup = { enabled = true } }
+    }
+  }
+  assert {
+    condition = (
+      helm_release.ao_data_platform[0].chart == abspath("tests/fixtures/local-chart") &&
+      yamldecode(helm_release.ao_data_platform[0].values[0]).llmWorker.image.repository == "registry-1.docker.io/montecarlodata/ao-llm-worker"
+    )
+    error_message = "The local chart path must override the OCI chart while keeping the worker image registry unchanged."
+  }
+}
+
+run "scheduled_backups_reject_published_charts_without_backup_support" {
+  command = plan
+  variables {
+    clickhouse_backup     = { bucket_name = "test-clickhouse-backups" }
+    clickhouse_domain     = "clickhouse.example.com"
+    otel_collector_domain = "otel.example.com"
+    helm = {
+      chart_registry = "oci://registry-1.docker.io/montecarlodata"
+      chart_version  = "5.1.0"
+      clickhouse     = { backup = { enabled = true } }
+    }
+  }
+  expect_failures = [helm_release.ao_data_platform]
+}
+
+run "local_chart_override_rejects_missing_files" {
+  command = plan
+  variables { helm = { deploy_charts = false, chart_path = "tests/fixtures/not-present.tgz" } }
+  expect_failures = [var.helm]
+}
+
+run "local_chart_accepts_a_packaged_snapshot" {
+  command = plan
+  variables {
+    clickhouse_domain     = "clickhouse.example.com"
+    otel_collector_domain = "otel.example.com"
+    helm = {
+      chart_registry = "oci://registry-1.docker.io/montecarlodata"
+      chart_version  = "5.2.0"
+      chart_path     = "tests/fixtures/local-chart-0.0.0.tgz"
+    }
+  }
+  assert {
+    condition     = helm_release.ao_data_platform[0].chart == abspath("tests/fixtures/local-chart-0.0.0.tgz")
+    error_message = "An existing packaged chart must be accepted for reproducible local testing."
+  }
+}
+
+run "local_chart_override_keeps_registry_required" {
+  command = plan
+  variables {
+    clickhouse_domain     = "clickhouse.example.com"
+    otel_collector_domain = "otel.example.com"
+    helm                  = { chart_path = "tests/fixtures/local-chart", chart_version = "5.2.0" }
+  }
+  expect_failures = [var.helm]
 }
