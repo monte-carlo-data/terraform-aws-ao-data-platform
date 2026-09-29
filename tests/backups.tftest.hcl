@@ -891,7 +891,7 @@ run "cleanup_rejects_published_charts_without_cleanup_support" {
   expect_failures = [helm_release.ao_data_platform]
 }
 
-run "cleanup_rejects_actual_deletion_until_native_file_deletion_is_fixed" {
+run "cleanup_rejects_actual_deletion_without_a_pinned_image" {
   command = plan
   variables {
     clickhouse_backup             = { bucket_name = "test-clickhouse-backups" }
@@ -905,6 +905,103 @@ run "cleanup_rejects_actual_deletion_until_native_file_deletion_is_fixed" {
       clickhouse     = { backup = { enabled = true, cleanup = { enabled = true, dry_run = false } } }
     }
   }
+  expect_failures = [var.helm]
+}
+
+run "cleanup_rejects_a_tag_without_a_digest_even_if_it_names_the_patch" {
+  command = plan
+  variables {
+    clickhouse_backup             = { bucket_name = "test-clickhouse-backups" }
+    clickhouse_domain             = "clickhouse.example.com"
+    otel_collector_domain         = "otel.example.com"
+    clickhouse_replica_count      = 2
+    clickhouse_availability_zones = ["us-east-1a", "us-east-1b"]
+    helm = {
+      chart_registry = "oci://registry-1.docker.io/montecarlodata"
+      chart_version  = "5.3.0"
+      clickhouse = { backup = {
+        enabled = true
+        image   = "registry.example.com/ao-clickhouse-backup:2.8.1-ao1300.1"
+        cleanup = { enabled = true, dry_run = false }
+      } }
+    }
+  }
+  expect_failures = [var.helm]
+}
+
+run "cleanup_accepts_an_explicit_digest_and_passes_the_image_to_helm" {
+  command = plan
+  variables {
+    clickhouse_backup             = { bucket_name = "test-clickhouse-backups" }
+    clickhouse_domain             = "clickhouse.example.com"
+    otel_collector_domain         = "otel.example.com"
+    clickhouse_replica_count      = 2
+    clickhouse_availability_zones = ["us-east-1a", "us-east-1b"]
+    helm = {
+      chart_registry = "oci://registry-1.docker.io/montecarlodata"
+      chart_version  = "5.3.0"
+      clickhouse = { backup = {
+        enabled = true
+        # Format-only test value, not a published image.
+        image   = "registry.example.com/ao-clickhouse-backup@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+        cleanup = { enabled = true, dry_run = false }
+      } }
+    }
+  }
+  assert {
+    condition = (
+      yamldecode(helm_release.ao_data_platform[0].values[0]).clickhouse.backup.image == var.helm.clickhouse.backup.image &&
+      yamldecode(helm_release.ao_data_platform[0].values[0]).clickhouse.backup.cleanup.dryRun == false
+    )
+    error_message = "The explicit immutable image and deletion setting must reach the chart, which checks the running version before cleanup."
+  }
+}
+
+run "backup_image_override_is_allowed_without_cleanup" {
+  command = plan
+  variables {
+    clickhouse_backup     = { bucket_name = "test-clickhouse-backups" }
+    clickhouse_domain     = "clickhouse.example.com"
+    otel_collector_domain = "otel.example.com"
+    helm = {
+      chart_registry = "oci://registry-1.docker.io/montecarlodata"
+      chart_version  = "5.2.0"
+      clickhouse = { backup = {
+        enabled = true
+        image   = "registry.example.com/ao-clickhouse-backup:2.8.1-ao1300.1"
+      } }
+    }
+  }
+  assert {
+    condition = (
+      yamldecode(helm_release.ao_data_platform[0].values[0]).clickhouse.backup.image == var.helm.clickhouse.backup.image &&
+      !can(yamldecode(helm_release.ao_data_platform[0].values[0]).clickhouse.backup.cleanup)
+    )
+    error_message = "An image override alone must not enable cleanup or require its newer chart version."
+  }
+}
+
+run "backup_image_rejects_an_empty_reference" {
+  command = plan
+  variables { helm = { deploy_charts = false, clickhouse = { backup = { image = "" } } } }
+  expect_failures = [var.helm]
+}
+
+run "backup_image_rejects_whitespace" {
+  command = plan
+  variables { helm = { deploy_charts = false, clickhouse = { backup = { image = " registry.example.com/backup:latest" } } } }
+  expect_failures = [var.helm]
+}
+
+run "backup_image_rejects_a_malformed_digest" {
+  command = plan
+  variables { helm = { deploy_charts = false, clickhouse = { backup = { image = "registry.example.com/backup@sha256:0123" } } } }
+  expect_failures = [var.helm]
+}
+
+run "backup_image_rejects_a_url_scheme" {
+  command = plan
+  variables { helm = { deploy_charts = false, clickhouse = { backup = { image = "https://registry.example.com/backup:latest" } } } }
   expect_failures = [var.helm]
 }
 

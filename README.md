@@ -347,14 +347,14 @@ directory containing `Chart.yaml` also works, but Terraform does not reliably
 notice edits under an unchanged path. Leave `chart_path` unset for published
 deployments.
 
-Chart 5.3.0 or later can preview cleanup after a successful scheduled backup.
+Chart 5.3.0 or later supports cleanup after a successful scheduled backup.
 This requires exactly two ClickHouse copies:
 
 ```hcl
 # Inside helm.clickhouse.backup, alongside enabled = true:
 cleanup = {
   enabled   = true
-  dry_run   = true # Required: actual deletion is currently blocked.
+  dry_run   = true # Preview the proposed deletions first.
   keep_last = 2    # Short development test; also keep any full backups these need.
   keep_days = 0    # Set 30 to also keep the last 30 days for a real deployment.
 }
@@ -369,10 +369,16 @@ clickhouse_backup_monitoring = {
 Cleanup is disabled by default. When enabled, it reports which backups would be
 deleted while keeping the newest two and the earlier backups they depend on.
 `keep_days` additionally protects backups within that age; no S3 file-expiry
-rule is created. Actual deletion is blocked: the pinned `clickhouse-backup`
-2.8.1 leaves `serialization.json` files behind when deleting native backups,
-so a successful delete response does not mean all old files were removed.
-Keep `dry_run = true` until that behavior is fixed and tested.
+rule is created. Upstream `clickhouse-backup` 2.8.1 leaves `serialization.json`
+files behind when deleting native backups, so actual deletion requires the
+patched build `2.8.1-ao1300.1`. Build, test, and publish that image first. Then set
+`helm.clickhouse.backup.image` to its full `repository@sha256:<digest>` reference
+and set `cleanup.dry_run = false` only when ready to delete old backups.
+Terraform requires a SHA-256 digest for deletion; it cannot verify the image's
+contents or availability. Before deleting anything, the chart's cleanup script
+checks that both running ClickHouse copies use the required patched tool version.
+No patched image is published by this module. Leaving `image` unset preserves
+the chart's default image and permits cleanup previews only.
 `timeout_seconds` defaults to 1800 and must be at least 60. Cleanup runs inside
 the scheduled backup Job, so a cleanup error also fails that Job and reaches
 the same failure alert.

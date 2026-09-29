@@ -745,6 +745,7 @@ variable "helm" {
       backup = optional(object({
         enabled = optional(bool, false)
         suspend = optional(bool, false)
+        image   = optional(string, null)
         cleanup = optional(object({
           enabled         = optional(bool, false)
           dry_run         = optional(bool, true)
@@ -830,8 +831,19 @@ variable "helm" {
   }
 
   validation {
-    condition     = !var.helm.clickhouse.backup.cleanup.enabled || var.helm.clickhouse.backup.cleanup.dry_run
-    error_message = "Backup cleanup currently requires dry_run = true: the pinned clickhouse-backup 2.8.1 leaves serialization.json files behind when deleting native backups. Actual deletion is blocked until that behavior is fixed and tested."
+    condition = var.helm.clickhouse.backup.image == null ? true : (
+      can(regex("^[a-zA-Z0-9][a-zA-Z0-9._:/-]*(@sha256:[0-9a-f]{64})?$", var.helm.clickhouse.backup.image)) &&
+      !can(regex("://", var.helm.clickhouse.backup.image)) &&
+      !endswith(var.helm.clickhouse.backup.image, "/")
+    )
+    error_message = "helm.clickhouse.backup.image must be a nonempty container image reference without spaces or a URL scheme. When present, its SHA-256 digest must contain 64 lowercase hexadecimal characters."
+  }
+
+  validation {
+    condition = !var.helm.clickhouse.backup.cleanup.enabled || var.helm.clickhouse.backup.cleanup.dry_run || (
+      can(regex("^[^[:space:]@]+@sha256:[0-9a-f]{64}$", var.helm.clickhouse.backup.image))
+    )
+    error_message = "Actual backup cleanup requires an explicit helm.clickhouse.backup.image pinned by @sha256:<64 lowercase hex digits>. Publish the patched image first; cleanup also checks that both running copies report version 2.8.1-ao1300.1 before deleting anything."
   }
 
   validation {

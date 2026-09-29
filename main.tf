@@ -246,6 +246,9 @@ locals {
   # chart values and a password for its controls, using the existing AWS resources.
   clickhouse_backup_install_enabled = var.helm.deploy_charts && var.helm.clickhouse.backup.enabled && local.clickhouse_backup_enabled
   clickhouse_backup_chart_version   = try([for component in regex("^v?([0-9]+)\\.([0-9]+)\\.", var.helm.chart_version) : tonumber(component)], [0, 0])
+  helm_clickhouse_backup_image = var.helm.clickhouse.backup.image == null ? {} : {
+    image = var.helm.clickhouse.backup.image
+  }
   helm_clickhouse_backup_cleanup = var.helm.clickhouse.backup.cleanup.enabled ? {
     cleanup = {
       enabled        = true
@@ -283,7 +286,7 @@ locals {
       }
       api      = { existingSecret = kubernetes_secret_v1.clickhouse_backup_api[0].metadata[0].name }
       schedule = { suspend = var.helm.clickhouse.backup.suspend }
-    }, local.helm_clickhouse_backup_cleanup, local.helm_clickhouse_backup_monitoring)
+    }, local.helm_clickhouse_backup_image, local.helm_clickhouse_backup_cleanup, local.helm_clickhouse_backup_monitoring)
   } : {}
 
   # Singleton maps merged into clickhouse helm values when the dedicated CH
