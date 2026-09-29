@@ -347,13 +347,14 @@ directory containing `Chart.yaml` also works, but Terraform does not reliably
 notice edits under an unchanged path. Leave `chart_path` unset for published
 deployments.
 
-Chart 5.3.0 or later also supports cleanup after a successful scheduled backup:
+Chart 5.3.0 or later can preview cleanup after a successful scheduled backup.
+This requires exactly two ClickHouse copies:
 
 ```hcl
 # Inside helm.clickhouse.backup, alongside enabled = true:
 cleanup = {
   enabled   = true
-  dry_run   = true # Inspect the proposed deletions before setting false.
+  dry_run   = true # Required: actual deletion is currently blocked.
   keep_last = 2    # Short development test; also keep any full backups these need.
   keep_days = 0    # Set 30 to also keep the last 30 days for a real deployment.
 }
@@ -365,9 +366,13 @@ clickhouse_backup_monitoring = {
 }
 ```
 
-Cleanup is disabled by default. When enabled, it defaults to a dry run, keeping
-the newest two backups and the earlier backups they depend on. `keep_days`
-additionally keeps backups within that age; no S3 file-expiry rule is created.
+Cleanup is disabled by default. When enabled, it reports which backups would be
+deleted while keeping the newest two and the earlier backups they depend on.
+`keep_days` additionally protects backups within that age; no S3 file-expiry
+rule is created. Actual deletion is blocked: the pinned `clickhouse-backup`
+2.8.1 leaves `serialization.json` files behind when deleting native backups,
+so a successful delete response does not mean all old files were removed.
+Keep `dry_run = true` until that behavior is fixed and tested.
 `timeout_seconds` defaults to 1800 and must be at least 60. Cleanup runs inside
 the scheduled backup Job, so a cleanup error also fails that Job and reaches
 the same failure alert.

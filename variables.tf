@@ -830,6 +830,11 @@ variable "helm" {
   }
 
   validation {
+    condition     = !var.helm.clickhouse.backup.cleanup.enabled || var.helm.clickhouse.backup.cleanup.dry_run
+    error_message = "Backup cleanup currently requires dry_run = true: the pinned clickhouse-backup 2.8.1 leaves serialization.json files behind when deleting native backups. Actual deletion is blocked until that behavior is fixed and tested."
+  }
+
+  validation {
     condition = (
       var.helm.clickhouse.backup.cleanup.keep_last >= 1 &&
       floor(var.helm.clickhouse.backup.cleanup.keep_last) == var.helm.clickhouse.backup.cleanup.keep_last &&

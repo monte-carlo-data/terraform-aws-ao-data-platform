@@ -800,9 +800,11 @@ run "backup_monitoring_limits_access_and_wires_external_alarms" {
 run "cleanup_is_explicit_and_defaults_to_a_dry_run" {
   command = plan
   variables {
-    clickhouse_backup     = { bucket_name = "test-clickhouse-backups" }
-    clickhouse_domain     = "clickhouse.example.com"
-    otel_collector_domain = "otel.example.com"
+    clickhouse_backup             = { bucket_name = "test-clickhouse-backups" }
+    clickhouse_domain             = "clickhouse.example.com"
+    otel_collector_domain         = "otel.example.com"
+    clickhouse_replica_count      = 2
+    clickhouse_availability_zones = ["us-east-1a", "us-east-1b"]
     helm = {
       chart_registry = "oci://registry-1.docker.io/montecarlodata"
       chart_version  = "5.3.0"
@@ -813,7 +815,7 @@ run "cleanup_is_explicit_and_defaults_to_a_dry_run" {
     condition = jsonencode(yamldecode(helm_release.ao_data_platform[0].values[0]).clickhouse.backup.cleanup) == jsonencode({
       enabled = true, dryRun = true, keepLast = 2, keepDays = 0, timeoutSeconds = 1800
     })
-    error_message = "Cleanup must remain a dry run until explicitly enabled for deletion."
+    error_message = "Cleanup must preview retention without deleting backup files."
   }
   assert {
     condition     = !can(yamldecode(helm_release.ao_data_platform[0].values[0]).clickhouse.backup.monitoring)
@@ -824,23 +826,25 @@ run "cleanup_is_explicit_and_defaults_to_a_dry_run" {
 run "cleanup_and_monitoring_support_a_local_chart_and_explicit_settings" {
   command = plan
   variables {
-    clickhouse_backup            = { bucket_name = "test-clickhouse-backups" }
-    clickhouse_backup_monitoring = { alert_email = "backups@example.com", max_age_seconds = 16000 }
-    clickhouse_domain            = "clickhouse.example.com"
-    otel_collector_domain        = "otel.example.com"
+    clickhouse_backup             = { bucket_name = "test-clickhouse-backups" }
+    clickhouse_backup_monitoring  = { alert_email = "backups@example.com", max_age_seconds = 16000 }
+    clickhouse_domain             = "clickhouse.example.com"
+    otel_collector_domain         = "otel.example.com"
+    clickhouse_replica_count      = 2
+    clickhouse_availability_zones = ["us-east-1a", "us-east-1b"]
     helm = {
       chart_registry = "oci://registry-1.docker.io/montecarlodata"
       chart_version  = "5.2.0"
       chart_path     = "tests/fixtures/local-chart"
       clickhouse = { backup = { enabled = true, cleanup = {
-        enabled = true, dry_run = false, keep_last = 3, keep_days = 30, timeout_seconds = 600
+        enabled = true, dry_run = true, keep_last = 3, keep_days = 30, timeout_seconds = 600
       } } }
     }
   }
   assert {
     condition = (
       jsonencode(yamldecode(helm_release.ao_data_platform[0].values[0]).clickhouse.backup.cleanup) == jsonencode({
-        enabled = true, dryRun = false, keepLast = 3, keepDays = 30, timeoutSeconds = 600
+        enabled = true, dryRun = true, keepLast = 3, keepDays = 30, timeoutSeconds = 600
       }) &&
       yamldecode(helm_release.ao_data_platform[0].values[0]).clickhouse.backup.monitoring.maxAgeSeconds == 16000
     )
@@ -873,12 +877,46 @@ run "monitoring_rejects_published_charts_without_monitoring_support" {
 run "cleanup_rejects_published_charts_without_cleanup_support" {
   command = plan
   variables {
+    clickhouse_backup             = { bucket_name = "test-clickhouse-backups" }
+    clickhouse_domain             = "clickhouse.example.com"
+    otel_collector_domain         = "otel.example.com"
+    clickhouse_replica_count      = 2
+    clickhouse_availability_zones = ["us-east-1a", "us-east-1b"]
+    helm = {
+      chart_registry = "oci://registry-1.docker.io/montecarlodata"
+      chart_version  = "5.2.0"
+      clickhouse     = { backup = { enabled = true, cleanup = { enabled = true } } }
+    }
+  }
+  expect_failures = [helm_release.ao_data_platform]
+}
+
+run "cleanup_rejects_actual_deletion_until_native_file_deletion_is_fixed" {
+  command = plan
+  variables {
+    clickhouse_backup             = { bucket_name = "test-clickhouse-backups" }
+    clickhouse_domain             = "clickhouse.example.com"
+    otel_collector_domain         = "otel.example.com"
+    clickhouse_replica_count      = 2
+    clickhouse_availability_zones = ["us-east-1a", "us-east-1b"]
+    helm = {
+      chart_registry = "oci://registry-1.docker.io/montecarlodata"
+      chart_version  = "5.3.0"
+      clickhouse     = { backup = { enabled = true, cleanup = { enabled = true, dry_run = false } } }
+    }
+  }
+  expect_failures = [var.helm]
+}
+
+run "cleanup_requires_two_clickhouse_copies" {
+  command = plan
+  variables {
     clickhouse_backup     = { bucket_name = "test-clickhouse-backups" }
     clickhouse_domain     = "clickhouse.example.com"
     otel_collector_domain = "otel.example.com"
     helm = {
       chart_registry = "oci://registry-1.docker.io/montecarlodata"
-      chart_version  = "5.2.0"
+      chart_version  = "5.3.0"
       clickhouse     = { backup = { enabled = true, cleanup = { enabled = true } } }
     }
   }
