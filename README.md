@@ -275,10 +275,15 @@ These are IAM identity-policy grants on module-managed, same-account roles, so t
 
 **Teardown.** Unsetting the block (or destroying) removes the whole leg; the bucket sets `force_destroy`, so in-flight transit objects do not block removal. Notifications already in the queue at teardown are simply discarded with it.
 
-### ClickHouse backup storage
+### ClickHouse backups
 
-Enable this optional block to prepare storage and credentials for ClickHouse
-backups. Existing deployments create no backup resources unless it is set.
+For a module-managed installation, configure `clickhouse_backup` for storage,
+then enable `helm.clickhouse.backup`. The chart creates the dedicated service
+account with its AWS role annotation, delivers the database password through an
+ExternalSecret, creates the ClickHouse `backup` user, and installs scheduled
+backups. Do not pre-create these Kubernetes resources: Helm cannot take over an
+existing resource without an explicit ownership transfer. Both settings are
+optional; existing deployments keep backups disabled.
 
 ```hcl
 clickhouse_backup = {
@@ -287,75 +292,173 @@ clickhouse_backup = {
 }
 ```
 
+Use `helm.deploy_charts = true` and a published chart version of **5.2.0 or
+later** that includes backup support. Before release, confirm that the published
+chart and this minimum version agree. Version checks require a concrete version
+such as `5.2.0`; incomplete versions and ranges such as `5.2` or `>=5.2.0` are
+rejected when backups are enabled.
+
+**Enabling or disabling backups restarts the ClickHouse pods, even with
+`suspend = true`.** Plan a maintenance window for a single-copy deployment;
+multiple copies still need healthy replication and a checked rolling restart.
+Add this block to your existing `helm.clickhouse` settings:
+
+```hcl
+backup = {
+  enabled = true
+  suspend = true # Pauses the schedule only; enabling still restarts ClickHouse.
+}
+```
+
+Keep the pause in your Terraform configuration until the installation is checked,
+then set `suspend = false` to start jobs. Its default is `false`, so enabling
+backups without an explicit pause starts the schedule on the first apply.
+
 The module creates:
 
 - A dedicated S3 bucket with public access blocked, AWS KMS encryption by
   default, and a policy rejecting unencrypted connections. A separate KMS key
-  encrypts backup files, with automatic key rotation enabled. There are no
-  automatic file-expiry rules; the backup software must manage retention.
+  encrypts backup files, with automatic key rotation and S3 Bucket Keys enabled.
+  There are no automatic file-expiry rules. Files remain until cleanup is
+  configured in the backup software or they are deliberately deleted.
 - A separate IAM role that can list, read, write, delete, and abort incomplete
-  uploads only in that bucket, plus `kms:GenerateDataKey` and `kms:Decrypt` on
+  uploads only in that bucket in this AWS account, plus `kms:GenerateDataKey` and `kms:Decrypt` on
   the backup key for uploads and restores. Only the named service account in
-  this cluster's `montecarlo` namespace can assume it. Existing workload roles
-  are unchanged.
+  this cluster's `montecarlo` namespace can assume it. Use a dedicated account;
+  `default`, `opentelemetry-collector`, and `llm-worker` are rejected so existing
+  workloads cannot inherit backup access. Existing workload roles are unchanged.
 - A generated 32-character password at
   `<cluster>/clickhouse/backup-credentials` in Secrets Manager, encrypted with
   the module's existing secrets key. When the module installs External Secrets
-  Operator, its role can read this password so the backup installation can
+  Operator, its role can read this password so the chart's ExternalSecret can
   deliver it to Kubernetes. If that operator is managed separately, grant its
   role access to the backup secret and the secrets key before configuring
   password delivery.
 
+The backup password is generated-only by design: this block prepares a fresh
+backup installation, rather than adopting an existing database password. Unlike
+the other users, it has no `clickhouse_passwords` override. The chart configures
+the backup database user with the generated secret.
+
 The `clickhouse_backup` output provides the bucket, role, intended service
-account, SQL username, and secret ARN. It does not expose the password. Like the
-module's other generated credentials, the password remains in Terraform state;
-keep that state private.
+account, SQL username, and `password_secret_arn`. The same ARN is available as
+`clickhouse_backup_credentials_secret_arn`. Neither output exposes the password.
+Like the module's other generated credentials, the password remains in Terraform
+state; keep that state private.
 
-The storage block alone prepares resources. It does not create the
-ClickHouse `backup` user, deliver its password, attach the AWS role to a running
-service, or schedule backups. The backup installation must create the named
-service account with an `eks.amazonaws.com/role-arn` annotation using the output
-role ARN, then assign it to the service that uploads the backup files. These
-steps do not require rebuilding the EKS cluster.
+**Storage-only use.** With `helm.deploy_charts = false`, the storage block is
+usable independently. Your installation must create and assign the named service
+account with `eks.amazonaws.com/role-arn`, deliver the database password, and
+create the database user. Before later enabling the module-managed chart, plan
+the ownership transfer of any existing Kubernetes resources; either safely
+remove them for Helm to recreate or explicitly adopt them into the release.
+Do not enable the chart while conflicting self-managed resources remain.
 
-To install scheduled backups, keep the storage block and add `backup` under the
-existing `helm.clickhouse` settings. Use chart 5.2.0 or later, or a local chart
-containing backup support:
+**Current limits.** This release uses one fixed schedule every four hours UTC:
+the first successful run each UTC day is full, and later runs save changes from
+an earlier backup. The module does not expose schedule customization. This
+release does not delete old backups automatically, and does not yet document a
+tested restore procedure. Do not add S3 expiry on current files independently:
+incremental backups can still need their older full backup.
 
-```hcl
-clickhouse = {
-  backup = {
-    enabled = true
-    suspend = true # Install first; set false when ready for scheduled jobs.
-  }
-}
-```
+**Backup API password.** Terraform creates the separate Secret
+`montecarlo/ao-clickhouse-backup-api`; the chart references its name through
+`backup.api.existingSecret`. It is created before the Helm release so the API and
+scheduled jobs have a password when they start, without passing its value through
+Helm. It is not stored in Secrets Manager. This keeps Secret ownership in
+Terraform, separate from the chart and External Secrets; using Secrets Manager
+for this password remains an open design choice.
 
-The module supplies the existing bucket, AWS role, service account, and stored
-database password to the chart. It also creates a separate Kubernetes password
-for the backup controls. That password stays unchanged across normal applies;
-it is kept in private Terraform state and never passed through Helm values.
-Changing it requires restarting the backup containers. The database password
-continues to use the chart's existing password delivery and rotation process.
+The API reads its password at startup. The `random_password` deliberately has
+no `keepers`, so ordinary applies do not change it. The current random password
+and Kubernetes Secret `data` both store the value in Terraform state; protect
+that state. Kubernetes provider 2.38 supports `data_wo`, but this configuration
+does not use it, and changing that argument alone would not remove the generated
+password from state. The database password continues to use its existing
+Secrets Manager and External Secrets delivery.
 
-For development before the chart is published, set `helm.chart_path` to a local
-`.tgz` chart package. Keep `chart_registry` and `chart_version` set; the registry
-still supplies the worker image. The local package overrides the published chart
-and version. Give each edited package a new filename, such as
-`ao-data-platform-5.2.0-ao1299.gCOMMIT.tgz`, so Terraform sees the change. A chart
-directory containing `Chart.yaml` also works, but Terraform does not reliably
-notice edits under an unchanged path. Leave `chart_path` unset for published
-deployments.
+To rotate the API password:
 
-The bucket has `force_destroy = false`: removing this configuration will fail
-while backup files remain. Delete files deliberately before deleting the bucket.
-The password secret follows the existing module convention of immediate deletion
-when Terraform removes it. Removing the backup key schedules its deletion after
-seven days; keep that key if any retained backup files still need it.
+1. Persist `helm.clickhouse.backup.suspend = true` in the configuration, review
+   and apply the pause, and wait for running backup or restore work to finish.
+2. From the deployment using the existing state, plan the password replacement:
+
+   ```bash
+   terraform plan -replace='module.ao_data_platform.random_password.clickhouse_backup_api[0]' -out=backup-api-password.tfplan
+   terraform apply backup-api-password.tfplan
+   ```
+
+   Use your caller's module name if different. Review the plan before applying;
+   keep the schedule paused and reject unrelated changes.
+3. Restart the ClickHouse pods containing the backup APIs, one copy at a time,
+   waiting for each to become healthy before proceeding. This restarts
+   ClickHouse too; a single-copy deployment needs a maintenance window.
+4. Check that both APIs accept the new password and reject unauthenticated
+   requests. Then persist `suspend = false`, review the plan, and apply to resume.
+
+**Temporary development chart override.** Prefer a compatible published chart.
+`helm.chart_path` is retained for development only and is unsupported in
+production. It bypasses the published-version check and stores a machine-specific
+absolute path. Keep both `chart_registry` and `chart_version` set: validation
+still requires them, and the registry also supplies the worker image. The chart
+version input is ignored for a local path; Helm receives no version constraint.
+Prefer an immutable `.tgz` package and use a new filename for each changed build,
+such as `ao-data-platform-5.2.0-dev.gCOMMIT.tgz`. A directory with `Chart.yaml`
+also works, but changing files at an unchanged path may produce no Terraform
+diff. Moving to a published chart requires a compatible release, removal of the
+override, and a reviewed plan against the existing state.
 
 Changing an existing bucket's default encryption affects new uploads only;
 existing files keep their previous encryption. Backup clients can use the bucket
-default by leaving their encryption settings unset.
+default by leaving their encryption settings unset. Explicit encryption settings
+must specify both `aws:kms` and this backup key's ARN; other settings are rejected.
+
+**Keeping or removing backups.** Keep `clickhouse_backup` enabled while backups
+are needed. `force_destroy = false` prevents Terraform from deleting a nonempty
+bucket, and Terraform deletes the bucket before scheduling deletion of its key.
+This is not full protection against teardown: Terraform can still remove
+the bucket policy, access settings, and password secret before the bucket fails.
+The secret is deleted immediately; the backup key has a 30-day deletion window.
+Scheduling key deletion makes it unusable immediately, and after deletion its
+encrypted files cannot be recovered.
+
+To remove the cluster but keep backups, first transfer the existing backup
+resources into a separate Terraform configuration and state. Preserve the bucket
+and its public-access block, ownership controls, encryption configuration and
+policy; the original backup KMS key and alias; and permissions for a restore
+operator to read and decrypt the files. Preserve the password secret, its version
+and generated password state, and the shared `pipeline_secrets` key and alias if
+keeping that credential. The shared key also protects other pipeline passwords.
+Check that the destination plan preserves these objects and the cluster teardown
+plan excludes them before proceeding. Do not just remove the bucket and key from
+state and apply the unchanged module: that attempts to create replacements.
+
+If deliberately discarding all backups, stop backup jobs and wait for running
+operations to finish, delete the files, then review the Terraform removal plan.
+Do not empty the bucket merely to get a failed destroy to finish.
+
+**Recovering a key pending deletion.** Use the deployment's AWS profile and region.
+Find the original key ARN in the KMS console or, while it remains in state, run:
+
+```bash
+terraform state show 'module.ao_data_platform.aws_kms_key.clickhouse_backup[0]'
+```
+
+Use your caller's module name if it differs from the examples. Set
+`AO_BACKUP_KEY_ARN` to that original key ARN, then run before its deletion date:
+
+```bash
+aws kms cancel-key-deletion --key-id "$AO_BACKUP_KEY_ARN"
+aws kms enable-key --key-id "$AO_BACKUP_KEY_ARN"
+aws kms describe-key --key-id "$AO_BACKUP_KEY_ARN" \
+  --query 'KeyMetadata.KeyState' --output text
+```
+
+Cancellation leaves the key `Disabled`; enabling it is a separate required step
+(AWS reference: https://docs.aws.amazon.com/kms/latest/APIReference/API_CancelKeyDeletion.html).
+Confirm `Enabled`, restore any removed bucket protections and access permissions,
+and reconcile Terraform's configuration and state with the original key before
+another apply. Creating a new key does not recover the old files.
 
 ### Least-privilege ClickHouse users
 
@@ -445,7 +548,7 @@ module "ao_data_platform" {
 
 ### Dedicated ClickHouse node group
 
-The module auto-creates a dedicated single-AZ EKS managed node group for ClickHouse whenever `helm.deploy_charts = true` and `cluster.create = true`, gated by `manage_legacy_clickhouse_node_group` (default `true`; the flag exists so a migration to the clustered/HA topology can retire this node group via config — see "Clustered / HA topology"). This module expects `helm.chart_version >= "1.3.0"` — older chart versions bundle their own OTel/CH anti-affinity rule and structurally don't use the dedicated NG. Nothing in the module gates this at apply time; a 1.2.x caller will apply cleanly and hit the original scheduler deadlock at runtime. When both conditions hold, the module:
+The module auto-creates a dedicated single-AZ EKS managed node group for ClickHouse whenever `helm.deploy_charts = true` and `cluster.create = true`, gated by `manage_legacy_clickhouse_node_group` (default `true`; the flag exists so a migration to the clustered/HA topology can retire this node group via config — see "Clustered / HA topology"). This module expects `helm.chart_version >= "1.3.0"` — older chart versions bundle their own OTel/CH anti-affinity rule and structurally don't use the dedicated NG. This 1.3.0 requirement is not enforced at apply time; a 1.2.x caller can apply and hit the original scheduler deadlock at runtime. Backup enablement has its own enforced chart-version check, described above. When both conditions hold, the module:
 
 - Creates a second managed node group (one node, single-AZ) pinned to `var.clickhouse_node_group.availability_zone` (or, when null, the first AZ from `data.aws_availability_zones.available`).
 - Applies a `dedicated=clickhouse:NoSchedule` taint to the node group so only pods that tolerate it can land there.
@@ -592,7 +695,8 @@ To use a StorageClass you manage outside this module, set `clickhouse_storage_cl
 | `storage_class_clickhouse_gp3` | `object` | `{}` (all defaults) | Parameters for the dedicated `clickhouse-gp3` StorageClass this module creates (never modifies the shared `gp3` class). Shape: `{ iops = optional(number, 3000), throughput = optional(number, 125) }`. Defaults to the `gp3` baseline; raise per measured ClickHouse merge load. Validated to `gp3` limits (IOPS 3000–16000, throughput 125–1000 MB/s, throughput ≤ 0.25 × IOPS). Applies only to newly provisioned volumes. |
 | `helm.deploy_charts` | `bool` | `true` | Deploy the `ao-data-platform` chart from Terraform |
 | `helm.chart_registry` | `string` | `null` | OCI registry URL for the `ao-data-platform` chart (e.g. `oci://123456789012.dkr.ecr.us-east-1.amazonaws.com`). Required when `deploy_charts = true`. |
-| `helm.chart_version` | `string` | `null` | Version of the `ao-data-platform` chart to deploy. Required when `deploy_charts = true`. |
+| `helm.chart_version` | `string` | `null` | Published `ao-data-platform` chart version. Required when `deploy_charts = true`, including with `chart_path`; backups require a concrete version >= 5.2.0 when using a published chart. With a local path the input is ignored and Helm receives no version constraint. |
+| `helm.chart_path` | `string` | `null` | Temporary development-only `.tgz` package or directory containing `Chart.yaml`; unsupported in production. Overrides the chart source/version and bypasses its version check. Prefer an immutable package at a new path for each build; unchanged paths can hide edits. See [ClickHouse backups](#clickhouse-backups). |
 | `helm.install_aws_load_balancer_controller` | `bool` | `true` | Skip if LBC is already installed in the cluster |
 | `helm.install_cert_manager` | `bool` | `true` | Skip if cert-manager is already installed |
 | `helm.install_external_secrets_operator` | `bool` | `true` | Skip if ESO is already installed |
@@ -606,6 +710,8 @@ To use a StorageClass you manage outside this module, set `clickhouse_storage_cl
 | `helm.clickhouse.otel.restrict_grants` | `bool` | `false` | Forwards `clickhouse.otel.restrictGrants` to the chart. When `true`, the `otel` ingest user is restricted to `INSERT` on the telemetry source tables only; `false` keeps it broad. **Requires chart version >= 2.0.0** (ignored by older charts). Flip to `true` only after external readers have moved to the `monte_carlo` user. |
 | `helm.clickhouse.admin` | `object` | `null` | Optionally provisions the gated break-glass superuser (`admin`). Shape: `{ enabled = bool }`. When `enabled = true`, a Secrets Manager secret + ExternalSecret pipeline is created and the chart's admin user is enabled (loopback-only by default — reachable only via pod-exec); the password comes from `clickhouse_passwords.admin` (or is auto-generated). When disabled (default), no admin secret is created. **Requires chart version >= 2.0.0.** Omit (or `null`) to disable. |
 | `helm.clickhouse.readonly_user` | `object` | `null` | Optionally provisions a second SELECT-only ClickHouse user (`readonly_user`, profile `readonly`). Shape: `{ enabled = bool }`. When `enabled = true`, a Secrets Manager secret + ExternalSecret pipeline mirroring the otel user is created and the toggle is forwarded to the chart; the password comes from `clickhouse_passwords.readonly_user` (or is auto-generated). **Requires chart version >= 1.2.0.** Omit (or `null`) to disable. |
+| `helm.clickhouse.backup.enabled` | `bool` | `false` | Install scheduled backups. Requires `helm.deploy_charts = true`, `clickhouse_backup` set with a dedicated service account, and a compatible chart >= 5.2.0 (except the temporary local-path override). Enabling or disabling restarts ClickHouse pods. See [ClickHouse backups](#clickhouse-backups). |
+| `helm.clickhouse.backup.suspend` | `bool` | `false` | Pause new scheduled backup runs while keeping the installation. Running work continues. Persist `true` before maintenance; enabling with the default `false` starts the schedule on the first apply. |
 | `clickhouse_passwords` | `object` (sensitive) | `{}` (all auto-generated) | Passwords for the ClickHouse SQL users. Shape: `{ admin = optional(string), otel = optional(string), monte_carlo = optional(string), schema_owner = optional(string), llm_worker = optional(string), readonly_user = optional(string) }`. Any field left null is auto-generated. Marked `sensitive`, so caller-supplied values are redacted in plan/apply output and CI logs — supply via a `.tfvars` file or `TF_VAR_clickhouse_passwords`. Stored in Secrets Manager and synced into the cluster by ESO; never passed through Helm values. Values remain readable in Terraform state — protect state accordingly. |
 | `helm.opentelemetry_collector.resources` | `object` | `null` | Kubernetes resource requests/limits for the OTel Collector pods. Same shape as `helm.clickhouse.resources`. Omit to use chart defaults. |
 | `helm.opentelemetry_collector.replica_count` | `number` | `null` | Optional override for the OTel Collector replica count. `null` (default) lets the chart control it. **`0` is not honored by the chart** — its collector template treats `0` as unset and deploys the default count; to stop ingest for a maintenance window, act upstream (deny consumption on the SQS queues feeding the awss3 receivers, or pause OTLP senders). Non-zero overrides work as expected. |
@@ -614,13 +720,9 @@ To use a StorageClass you manage outside this module, set `clickhouse_storage_cl
 | `helm.llm_worker.resources` | `object` | `null` | Kubernetes resource requests/limits for the LLM-worker pods. Same shape as `helm.clickhouse.resources`. Omit to use chart defaults. |
 | `trace_export_ingest` | `object` | `null` | Optional trace-export ingest leg — see [Trace-export ingest leg](#trace-export-ingest-leg). Shape: `{ producer_execution_role_arn = string, agent_role_arn = optional(string), bucket_name = optional(string), prefix = optional(string, "traces/"), lifecycle_days = optional(number, 3), kms_key_arn = optional(string) }`. `producer_execution_role_arn` is the external role trusted to assume the writer role (exact ARN or role-name wildcard; literal account ID enforced); the trust condition's `sts:ExternalId` value comes from the separate `trace_export_external_id` variable, which is required when this block is set. `agent_role_arn` optionally grants one additional role `s3:PutObject` on the prefix via the bucket policy. `prefix` accepts multi-segment values (`"traces/tenant-a/"`) and is normalized to one trailing `/`. `kms_key_arn` switches the bucket to SSE-KMS (Bucket Keys on) and widens writer/collector policies accordingly. Unset (default), no resources are created and the plan is unchanged from previous releases. |
 | `trace_export_external_id` | `string` (sensitive) | `null` | The `sts:ExternalId` value the external producer supplies when assuming the trace-export writer role (min 8 chars). Required when `trace_export_ingest` is set. Marked `sensitive`, so caller-supplied values are redacted in plan/apply output and CI logs — supply via a `.tfvars` file or `TF_VAR_trace_export_external_id`. Values remain readable in Terraform state — protect state accordingly. |
-| `clickhouse_backup` | `object` | `null` | Optional backup bucket, scoped IAM role, and stored password. Requires `bucket_name`; `service_account_name` defaults to `clickhouse-backup`. See [ClickHouse backup storage](#clickhouse-backup-storage). |
+| `clickhouse_backup` | `object` | `null` | Optional backup bucket, scoped IAM role, and generated password for a fresh backup installation. Requires `bucket_name`; `service_account_name` defaults to `clickhouse-backup` and cannot be `default`, `opentelemetry-collector`, or `llm-worker`. Files do not expire until backup cleanup is configured. Set `helm.clickhouse.backup.enabled` to install the chart-managed software, account and user. See [ClickHouse backups](#clickhouse-backups). |
 
 ## Outputs
-
-The `clickhouse_backup` output is an object containing `bucket_name`, `bucket_arn`,
-`iam_role_arn`, `namespace`, `service_account_name`, `username`, and
-`password_secret_arn`. It is null when backup storage is disabled.
 
 | Name | Description |
 |------|-------------|
@@ -640,6 +742,8 @@ The `clickhouse_backup` output is an object containing `bucket_name`, `bucket_ar
 | `clickhouse_schema_owner_credentials_secret_arn` | Secrets Manager ARN for the ClickHouse schema_owner user password |
 | `clickhouse_llm_worker_credentials_secret_arn` | Secrets Manager ARN for the ClickHouse llm_worker user password |
 | `clickhouse_readonly_user_credentials_secret_arn` | Secrets Manager ARN for the password of the ClickHouse SQL user `readonly_user` (profile: readonly, SELECT-only). Null when `helm.clickhouse.readonly_user` is disabled. |
+| `clickhouse_backup_credentials_secret_arn` | Secrets Manager ARN for the generated ClickHouse backup user password; also available as `clickhouse_backup.password_secret_arn`. Null when `clickhouse_backup` is unset. Never includes the password. |
+| `clickhouse_backup` | Backup installation references: `bucket_name`, `bucket_arn`, `iam_role_arn`, `namespace`, `service_account_name`, `username`, and `password_secret_arn`. Null when `clickhouse_backup` is unset. Never includes the password. |
 | `clickhouse_node_group` | Identity of the dedicated ClickHouse node group when active: `{ availability_zone, instance_type, size, label = { key, value }, taint = { key, value, effect } }`. Null when not active (`helm.deploy_charts = false`, `cluster.create = false`, or `manage_legacy_clickhouse_node_group = false`). Useful for verifying the resolved AZ during plan/apply review. |
 | `trace_export_ingest_bucket` | Name of the trace-export ingest bucket. Null when `trace_export_ingest` is unset. |
 | `trace_export_ingest_prefix` | Normalized key prefix the producer must write beneath. Null when `trace_export_ingest` is unset. |

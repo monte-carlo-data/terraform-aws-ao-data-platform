@@ -341,20 +341,15 @@ resource "helm_release" "ao_data_platform" {
   lifecycle {
     precondition {
       condition     = !var.helm.clickhouse.backup.enabled || local.clickhouse_backup_enabled
-      error_message = "helm.clickhouse.backup.enabled requires clickhouse_backup storage. Keep the existing bucket, role, and stored password configured."
+      error_message = "helm.clickhouse.backup.enabled requires clickhouse_backup. Set clickhouse_backup.bucket_name to create the backup storage and credentials, or keep that configuration if they already exist."
     }
 
     precondition {
       condition = !var.helm.clickhouse.backup.enabled || var.helm.chart_path != null || (
-        local.clickhouse_backup_chart_version[0] > 5 ||
-        (local.clickhouse_backup_chart_version[0] == 5 && local.clickhouse_backup_chart_version[1] >= 2)
+        local.chart_version_parts[0] > 5 ||
+        (local.chart_version_parts[0] == 5 && local.chart_version_parts[1] >= 2)
       )
-      error_message = "Scheduled backups require chart_version >= 5.2.0 or a local chart_path containing backup support; older published charts ignore the backup settings."
-    }
-
-    precondition {
-      condition     = !local.clickhouse_backup_install_enabled || try(var.clickhouse_backup.service_account_name != "default", true)
-      error_message = "Scheduled backups require a dedicated service account; clickhouse_backup.service_account_name cannot be default."
+      error_message = "Scheduled backups require helm.chart_version >= 5.2.0 or a development-only helm.chart_path containing backup support; older published charts ignore the backup settings."
     }
 
     precondition {

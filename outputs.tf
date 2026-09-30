@@ -1,16 +1,3 @@
-output "clickhouse_backup" {
-  description = "Backup storage and credential references for installing the backup software. Null while clickhouse_backup is unset. The password itself is never output."
-  value = local.clickhouse_backup_enabled ? {
-    bucket_name          = aws_s3_bucket.clickhouse_backup[0].id
-    bucket_arn           = aws_s3_bucket.clickhouse_backup[0].arn
-    iam_role_arn         = aws_iam_role.clickhouse_backup[0].arn
-    namespace            = kubernetes_namespace_v1.montecarlo.metadata[0].name
-    service_account_name = var.clickhouse_backup.service_account_name
-    username             = "backup"
-    password_secret_arn  = aws_secretsmanager_secret.clickhouse_backup[0].arn
-  } : null
-}
-
 output "eks_cluster_name" {
   description = "EKS cluster name. Use with: aws eks update-kubeconfig --name <value> --region <region>"
 
@@ -96,6 +83,26 @@ output "clickhouse_llm_worker_credentials_secret_arn" {
 output "clickhouse_readonly_user_credentials_secret_arn" {
   description = "Secrets Manager ARN for the password of the ClickHouse SQL user `readonly_user` (profile: readonly, SELECT-only). Null when helm.clickhouse.readonly_user is disabled."
   value       = local.clickhouse_readonly_user_enabled ? aws_secretsmanager_secret.clickhouse_readonly_user_password[0].arn : null
+}
+
+# --- ClickHouse Backup ---
+
+output "clickhouse_backup_credentials_secret_arn" {
+  description = "Secrets Manager ARN for the generated ClickHouse backup user password. Null when clickhouse_backup is unset. The password itself is never output."
+  value       = local.clickhouse_backup_enabled ? aws_secretsmanager_secret.clickhouse_backup[0].arn : null
+}
+
+output "clickhouse_backup" {
+  description = "Backup storage and credential references for installing the backup software. Null while clickhouse_backup is unset. The password itself is never output."
+  value = local.clickhouse_backup_enabled ? {
+    bucket_name          = aws_s3_bucket.clickhouse_backup[0].id
+    bucket_arn           = aws_s3_bucket.clickhouse_backup[0].arn
+    iam_role_arn         = aws_iam_role.clickhouse_backup[0].arn
+    namespace            = kubernetes_namespace_v1.montecarlo.metadata[0].name
+    service_account_name = var.clickhouse_backup.service_account_name
+    username             = "backup"
+    password_secret_arn  = aws_secretsmanager_secret.clickhouse_backup[0].arn
+  } : null
 }
 
 output "otel_collector_certificate_arn" {

@@ -41,7 +41,8 @@ resource "random_password" "clickhouse_readonly_user" {
 }
 
 # Separate from the rotating ClickHouse password: the backup API reads this
-# once at startup. A normal plan or chart upgrade keeps this value unchanged.
+# once at startup. No keepers: ordinary chart upgrades must not rotate this
+# password before the running API can reload it. See the rotation steps in README.
 resource "random_password" "clickhouse_backup_api" {
   count   = local.clickhouse_backup_install_enabled ? 1 : 0
   length  = 32
@@ -153,4 +154,45 @@ resource "aws_secretsmanager_secret_version" "clickhouse_readonly_user_password"
   count         = local.clickhouse_readonly_user_enabled ? 1 : 0
   secret_id     = aws_secretsmanager_secret.clickhouse_readonly_user_password[0].id
   secret_string = local.clickhouse_readonly_user_password
+}
+
+# Backup files use a separate key from the passwords stored in Secrets Manager.
+resource "aws_kms_key" "clickhouse_backup" {
+  count = local.clickhouse_backup_enabled ? 1 : 0
+
+  description             = "${local.effective_cluster_name} ClickHouse backup files"
+  deletion_window_in_days = 30
+  enable_key_rotation     = true
+  tags                    = var.tags
+}
+
+resource "aws_kms_alias" "clickhouse_backup" {
+  count = local.clickhouse_backup_enabled ? 1 : 0
+
+  name          = "alias/${local.effective_cluster_name}-clickhouse-backup"
+  target_key_id = aws_kms_key.clickhouse_backup[0].key_id
+}
+
+resource "random_password" "clickhouse_backup" {
+  count = local.clickhouse_backup_enabled ? 1 : 0
+
+  length  = 32
+  special = false
+}
+
+resource "aws_secretsmanager_secret" "clickhouse_backup" {
+  count = local.clickhouse_backup_enabled ? 1 : 0
+
+  name       = "${local.effective_cluster_name}/clickhouse/backup-credentials"
+  kms_key_id = aws_kms_key.pipeline_secrets.arn
+  # Match the other ClickHouse secrets so destroy/recreate can reuse the name.
+  recovery_window_in_days = 0
+  tags                    = var.tags
+}
+
+resource "aws_secretsmanager_secret_version" "clickhouse_backup" {
+  count = local.clickhouse_backup_enabled ? 1 : 0
+
+  secret_id     = aws_secretsmanager_secret.clickhouse_backup[0].id
+  secret_string = random_password.clickhouse_backup[0].result
 }
