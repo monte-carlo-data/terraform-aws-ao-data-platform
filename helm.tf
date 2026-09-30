@@ -412,6 +412,7 @@ resource "helm_release" "ao_data_platform" {
     null_resource.eso_resources,
     # Attach backup permissions before the chart selects the role.
     aws_iam_role_policy.clickhouse_backup,
+    aws_iam_role_policy.external_secrets,
 
     # Every ClickHouse/Keeper node must exist before the chart schedules those
     # pods. Their PVCs use a WaitForFirstConsumer storage class, so a pod that

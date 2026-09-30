@@ -361,40 +361,51 @@ release does not delete old backups automatically, and does not yet document a
 tested restore procedure. Do not add S3 expiry on current files independently:
 incremental backups can still need their older full backup.
 
-**Backup API password.** Terraform creates the separate Secret
-`montecarlo/ao-clickhouse-backup-api`; the chart references its name through
-`backup.api.existingSecret`. It is created before the Helm release so the API and
-scheduled jobs have a password when they start, without passing its value through
-Helm. It is not stored in Secrets Manager. This keeps Secret ownership in
-Terraform, separate from the chart and External Secrets; using Secrets Manager
-for this password remains an open design choice.
+**Backup software and passwords.** Set `helm.clickhouse.backup.image` to a
+published image by its `@sha256:` digest. Build it from the chart repository's
+`images/clickhouse-backup` directory: its fixes prevent passwords appearing in
+logs and keep a missing backup password from blocking ClickHouse startup. The
+unmodified upstream image does not provide these guarantees.
 
-The API reads its password at startup. The `random_password` deliberately has
-no `keepers`, so ordinary applies do not change it. The current random password
-and Kubernetes Secret `data` both store the value in Terraform state; protect
-that state. Kubernetes provider 2.38 supports `data_wo`, but this configuration
-does not use it, and changing that argument alone would not remove the generated
-password from state. The database password continues to use its existing
-Secrets Manager and External Secrets delivery.
+The module creates a separate `backup_probe` password in Secrets Manager. The
+chart uses it only to check table names and replication status before selecting
+a copy for backup. It cannot read application rows. External Secrets receives
+permission to read this password; the password value never enters Helm values.
+Missing backup or probe passwords disable that backup function without removing
+the database's normal users.
+
+**Backup API password.** Terraform continues to own
+`montecarlo/ao-clickhouse-backup-api`. It contains `password` and `revision` keys;
+Helm receives only its name and `helm.clickhouse.backup.api_password_revision`.
+This preserves existing Secret ownership. Chart-only installations can instead
+use `backup.api.externalSecret` to copy a JSON password and revision together
+from their secret store.
+
+The generated password stays unchanged on ordinary applies. Both it and the
+Kubernetes Secret remain in Terraform state; keep that state private. Changing
+`api_password_revision` changes the ClickHouse pod template, causing a restart.
+Backup jobs check that every existing copy has the expected revision before
+sending the password. The backup process waits if its Secret is missing, empty,
+or has a different revision.
 
 To rotate the API password:
 
-1. Persist `helm.clickhouse.backup.suspend = true` in the configuration, review
-   and apply the pause, and wait for running backup or restore work to finish.
-2. From the deployment using the existing state, plan the password replacement:
+1. Set `helm.clickhouse.backup.suspend = true`, review and apply the pause,
+   and wait for running backup or restore work to finish.
+2. Increase `helm.clickhouse.backup.api_password_revision` (for example, from
+   `"1"` to `"2"`). From the deployment using its existing state, run:
 
    ```bash
    terraform plan -replace='module.ao_data_platform.random_password.clickhouse_backup_api[0]' -out=backup-api-password.tfplan
-   terraform apply backup-api-password.tfplan
    ```
 
-   Use your caller's module name if different. Review the plan before applying;
-   keep the schedule paused and reject unrelated changes.
-3. Restart the ClickHouse pods containing the backup APIs, one copy at a time,
-   waiting for each to become healthy before proceeding. This restarts
-   ClickHouse too; a single-copy deployment needs a maintenance window.
-4. Check that both APIs accept the new password and reject unauthenticated
-   requests. Then persist `suspend = false`, review the plan, and apply to resume.
+   Use your caller's module name if different. Review the saved plan: it should
+   replace this password, update its Secret and chart settings, and keep the
+   schedule paused. Then apply that saved plan.
+3. Wait for the ClickHouse operator to restart the copies one at a time and for
+   both to become healthy. A single-copy installation needs a maintenance window.
+4. Check authenticated requests work and requests without a password fail on
+   both copies. Then set `suspend = false`, review the plan, and apply to resume.
 
 **Published charts for development and releases.** Both use the same registry
 download through `helm.chart_registry` and `helm.chart_version`. Publish the
@@ -720,6 +731,8 @@ To use a StorageClass you manage outside this module, set `clickhouse_storage_cl
 | `helm.clickhouse.readonly_user` | `object` | `null` | Optionally provisions a second SELECT-only ClickHouse user (`readonly_user`, profile `readonly`). Shape: `{ enabled = bool }`. When `enabled = true`, a Secrets Manager secret + ExternalSecret pipeline mirroring the otel user is created and the toggle is forwarded to the chart; the password comes from `clickhouse_passwords.readonly_user` (or is auto-generated). **Requires chart version >= 1.2.0.** Omit (or `null`) to disable. |
 | `helm.clickhouse.backup.enabled` | `bool` | `false` | Install scheduled backups. Requires `helm.deploy_charts = true`, `clickhouse_backup` set with a dedicated service account, and a compatible published chart with base version >= 5.2.0. Enabling or disabling restarts ClickHouse pods. See [ClickHouse backups](#clickhouse-backups). |
 | `helm.clickhouse.backup.suspend` | `bool` | `false` | Pause new scheduled backup runs while keeping the installation. Running work continues. Persist `true` before maintenance; enabling with the default `false` starts the schedule on the first apply. |
+| `helm.clickhouse.backup.image` | `string` | `null` | Required when backups are enabled. Published backup image pinned by `@sha256:` digest, built with the chart repository's password logging and startup fixes. |
+| `helm.clickhouse.backup.api_password_revision` | `string` | `"1"` | Change this whenever replacing the API password. It updates the Secret revision and pod annotation together, causing the backup processes to restart. |
 | `clickhouse_passwords` | `object` (sensitive) | `{}` (all auto-generated) | Passwords for the ClickHouse SQL users. Shape: `{ admin = optional(string), otel = optional(string), monte_carlo = optional(string), schema_owner = optional(string), llm_worker = optional(string), readonly_user = optional(string) }`. Any field left null is auto-generated. Marked `sensitive`, so caller-supplied values are redacted in plan/apply output and CI logs — supply via a `.tfvars` file or `TF_VAR_clickhouse_passwords`. Stored in Secrets Manager and synced into the cluster by ESO; never passed through Helm values. Values remain readable in Terraform state — protect state accordingly. |
 | `helm.opentelemetry_collector.resources` | `object` | `null` | Kubernetes resource requests/limits for the OTel Collector pods. Same shape as `helm.clickhouse.resources`. Omit to use chart defaults. |
 | `helm.opentelemetry_collector.replica_count` | `number` | `null` | Optional override for the OTel Collector replica count. `null` (default) lets the chart control it. **`0` is not honored by the chart** — its collector template treats `0` as unset and deploys the default count; to stop ingest for a maintenance window, act upstream (deny consumption on the SQS queues feeding the awss3 receivers, or pause OTLP senders). Non-zero overrides work as expected. |

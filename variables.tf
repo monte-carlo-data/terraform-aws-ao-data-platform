@@ -743,8 +743,10 @@ variable "helm" {
         enabled = bool
       }), null)
       backup = optional(object({
-        enabled = optional(bool, false)
-        suspend = optional(bool, false)
+        enabled               = optional(bool, false)
+        suspend               = optional(bool, false)
+        image                 = optional(string, null)
+        api_password_revision = optional(string, "1")
       }), {})
     }), {})
 
@@ -806,6 +808,19 @@ variable "helm" {
   validation {
     condition     = !var.helm.clickhouse.backup.enabled || var.helm.deploy_charts
     error_message = "helm.clickhouse.backup.enabled requires helm.deploy_charts = true."
+  }
+
+  validation {
+    condition = !var.helm.clickhouse.backup.enabled || can(regex(
+      "^[a-zA-Z0-9][a-zA-Z0-9._:/-]*@sha256:[0-9a-f]{64}$",
+      var.helm.clickhouse.backup.image,
+    ))
+    error_message = "Scheduled backups require helm.clickhouse.backup.image pinned by SHA-256 digest to the patched backup build documented by the chart."
+  }
+
+  validation {
+    condition     = can(regex("^[A-Za-z0-9][A-Za-z0-9._-]{0,62}$", var.helm.clickhouse.backup.api_password_revision))
+    error_message = "helm.clickhouse.backup.api_password_revision must contain 1-63 letters, numbers, dots, underscores, or hyphens and start with a letter or number. Change it whenever the API password changes."
   }
 
   validation {

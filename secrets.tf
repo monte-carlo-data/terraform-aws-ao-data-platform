@@ -196,3 +196,25 @@ resource "aws_secretsmanager_secret_version" "clickhouse_backup" {
   secret_id     = aws_secretsmanager_secret.clickhouse_backup[0].id
   secret_string = random_password.clickhouse_backup[0].result
 }
+
+# The scheduled job checks replication through a separate read-only account.
+# Its credential is independent of the backup user and existing database users.
+resource "random_password" "clickhouse_backup_probe" {
+  count   = local.clickhouse_backup_install_enabled ? 1 : 0
+  length  = 32
+  special = false
+}
+
+resource "aws_secretsmanager_secret" "clickhouse_backup_probe" {
+  count                   = local.clickhouse_backup_install_enabled ? 1 : 0
+  name                    = "${local.effective_cluster_name}/clickhouse/backup-probe-credentials"
+  kms_key_id              = aws_kms_key.pipeline_secrets.arn
+  recovery_window_in_days = 0
+  tags                    = var.tags
+}
+
+resource "aws_secretsmanager_secret_version" "clickhouse_backup_probe" {
+  count         = local.clickhouse_backup_install_enabled ? 1 : 0
+  secret_id     = aws_secretsmanager_secret.clickhouse_backup_probe[0].id
+  secret_string = random_password.clickhouse_backup_probe[0].result
+}

@@ -263,11 +263,23 @@ locals {
         path    = "clickhouse"
       }
       serviceAccount = { name = var.clickhouse_backup.service_account_name }
-      externalSecret = {
-        secretStoreRef = { name = "aws-secrets-manager", kind = "ClusterSecretStore" }
-        remoteRef      = { key = aws_secretsmanager_secret.clickhouse_backup[0].name }
+      user = {
+        externalSecret = {
+          secretStoreRef = { name = "aws-secrets-manager", kind = "ClusterSecretStore" }
+          remoteRef      = { key = aws_secretsmanager_secret.clickhouse_backup[0].name }
+        }
       }
-      api      = { existingSecret = kubernetes_secret_v1.clickhouse_backup_api[0].metadata[0].name }
+      sidecar = { image = var.helm.clickhouse.backup.image }
+      probe = {
+        externalSecret = {
+          secretStoreRef = { name = "aws-secrets-manager", kind = "ClusterSecretStore" }
+          remoteRef      = { key = aws_secretsmanager_secret.clickhouse_backup_probe[0].name }
+        }
+      }
+      api = {
+        existingSecret   = kubernetes_secret_v1.clickhouse_backup_api[0].metadata[0].name
+        passwordRevision = var.helm.clickhouse.backup.api_password_revision
+      }
       schedule = { suspend = var.helm.clickhouse.backup.suspend }
     }
   } : {}
