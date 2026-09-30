@@ -1662,7 +1662,14 @@ run "probe_password_and_revision_are_wired_without_exposing_passwords" {
 run "backup_rejects_missing_image" {
   command = plan
   variables {
-    helm = { deploy_charts = false, clickhouse = { backup = { enabled = true } } }
+    clickhouse_backup     = { bucket_name = "test-clickhouse-backups" }
+    clickhouse_domain     = "clickhouse.example.com"
+    otel_collector_domain = "otel.example.com"
+    helm = {
+      chart_registry = "oci://registry-1.docker.io/montecarlodata"
+      chart_version  = "5.2.0"
+      clickhouse     = { backup = { enabled = true } }
+    }
   }
   expect_failures = [var.helm]
 }
@@ -1670,7 +1677,14 @@ run "backup_rejects_missing_image" {
 run "backup_rejects_tag_only_image" {
   command = plan
   variables {
-    helm = { deploy_charts = false, clickhouse = { backup = { enabled = true, image = "registry.example.com/backup:latest" } } }
+    clickhouse_backup     = { bucket_name = "test-clickhouse-backups" }
+    clickhouse_domain     = "clickhouse.example.com"
+    otel_collector_domain = "otel.example.com"
+    helm = {
+      chart_registry = "oci://registry-1.docker.io/montecarlodata"
+      chart_version  = "5.2.0"
+      clickhouse     = { backup = { enabled = true, image = "registry.example.com/backup:latest" } }
+    }
   }
   expect_failures = [var.helm]
 }
