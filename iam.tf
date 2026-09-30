@@ -670,8 +670,7 @@ resource "aws_iam_role_policy" "external_secrets" {
 resource "aws_iam_role" "clickhouse_backup" {
   count = local.clickhouse_backup_enabled ? 1 : 0
 
-  # IAM adds a unique suffix; keep the prefix within its 38-character limit.
-  name_prefix = "${substr(local.region_qualified_name, 0, 24)}-backup-"
+  name = "${local.region_qualified_name}-clickhouse-backup"
   assume_role_policy = jsonencode({
     Version = "2012-10-17"
     Statement = [{

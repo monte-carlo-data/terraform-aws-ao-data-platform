@@ -423,6 +423,8 @@ resource "helm_release" "ao_data_platform" {
     helm_release.cert_manager,
     data.kubernetes_namespace_v1.cert_manager,
     null_resource.eso_resources,
+    # Attach backup permissions before the chart selects the role.
+    aws_iam_role_policy.clickhouse_backup,
     # Install the monitor only after its metrics permission is attached.
     aws_iam_role_policy.clickhouse_backup_monitor,
 
