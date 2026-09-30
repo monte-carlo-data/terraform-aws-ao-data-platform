@@ -65,10 +65,10 @@ resource "aws_iam_role" "clickhouse_backup_monitor" {
     }
     precondition {
       condition = var.helm.chart_path != null || (
-        local.clickhouse_backup_chart_version[0] > 5 ||
-        (local.clickhouse_backup_chart_version[0] == 5 && local.clickhouse_backup_chart_version[1] >= 3)
+        local.chart_version_parts[0] > 5 ||
+        (local.chart_version_parts[0] == 5 && local.chart_version_parts[1] >= 3)
       )
-      error_message = "Backup monitoring requires chart_version >= 5.3.0 or a local chart_path containing monitoring support."
+      error_message = "Backup monitoring requires helm.chart_version >= 5.3.0 or a development-only helm.chart_path containing monitoring support."
     }
   }
 }

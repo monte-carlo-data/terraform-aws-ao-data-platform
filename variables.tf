@@ -586,21 +586,25 @@ variable "helm" {
     Required when deploy_charts = true. This module expects chart_version >= "1.3.0"
     — the chart removed its OTel anti-affinity rule in favor of the dedicated
     ClickHouse node group this module creates (see clickhouse_node_group).
-    Nothing in the module gates this at apply time; a 1.2.x caller will apply
-    cleanly and hit the original scheduler deadlock at runtime.
+    This 1.3.0 minimum is not checked automatically; a 1.2.x caller can apply
+    and hit the original scheduler deadlock. Scheduled backups have a separate
+    checked minimum of helm.chart_version >= 5.2.0.
 
     chart_path: optional local chart directory or .tgz package for development
-    before a chart is published. Prefer a package with a new filename after each
-    change, so Terraform notices the new chart. Keep chart_registry and
-    chart_version set; the registry also supplies the default worker image.
-    The local chart takes precedence over the published chart and version.
+    before a chart is published. Unsupported for production. Prefer a package
+    with a new filename after each change; edits under the same path do not
+    reliably produce a Terraform change. Keep chart_registry and chart_version
+    set; the registry supplies the default worker image. The local chart takes
+    precedence, and Helm receives no version constraint. The caller must check
+    that the local chart supports the enabled features.
 
-    clickhouse.backup.enabled installs scheduled backups using the existing
-    clickhouse_backup storage block. Disabled by default. Requires deploy_charts
-    and chart >= 5.2.0 (or a local chart containing backup support).
-    Set clickhouse.backup.suspend to pause the scheduled jobs while keeping the
-    setup installed. The module creates a separate Kubernetes
-    password for the backup controls; it never passes that password in Helm values.
+    clickhouse.backup: enabled installs scheduled backups using clickhouse_backup
+    storage and requires deploy_charts and helm.chart_version >= 5.2.0 (or a local
+    chart containing backup support). Both enabled and suspend default to false.
+    suspend pauses new scheduled jobs; it does not stop active jobs or prevent
+    ClickHouse pod restarts when backup software is enabled or disabled.
+    The module creates a separate backup API password in a Kubernetes Secret;
+    it passes only the Secret name in Helm values.
 
     The clustered/HA Keeper topology (keeper_availability_zones) requires
     chart_version >= "2.3.0" — the first chart version exposing the keeper.*
@@ -814,8 +818,8 @@ variable "helm" {
   validation {
     condition = var.helm.chart_path == null ? true : (
       trimspace(var.helm.chart_path) != "" &&
-      (fileexists("${pathexpand(var.helm.chart_path)}/Chart.yaml") ||
-      (endswith(var.helm.chart_path, ".tgz") && fileexists(pathexpand(var.helm.chart_path))))
+      (try(fileexists("${pathexpand(var.helm.chart_path)}/Chart.yaml"), false) ||
+      (endswith(var.helm.chart_path, ".tgz") && try(fileexists(pathexpand(var.helm.chart_path)), false)))
     )
     error_message = "helm.chart_path must name an existing .tgz package or a directory containing Chart.yaml. Use this override only for development."
   }
@@ -875,20 +879,24 @@ variable "helm" {
   }
 }
 
-# --- Trace Export Ingest ---
+# --- ClickHouse Backup ---
 
 variable "clickhouse_backup" {
   description = <<-EOT
     Optional ClickHouse backup storage. Creates a private, encrypted S3 bucket,
     a bucket-scoped IAM role, and a generated password in Secrets Manager for
-    the future backup SQL user. Null creates none of these resources.
+    the backup database user. Null creates none of these resources.
 
     bucket_name must be a new, globally unique S3 bucket name. No automatic
-    expiry is configured; the backup software will delete old backups.
-    service_account_name identifies the future Kubernetes service account in
-    the module's montecarlo namespace that can assume the role. Creating and
-    attaching that service account, delivering the password, and creating the
-    ClickHouse user are part of installing the backup software.
+    expiry is configured. Until backup software is configured to delete old
+    backups, files accumulate. The password is generated for a new backup user;
+    supplying an existing password is not supported.
+    service_account_name identifies the dedicated Kubernetes service account in
+    montecarlo that can assume the role. With helm.clickhouse.backup.enabled,
+    the chart creates this account, copies the stored database password through
+    External Secrets, and configures the ClickHouse backup user. Do not create
+    the account separately for this installation. With chart deployment off,
+    the caller must install and configure the backup software separately.
   EOT
   type = object({
     bucket_name          = string
@@ -911,7 +919,17 @@ variable "clickhouse_backup" {
     )
     error_message = "clickhouse_backup.service_account_name must be a lowercase Kubernetes name of at most 63 characters, using letters, digits, and hyphens."
   }
+
+  validation {
+    condition = var.clickhouse_backup == null ? true : !contains(
+      ["default", "opentelemetry-collector", "llm-worker"],
+      var.clickhouse_backup.service_account_name,
+    )
+    error_message = "clickhouse_backup.service_account_name must be a dedicated service account, not \"default\" or another module workload's account."
+  }
 }
+
+# --- ClickHouse Backup Monitoring ---
 
 variable "clickhouse_backup_monitoring" {
   description = <<-EOT
@@ -946,6 +964,8 @@ variable "clickhouse_backup_monitoring" {
     error_message = "clickhouse_backup_monitoring.max_age_seconds must be a whole number of at least 300 seconds."
   }
 }
+
+# --- Trace Export Ingest ---
 
 variable "trace_export_ingest" {
   description = <<-EOT

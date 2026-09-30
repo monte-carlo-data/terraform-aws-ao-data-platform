@@ -1,6 +1,7 @@
 # Plan-only tests: every provider is mocked, so these cannot access AWS or a
-# Kubernetes cluster. Only computed IDs/passwords are supplied by the mocks;
-# the policies and resource settings under test come from the real module.
+# Kubernetes cluster. The mocks supply computed IDs/passwords and data lookups
+# such as account identity, availability zones, and cluster certificates. The
+# policies and resource settings under test come from the real module.
 
 mock_provider "aws" {
   override_during = plan
@@ -36,6 +37,11 @@ mock_provider "aws" {
       identity              = [{ oidc = [{ issuer = "https://oidc.eks.us-east-1.amazonaws.com/id/TESTOIDC" }] }]
       certificate_authority = [{ data = "dGVzdC1jYQ==" }]
     }
+  }
+
+  override_data {
+    target = data.aws_caller_identity.clickhouse_backup[0]
+    values = { account_id = "123456789012" }
   }
 
   override_data {
@@ -149,7 +155,16 @@ mock_provider "random" {
   }
 }
 
-mock_provider "helm" {}
+mock_provider "helm" {
+  override_during = plan
+
+  # Helm's version is both optional and computed. A null input lets Helm read
+  # the chart's own version; this stand-in is used only when no version was set.
+  # Local-path tests must see it, while published charts keep the caller's pin.
+  mock_resource "helm_release" {
+    defaults = { version = "0.0.0-from-local-chart" }
+  }
+}
 mock_provider "kubernetes" {}
 mock_provider "null" {}
 
@@ -175,6 +190,7 @@ run "backup_disabled_by_default" {
 
   assert {
     condition = alltrue([
+      length(data.aws_caller_identity.clickhouse_backup) == 0,
       length(aws_s3_bucket.clickhouse_backup) == 0,
       length(aws_s3_bucket_public_access_block.clickhouse_backup) == 0,
       length(aws_s3_bucket_ownership_controls.clickhouse_backup) == 0,
@@ -202,8 +218,8 @@ run "backup_disabled_by_default" {
   }
 
   assert {
-    condition     = output.clickhouse_backup == null
-    error_message = "The backup output must be null when the feature is disabled."
+    condition     = output.clickhouse_backup == null && output.clickhouse_backup_credentials_secret_arn == null
+    error_message = "Both backup outputs must be null when the feature is disabled."
   }
 
   assert {
@@ -267,11 +283,12 @@ run "backup_storage_is_private_and_not_force_deleted" {
 
   assert {
     condition = (
+      one(aws_s3_bucket_server_side_encryption_configuration.clickhouse_backup[0].rule).bucket_key_enabled &&
       one(one(aws_s3_bucket_server_side_encryption_configuration.clickhouse_backup[0].rule).apply_server_side_encryption_by_default).sse_algorithm == "aws:kms" &&
       one(one(aws_s3_bucket_server_side_encryption_configuration.clickhouse_backup[0].rule).apply_server_side_encryption_by_default).kms_master_key_id == aws_kms_key.clickhouse_backup[0].arn &&
       aws_kms_key.clickhouse_backup[0].arn != aws_kms_key.pipeline_secrets.arn
     )
-    error_message = "Backup files must use their own KMS key by default, separate from the key used for passwords."
+    error_message = "Backup files must use their own KMS key by default, separate from the passwords key, with S3 Bucket Keys enabled."
   }
 
   assert {
@@ -279,11 +296,11 @@ run "backup_storage_is_private_and_not_force_deleted" {
       length(aws_kms_key.clickhouse_backup) == 1 &&
       length(aws_kms_alias.clickhouse_backup) == 1 &&
       aws_kms_key.clickhouse_backup[0].enable_key_rotation &&
-      aws_kms_key.clickhouse_backup[0].deletion_window_in_days == 7 &&
+      aws_kms_key.clickhouse_backup[0].deletion_window_in_days == 30 &&
       aws_kms_alias.clickhouse_backup[0].name == "alias/test-cluster-clickhouse-backup" &&
       aws_kms_alias.clickhouse_backup[0].target_key_id == aws_kms_key.clickhouse_backup[0].key_id
     )
-    error_message = "Enabling backups must create one named KMS key with automatic rotation and a seven-day deletion waiting period."
+    error_message = "Enabling backups must create one named KMS key with automatic rotation and a 30-day deletion waiting period."
   }
 
   assert {
@@ -296,6 +313,59 @@ run "backup_storage_is_private_and_not_force_deleted" {
       try(tostring(statement.Condition.Bool["aws:SecureTransport"]) == "false", false)
     ])
     error_message = "The bucket policy must reject unencrypted connections for everyone, covering both the bucket and its objects."
+  }
+}
+
+run "backup_bucket_rejects_explicit_encryption_overrides" {
+  command = plan
+
+  variables {
+    clickhouse_backup = { bucket_name = "test-clickhouse-backups" }
+  }
+
+  assert {
+    condition = (
+      length(jsondecode(aws_s3_bucket_policy.clickhouse_backup[0].policy).Statement) == 5 &&
+      toset([for statement in jsondecode(aws_s3_bucket_policy.clickhouse_backup[0].policy).Statement : statement.Sid]) == toset([
+        "DenyInsecureTransport", "DenyNonKmsEncryption", "DenyOtherKmsKeys",
+        "DenyKmsWithoutKeyId", "DenyCustomerProvidedEncryptionKeys",
+      ]) &&
+      alltrue([
+        for statement in jsondecode(aws_s3_bucket_policy.clickhouse_backup[0].policy).Statement :
+        statement.Effect == "Deny" && statement.Principal == "*" &&
+        toset(flatten([statement.Action])) == toset(["s3:PutObject"]) &&
+        toset(flatten([statement.Resource])) == toset(["arn:aws:s3:::test-clickhouse-backups/*"])
+        if statement.Sid != "DenyInsecureTransport"
+      ])
+    )
+    error_message = "The bucket policy must contain the existing TLS denial and exactly four encryption denials covering every uploader and every backup object."
+  }
+
+  # Check the actual AWS condition structure, without inventing a second policy
+  # evaluator. Header-presence guards matter: StringNotEqualsIfExists in a Deny
+  # would also reject uploads that rely on the bucket's default encryption.
+  assert {
+    condition = jsonencode({
+      for statement in jsondecode(aws_s3_bucket_policy.clickhouse_backup[0].policy).Statement :
+      statement.Sid => statement.Condition if statement.Sid != "DenyInsecureTransport"
+      }) == jsonencode({
+      DenyNonKmsEncryption = {
+        Null            = { "s3:x-amz-server-side-encryption" = "false" }
+        StringNotEquals = { "s3:x-amz-server-side-encryption" = "aws:kms" }
+      }
+      DenyOtherKmsKeys = {
+        Null            = { "s3:x-amz-server-side-encryption-aws-kms-key-id" = "false" }
+        StringNotEquals = { "s3:x-amz-server-side-encryption-aws-kms-key-id" = aws_kms_key.clickhouse_backup[0].arn }
+      }
+      DenyKmsWithoutKeyId = {
+        StringEquals = { "s3:x-amz-server-side-encryption" = "aws:kms" }
+        Null         = { "s3:x-amz-server-side-encryption-aws-kms-key-id" = "true" }
+      }
+      DenyCustomerProvidedEncryptionKeys = {
+        Null = { "s3:x-amz-server-side-encryption-customer-algorithm" = "false" }
+      }
+    })
+    error_message = "Allow headerless default-KMS uploads; reject explicit wrong algorithms, different keys, KMS without a key ID, and customer-provided encryption keys."
   }
 }
 
@@ -352,18 +422,20 @@ run "backup_role_can_only_use_its_backup_bucket_and_key" {
     condition = anytrue([
       for statement in jsondecode(aws_iam_role_policy.clickhouse_backup[0].policy).Statement :
       toset(flatten([statement.Action])) == toset(["s3:ListBucket", "s3:GetBucketLocation"]) &&
-      toset(flatten([statement.Resource])) == toset(["arn:aws:s3:::test-clickhouse-backups"])
+      toset(flatten([statement.Resource])) == toset(["arn:aws:s3:::test-clickhouse-backups"]) &&
+      try(statement.Condition.StringEquals["s3:ResourceAccount"] == "123456789012", false)
     ])
-    error_message = "Bucket-listing permissions must be limited to this backup bucket."
+    error_message = "Bucket-listing permissions must be limited to this backup bucket owned by the current AWS account."
   }
 
   assert {
     condition = anytrue([
       for statement in jsondecode(aws_iam_role_policy.clickhouse_backup[0].policy).Statement :
       toset(flatten([statement.Action])) == toset(["s3:GetObject", "s3:PutObject", "s3:DeleteObject", "s3:AbortMultipartUpload"]) &&
-      toset(flatten([statement.Resource])) == toset(["arn:aws:s3:::test-clickhouse-backups/*"])
+      toset(flatten([statement.Resource])) == toset(["arn:aws:s3:::test-clickhouse-backups/*"]) &&
+      try(statement.Condition.StringEquals["s3:ResourceAccount"] == "123456789012", false)
     ])
-    error_message = "Object permissions must permit backup and restore operations only within this backup bucket."
+    error_message = "Object permissions must permit backup and restore operations only within this backup bucket owned by the current AWS account."
   }
 
   assert {
@@ -374,6 +446,18 @@ run "backup_role_can_only_use_its_backup_bucket_and_key" {
       toset(flatten([statement.Resource])) == toset([aws_kms_key.clickhouse_backup[0].arn])
     ])
     error_message = "Key permissions must allow only generating data keys and decrypting with the dedicated backup key."
+  }
+
+  assert {
+    condition = length(setintersection(
+      toset(flatten([for statement in jsondecode(aws_iam_role_policy.clickhouse_backup[0].policy).Statement : statement.Action])),
+      toset([
+        "s3:GetBucketVersioning", "s3:PutBucketVersioning", "s3:ListBucketVersions",
+        "s3:GetObjectVersion", "s3:DeleteObjectVersion",
+        "s3:GetLifecycleConfiguration", "s3:PutLifecycleConfiguration",
+      ]),
+    )) == 0
+    error_message = "The backup software must not inspect or change bucket versioning/lifecycle settings, or read or delete previous object versions."
   }
 }
 
@@ -406,6 +490,11 @@ run "backup_password_is_generated_and_stored_in_the_existing_key" {
       username             = "backup"
     }
     error_message = "Expose the storage and identity references needed for the backup job, without exposing its password."
+  }
+
+  assert {
+    condition     = output.clickhouse_backup_credentials_secret_arn == output.clickhouse_backup.password_secret_arn
+    error_message = "The flat credentials output must reference the same secret as the unchanged backup output object."
   }
 }
 
@@ -477,6 +566,193 @@ run "backup_storage_supports_an_externally_managed_secrets_operator" {
       length(aws_iam_role.clickhouse_backup) == 1
     )
     error_message = "Backup storage and its password must still be available when the caller manages External Secrets separately, without creating an operator role or policy."
+  }
+}
+
+# Input validation must also protect callers that create storage without Helm.
+# Every rejected case inherits helm.deploy_charts = false from this file.
+
+run "backup_rejects_uppercase_bucket" {
+  command = plan
+
+  variables {
+    clickhouse_backup = {
+      bucket_name = "Test-clickhouse-backups"
+    }
+  }
+
+  expect_failures = [var.clickhouse_backup]
+}
+
+run "backup_rejects_reserved_bucket_prefix_xn" {
+  command = plan
+
+  variables {
+    clickhouse_backup = {
+      bucket_name = "xn--backup-test"
+    }
+  }
+
+  expect_failures = [var.clickhouse_backup]
+}
+
+run "backup_rejects_reserved_bucket_prefix_sthree" {
+  command = plan
+
+  variables {
+    clickhouse_backup = {
+      bucket_name = "sthree-backup-test"
+    }
+  }
+
+  expect_failures = [var.clickhouse_backup]
+}
+
+run "backup_rejects_reserved_bucket_prefix_demo" {
+  command = plan
+
+  variables {
+    clickhouse_backup = {
+      bucket_name = "amzn-s3-demo-backup-test"
+    }
+  }
+
+  expect_failures = [var.clickhouse_backup]
+}
+
+run "backup_rejects_reserved_bucket_suffix_alias" {
+  command = plan
+
+  variables {
+    clickhouse_backup = {
+      bucket_name = "backup-test-s3alias"
+    }
+  }
+
+  expect_failures = [var.clickhouse_backup]
+}
+
+run "backup_rejects_reserved_bucket_suffix_object_lambda" {
+  command = plan
+
+  variables {
+    clickhouse_backup = {
+      bucket_name = "backup-test--ol-s3"
+    }
+  }
+
+  expect_failures = [var.clickhouse_backup]
+}
+
+run "backup_rejects_reserved_bucket_suffix_directory" {
+  command = plan
+
+  variables {
+    clickhouse_backup = {
+      bucket_name = "backup-test--x-s3"
+    }
+  }
+
+  expect_failures = [var.clickhouse_backup]
+}
+
+run "backup_rejects_reserved_bucket_suffix_table" {
+  command = plan
+
+  variables {
+    clickhouse_backup = {
+      bucket_name = "backup-test--table-s3"
+    }
+  }
+
+  expect_failures = [var.clickhouse_backup]
+}
+
+run "backup_rejects_invalid_service_account" {
+  command = plan
+
+  variables {
+    clickhouse_backup = {
+      bucket_name          = "test-clickhouse-backups"
+      service_account_name = "backup_jobs"
+    }
+  }
+
+  expect_failures = [var.clickhouse_backup]
+}
+
+run "backup_rejects_64_character_service_account" {
+  command = plan
+
+  variables {
+    clickhouse_backup = {
+      bucket_name          = "test-clickhouse-backups"
+      service_account_name = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    }
+  }
+
+  expect_failures = [var.clickhouse_backup]
+}
+
+run "backup_rejects_default_service_account" {
+  command = plan
+
+  variables {
+    clickhouse_backup = {
+      bucket_name          = "test-clickhouse-backups"
+      service_account_name = "default"
+    }
+  }
+
+  expect_failures = [var.clickhouse_backup]
+}
+
+run "backup_rejects_collector_service_account" {
+  command = plan
+
+  variables {
+    clickhouse_backup = {
+      bucket_name          = "test-clickhouse-backups"
+      service_account_name = "opentelemetry-collector"
+    }
+  }
+
+  expect_failures = [var.clickhouse_backup]
+}
+
+run "backup_rejects_worker_service_account" {
+  command = plan
+
+  variables {
+    clickhouse_backup = {
+      bucket_name          = "test-clickhouse-backups"
+      service_account_name = "llm-worker"
+    }
+  }
+
+  expect_failures = [var.clickhouse_backup]
+}
+
+run "backup_accepts_63_character_names_without_helm" {
+  command = plan
+
+  variables {
+    clickhouse_backup = {
+      bucket_name          = "backup-${join("", [for _ in range(56) : "a"])}"
+      service_account_name = "backup-${join("", [for _ in range(56) : "a"])}"
+    }
+  }
+
+  assert {
+    condition = (
+      var.helm.deploy_charts == false &&
+      length(var.clickhouse_backup.bucket_name) == 63 &&
+      length(var.clickhouse_backup.service_account_name) == 63 &&
+      aws_s3_bucket.clickhouse_backup[0].bucket == var.clickhouse_backup.bucket_name &&
+      output.clickhouse_backup.service_account_name == var.clickhouse_backup.service_account_name &&
+      jsondecode(aws_iam_role.clickhouse_backup[0].assume_role_policy).Statement[0].Condition.StringEquals["oidc.eks.us-east-1.amazonaws.com/id/TESTOIDC:sub"] == "system:serviceaccount:montecarlo:${var.clickhouse_backup.service_account_name}"
+    )
+    error_message = "Valid bucket and dedicated service-account names at the 63-character limit must work when only storage is requested."
   }
 }
 
@@ -560,6 +836,7 @@ run "scheduled_backups_use_existing_storage_and_a_separate_api_password" {
 
 run "storage_with_chart_installation_stays_off_without_backup_opt_in" {
   command = plan
+
   variables {
     clickhouse_backup     = { bucket_name = "test-clickhouse-backups" }
     clickhouse_domain     = "clickhouse.example.com"
@@ -569,6 +846,7 @@ run "storage_with_chart_installation_stays_off_without_backup_opt_in" {
       chart_version  = "5.1.0"
     }
   }
+
   assert {
     condition = (
       !can(yamldecode(helm_release.ao_data_platform[0].values[0]).clickhouse.backup) &&
@@ -581,6 +859,7 @@ run "storage_with_chart_installation_stays_off_without_backup_opt_in" {
 
 run "scheduled_backups_can_be_installed_with_the_schedule_paused" {
   command = plan
+
   variables {
     clickhouse_backup     = { bucket_name = "test-clickhouse-backups" }
     clickhouse_domain     = "clickhouse.example.com"
@@ -591,6 +870,7 @@ run "scheduled_backups_can_be_installed_with_the_schedule_paused" {
       clickhouse     = { backup = { enabled = true, suspend = true } }
     }
   }
+
   assert {
     condition = (
       yamldecode(helm_release.ao_data_platform[0].values[0]).clickhouse.backup.schedule.suspend &&
@@ -601,7 +881,9 @@ run "scheduled_backups_can_be_installed_with_the_schedule_paused" {
 }
 
 run "scheduled_backups_require_existing_storage" {
+  # Domains, chart version, and replica settings satisfy the other Helm checks.
   command = plan
+
   variables {
     clickhouse_domain     = "clickhouse.example.com"
     otel_collector_domain = "otel.example.com"
@@ -611,11 +893,13 @@ run "scheduled_backups_require_existing_storage" {
       clickhouse     = { backup = { enabled = true } }
     }
   }
+
   expect_failures = [helm_release.ao_data_platform]
 }
 
 run "scheduled_backups_reject_the_default_service_account" {
   command = plan
+
   variables {
     clickhouse_backup     = { bucket_name = "test-clickhouse-backups", service_account_name = "default" }
     clickhouse_domain     = "clickhouse.example.com"
@@ -626,22 +910,26 @@ run "scheduled_backups_reject_the_default_service_account" {
       clickhouse     = { backup = { enabled = true } }
     }
   }
-  expect_failures = [helm_release.ao_data_platform]
+
+  expect_failures = [var.clickhouse_backup]
 }
 
 run "scheduled_backups_require_chart_deployment" {
   command = plan
+
   variables {
     helm = {
       deploy_charts = false
       clickhouse    = { backup = { enabled = true } }
     }
   }
+
   expect_failures = [var.helm]
 }
 
 run "local_chart_override_preserves_worker_image_registry" {
   command = plan
+
   variables {
     clickhouse_backup     = { bucket_name = "test-clickhouse-backups" }
     clickhouse_domain     = "clickhouse.example.com"
@@ -653,17 +941,21 @@ run "local_chart_override_preserves_worker_image_registry" {
       clickhouse     = { backup = { enabled = true } }
     }
   }
+
   assert {
     condition = (
       helm_release.ao_data_platform[0].chart == abspath("tests/fixtures/local-chart") &&
+      helm_release.ao_data_platform[0].version == "0.0.0-from-local-chart" &&
       yamldecode(helm_release.ao_data_platform[0].values[0]).llmWorker.image.repository == "registry-1.docker.io/montecarlodata/ao-llm-worker"
     )
-    error_message = "The local chart path must override the OCI chart while keeping the worker image registry unchanged."
+    error_message = "The local chart must receive no version constraint and keep the worker image registry unchanged."
   }
 }
 
 run "scheduled_backups_reject_published_charts_without_backup_support" {
+  # Storage, domains, and replica settings satisfy the other Helm checks.
   command = plan
+
   variables {
     clickhouse_backup     = { bucket_name = "test-clickhouse-backups" }
     clickhouse_domain     = "clickhouse.example.com"
@@ -674,17 +966,20 @@ run "scheduled_backups_reject_published_charts_without_backup_support" {
       clickhouse     = { backup = { enabled = true } }
     }
   }
+
   expect_failures = [helm_release.ao_data_platform]
 }
 
 run "local_chart_override_rejects_missing_files" {
   command = plan
+
   variables { helm = { deploy_charts = false, chart_path = "tests/fixtures/not-present.tgz" } }
   expect_failures = [var.helm]
 }
 
 run "local_chart_accepts_a_packaged_snapshot" {
   command = plan
+
   variables {
     clickhouse_domain     = "clickhouse.example.com"
     otel_collector_domain = "otel.example.com"
@@ -694,9 +989,13 @@ run "local_chart_accepts_a_packaged_snapshot" {
       chart_path     = "tests/fixtures/local-chart-0.0.0.tgz"
     }
   }
+
   assert {
-    condition     = helm_release.ao_data_platform[0].chart == abspath("tests/fixtures/local-chart-0.0.0.tgz")
-    error_message = "An existing packaged chart must be accepted for reproducible local testing."
+    condition = (
+      helm_release.ao_data_platform[0].chart == abspath("tests/fixtures/local-chart-0.0.0.tgz") &&
+      helm_release.ao_data_platform[0].version == "0.0.0-from-local-chart"
+    )
+    error_message = "An existing packaged chart must be accepted with no version constraint for reproducible local testing."
   }
 }
 
@@ -1040,10 +1339,172 @@ run "cleanup_rejects_timeouts_below_one_minute" {
 
 run "local_chart_override_keeps_registry_required" {
   command = plan
+
   variables {
     clickhouse_domain     = "clickhouse.example.com"
     otel_collector_domain = "otel.example.com"
     helm                  = { chart_path = "tests/fixtures/local-chart", chart_version = "5.2.0" }
   }
+
   expect_failures = [var.helm]
+}
+
+run "local_chart_rejects_directory_without_chart_metadata" {
+  command = plan
+
+  variables { helm = { deploy_charts = false, chart_path = "tests/fixtures" } }
+
+  expect_failures = [var.helm]
+}
+
+run "local_chart_rejects_existing_non_package_file" {
+  command = plan
+
+  variables { helm = { deploy_charts = false, chart_path = "tests/fixtures/local-chart/Chart.yaml" } }
+
+  expect_failures = [var.helm]
+}
+
+run "scheduled_backups_accept_next_major_chart_version" {
+  command = plan
+
+  variables {
+    clickhouse_backup     = { bucket_name = "test-clickhouse-backups" }
+    clickhouse_domain     = "clickhouse.example.com"
+    otel_collector_domain = "otel.example.com"
+    helm = {
+      chart_registry = "oci://registry-1.docker.io/montecarlodata"
+      chart_version  = "6.0.0"
+      clickhouse     = { backup = { enabled = true } }
+    }
+  }
+
+  assert {
+    condition = (
+      local.chart_version_parts[0] == 6 && local.chart_version_parts[1] == 0 &&
+      helm_release.ao_data_platform[0].version == "6.0.0" &&
+      yamldecode(helm_release.ao_data_platform[0].values[0]).clickhouse.backup.enabled
+    )
+    error_message = "Compare numeric major/minor parts while passing the caller's valid chart version through unchanged."
+  }
+}
+
+run "scheduled_backups_accept_double_digit_minor_chart_version" {
+  command = plan
+
+  variables {
+    clickhouse_backup     = { bucket_name = "test-clickhouse-backups" }
+    clickhouse_domain     = "clickhouse.example.com"
+    otel_collector_domain = "otel.example.com"
+    helm = {
+      chart_registry = "oci://registry-1.docker.io/montecarlodata"
+      chart_version  = "5.10.0"
+      clickhouse     = { backup = { enabled = true } }
+    }
+  }
+
+  assert {
+    condition = (
+      local.chart_version_parts[0] == 5 && local.chart_version_parts[1] == 10 &&
+      helm_release.ao_data_platform[0].version == "5.10.0" &&
+      yamldecode(helm_release.ao_data_platform[0].values[0]).clickhouse.backup.enabled
+    )
+    error_message = "Compare numeric major/minor parts while passing the caller's valid chart version through unchanged."
+  }
+}
+
+run "scheduled_backups_accept_v_prefix_chart_version" {
+  command = plan
+
+  variables {
+    clickhouse_backup     = { bucket_name = "test-clickhouse-backups" }
+    clickhouse_domain     = "clickhouse.example.com"
+    otel_collector_domain = "otel.example.com"
+    helm = {
+      chart_registry = "oci://registry-1.docker.io/montecarlodata"
+      chart_version  = "v5.2.0"
+      clickhouse     = { backup = { enabled = true } }
+    }
+  }
+
+  assert {
+    condition = (
+      local.chart_version_parts[0] == 5 && local.chart_version_parts[1] == 2 &&
+      helm_release.ao_data_platform[0].version == "v5.2.0" &&
+      yamldecode(helm_release.ao_data_platform[0].values[0]).clickhouse.backup.enabled
+    )
+    error_message = "Compare numeric major/minor parts while passing the caller's valid chart version through unchanged."
+  }
+}
+
+run "scheduled_backups_reject_incomplete_chart_version" {
+  # Storage, domains, and replica settings satisfy the other Helm checks.
+  command = plan
+
+  variables {
+    clickhouse_backup     = { bucket_name = "test-clickhouse-backups" }
+    clickhouse_domain     = "clickhouse.example.com"
+    otel_collector_domain = "otel.example.com"
+    helm = {
+      chart_registry = "oci://registry-1.docker.io/montecarlodata"
+      chart_version  = "5.2"
+      clickhouse     = { backup = { enabled = true } }
+    }
+  }
+
+  expect_failures = [helm_release.ao_data_platform]
+}
+
+run "scheduled_backups_reject_invalid_patch_chart_version" {
+  # Storage, domains, and replica settings satisfy the other Helm checks.
+  command = plan
+
+  variables {
+    clickhouse_backup     = { bucket_name = "test-clickhouse-backups" }
+    clickhouse_domain     = "clickhouse.example.com"
+    otel_collector_domain = "otel.example.com"
+    helm = {
+      chart_registry = "oci://registry-1.docker.io/montecarlodata"
+      chart_version  = "5.2.not-a-number"
+      clickhouse     = { backup = { enabled = true } }
+    }
+  }
+
+  expect_failures = [helm_release.ao_data_platform]
+}
+
+run "scheduled_backups_reject_version_range_chart_version" {
+  # Storage, domains, and replica settings satisfy the other Helm checks.
+  command = plan
+
+  variables {
+    clickhouse_backup     = { bucket_name = "test-clickhouse-backups" }
+    clickhouse_domain     = "clickhouse.example.com"
+    otel_collector_domain = "otel.example.com"
+    helm = {
+      chart_registry = "oci://registry-1.docker.io/montecarlodata"
+      chart_version  = ">=5.2.0"
+      clickhouse     = { backup = { enabled = true } }
+    }
+  }
+
+  expect_failures = [helm_release.ao_data_platform]
+}
+
+run "scheduled_backups_reject_older_major_with_large_minor_chart_version" {
+  # Storage, domains, and replica settings satisfy the other Helm checks.
+  command = plan
+
+  variables {
+    clickhouse_backup     = { bucket_name = "test-clickhouse-backups" }
+    clickhouse_domain     = "clickhouse.example.com"
+    otel_collector_domain = "otel.example.com"
+    helm = {
+      chart_registry = "oci://registry-1.docker.io/montecarlodata"
+      chart_version  = "4.1002.0"
+      clickhouse     = { backup = { enabled = true } }
+    }
+  }
+
+  expect_failures = [helm_release.ao_data_platform]
 }
