@@ -590,17 +590,14 @@ variable "helm" {
     and hit the original scheduler deadlock. Scheduled backups have a separate
     checked minimum of helm.chart_version >= 5.2.0.
 
-    chart_path: optional local chart directory or .tgz package for development
-    before a chart is published. Unsupported for production. Prefer a package
-    with a new filename after each change; edits under the same path do not
-    reliably produce a Terraform change. Keep chart_registry and chart_version
-    set; the registry supplies the default worker image. The local chart takes
-    precedence, and Helm receives no version constraint. The caller must check
-    that the local chart supports the enabled features.
+    Development installs also use published charts. Pin chart_version to a
+    concrete development version such as 5.2.0-dev.gabcdef1 after that package
+    has been published. Development versions must meet the same base-version
+    requirements as releases; 0.0.0 development builds do not enable backups.
 
     clickhouse.backup: enabled installs scheduled backups using clickhouse_backup
-    storage and requires deploy_charts and helm.chart_version >= 5.2.0 (or a local
-    chart containing backup support). Both enabled and suspend default to false.
+    storage and requires deploy_charts and a published chart based on 5.2.0 or
+    later, including development builds. Both enabled and suspend default to false.
     suspend pauses new scheduled jobs; it does not stop active jobs or prevent
     ClickHouse pod restarts when backup software is enabled or disabled.
     The module creates a separate backup API password in a Kubernetes Secret;
@@ -725,7 +722,6 @@ variable "helm" {
     deploy_charts                        = optional(bool, true)
     chart_registry                       = optional(string, null)
     chart_version                        = optional(string, null)
-    chart_path                           = optional(string, null)
     install_cert_manager                 = optional(bool, true)
     install_aws_load_balancer_controller = optional(bool, true)
     install_external_secrets_operator    = optional(bool, true)
@@ -805,15 +801,6 @@ variable "helm" {
   validation {
     condition     = !var.helm.deploy_charts || var.helm.chart_version != null
     error_message = "helm.chart_version is required when deploy_charts = true."
-  }
-
-  validation {
-    condition = var.helm.chart_path == null ? true : (
-      trimspace(var.helm.chart_path) != "" &&
-      (try(fileexists("${pathexpand(var.helm.chart_path)}/Chart.yaml"), false) ||
-      (endswith(var.helm.chart_path, ".tgz") && try(fileexists(pathexpand(var.helm.chart_path)), false)))
-    )
-    error_message = "helm.chart_path must name an existing .tgz package or a directory containing Chart.yaml. Use this override only for development."
   }
 
   validation {

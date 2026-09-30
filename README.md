@@ -292,11 +292,11 @@ clickhouse_backup = {
 }
 ```
 
-Use `helm.deploy_charts = true` and a published chart version of **5.2.0 or
-later** that includes backup support. Before release, confirm that the published
-chart and this minimum version agree. Version checks require a concrete version
-such as `5.2.0`; incomplete versions and ranges such as `5.2` or `>=5.2.0` are
-rejected when backups are enabled.
+Use `helm.deploy_charts = true` and a published chart with backup support and a
+base version of **5.2.0 or later**. Before release, confirm that the published
+chart and this minimum version agree. Version checks accept exact release and
+development versions, such as `5.2.0` or `5.2.0-dev.gabc1234`; incomplete versions
+and ranges such as `5.2` or `>=5.2.0` are rejected when backups are enabled.
 
 **Enabling or disabling backups restarts the ClickHouse pods, even with
 `suspend = true`.** Plan a maintenance window for a single-copy deployment;
@@ -396,17 +396,26 @@ To rotate the API password:
 4. Check that both APIs accept the new password and reject unauthenticated
    requests. Then persist `suspend = false`, review the plan, and apply to resume.
 
-**Temporary development chart override.** Prefer a compatible published chart.
-`helm.chart_path` is retained for development only and is unsupported in
-production. It bypasses the published-version check and stores a machine-specific
-absolute path. Keep both `chart_registry` and `chart_version` set: validation
-still requires them, and the registry also supplies the worker image. The chart
-version input is ignored for a local path; Helm receives no version constraint.
-Prefer an immutable `.tgz` package and use a new filename for each changed build,
-such as `ao-data-platform-5.2.0-dev.gCOMMIT.tgz`. A directory with `Chart.yaml`
-also works, but changing files at an unchanged path may produce no Terraform
-diff. Moving to a published chart requires a compatible release, removal of the
-override, and a reviewed plan against the existing state.
+**Published charts for development and releases.** Both use the same registry
+download through `helm.chart_registry` and `helm.chart_version`. Publish the
+tested chart first, then select that exact version. For the public registry,
+these settings go inside the existing `helm` block:
+
+```hcl
+chart_registry = "oci://registry-1.docker.io/montecarlodata"
+chart_version  = "5.2.0-dev.gabc1234" # Example only: replace with an already-published version.
+```
+
+The example describes a development version; it does not claim that package is
+available. Release installs select an already-published release version instead.
+Use a new version for each changed build so every operator downloads the same
+package. The registry also supplies the worker image.
+
+**Upgrading from a local chart.** If the deployment previously used
+`helm.chart_path`, first publish the tested chart, then remove that old input and
+pin its matching published registry and version. Review a fresh plan against the
+existing state before applying. A different published chart may change the
+running workload; do not assume the plan only changes where Helm downloads it.
 
 Changing an existing bucket's default encryption affects new uploads only;
 existing files keep their previous encryption. Backup clients can use the bucket
@@ -695,8 +704,7 @@ To use a StorageClass you manage outside this module, set `clickhouse_storage_cl
 | `storage_class_clickhouse_gp3` | `object` | `{}` (all defaults) | Parameters for the dedicated `clickhouse-gp3` StorageClass this module creates (never modifies the shared `gp3` class). Shape: `{ iops = optional(number, 3000), throughput = optional(number, 125) }`. Defaults to the `gp3` baseline; raise per measured ClickHouse merge load. Validated to `gp3` limits (IOPS 3000–16000, throughput 125–1000 MB/s, throughput ≤ 0.25 × IOPS). Applies only to newly provisioned volumes. |
 | `helm.deploy_charts` | `bool` | `true` | Deploy the `ao-data-platform` chart from Terraform |
 | `helm.chart_registry` | `string` | `null` | OCI registry URL for the `ao-data-platform` chart (e.g. `oci://123456789012.dkr.ecr.us-east-1.amazonaws.com`). Required when `deploy_charts = true`. |
-| `helm.chart_version` | `string` | `null` | Published `ao-data-platform` chart version. Required when `deploy_charts = true`, including with `chart_path`; backups require a concrete version >= 5.2.0 when using a published chart. With a local path the input is ignored and Helm receives no version constraint. |
-| `helm.chart_path` | `string` | `null` | Temporary development-only `.tgz` package or directory containing `Chart.yaml`; unsupported in production. Overrides the chart source/version and bypasses its version check. Prefer an immutable package at a new path for each build; unchanged paths can hide edits. See [ClickHouse backups](#clickhouse-backups). |
+| `helm.chart_version` | `string` | `null` | Already-published `ao-data-platform` chart version. Required when `deploy_charts = true`. Backups require an exact release or development version with base version >= 5.2.0; ranges and incomplete versions are rejected. See [ClickHouse backups](#clickhouse-backups). |
 | `helm.install_aws_load_balancer_controller` | `bool` | `true` | Skip if LBC is already installed in the cluster |
 | `helm.install_cert_manager` | `bool` | `true` | Skip if cert-manager is already installed |
 | `helm.install_external_secrets_operator` | `bool` | `true` | Skip if ESO is already installed |
@@ -710,7 +718,7 @@ To use a StorageClass you manage outside this module, set `clickhouse_storage_cl
 | `helm.clickhouse.otel.restrict_grants` | `bool` | `false` | Forwards `clickhouse.otel.restrictGrants` to the chart. When `true`, the `otel` ingest user is restricted to `INSERT` on the telemetry source tables only; `false` keeps it broad. **Requires chart version >= 2.0.0** (ignored by older charts). Flip to `true` only after external readers have moved to the `monte_carlo` user. |
 | `helm.clickhouse.admin` | `object` | `null` | Optionally provisions the gated break-glass superuser (`admin`). Shape: `{ enabled = bool }`. When `enabled = true`, a Secrets Manager secret + ExternalSecret pipeline is created and the chart's admin user is enabled (loopback-only by default — reachable only via pod-exec); the password comes from `clickhouse_passwords.admin` (or is auto-generated). When disabled (default), no admin secret is created. **Requires chart version >= 2.0.0.** Omit (or `null`) to disable. |
 | `helm.clickhouse.readonly_user` | `object` | `null` | Optionally provisions a second SELECT-only ClickHouse user (`readonly_user`, profile `readonly`). Shape: `{ enabled = bool }`. When `enabled = true`, a Secrets Manager secret + ExternalSecret pipeline mirroring the otel user is created and the toggle is forwarded to the chart; the password comes from `clickhouse_passwords.readonly_user` (or is auto-generated). **Requires chart version >= 1.2.0.** Omit (or `null`) to disable. |
-| `helm.clickhouse.backup.enabled` | `bool` | `false` | Install scheduled backups. Requires `helm.deploy_charts = true`, `clickhouse_backup` set with a dedicated service account, and a compatible chart >= 5.2.0 (except the temporary local-path override). Enabling or disabling restarts ClickHouse pods. See [ClickHouse backups](#clickhouse-backups). |
+| `helm.clickhouse.backup.enabled` | `bool` | `false` | Install scheduled backups. Requires `helm.deploy_charts = true`, `clickhouse_backup` set with a dedicated service account, and a compatible published chart with base version >= 5.2.0. Enabling or disabling restarts ClickHouse pods. See [ClickHouse backups](#clickhouse-backups). |
 | `helm.clickhouse.backup.suspend` | `bool` | `false` | Pause new scheduled backup runs while keeping the installation. Running work continues. Persist `true` before maintenance; enabling with the default `false` starts the schedule on the first apply. |
 | `clickhouse_passwords` | `object` (sensitive) | `{}` (all auto-generated) | Passwords for the ClickHouse SQL users. Shape: `{ admin = optional(string), otel = optional(string), monte_carlo = optional(string), schema_owner = optional(string), llm_worker = optional(string), readonly_user = optional(string) }`. Any field left null is auto-generated. Marked `sensitive`, so caller-supplied values are redacted in plan/apply output and CI logs — supply via a `.tfvars` file or `TF_VAR_clickhouse_passwords`. Stored in Secrets Manager and synced into the cluster by ESO; never passed through Helm values. Values remain readable in Terraform state — protect state accordingly. |
 | `helm.opentelemetry_collector.resources` | `object` | `null` | Kubernetes resource requests/limits for the OTel Collector pods. Same shape as `helm.clickhouse.resources`. Omit to use chart defaults. |

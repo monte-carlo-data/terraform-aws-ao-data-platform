@@ -140,16 +140,7 @@ mock_provider "random" {
   }
 }
 
-mock_provider "helm" {
-  override_during = plan
-
-  # Helm's version is both optional and computed. A null input lets Helm read
-  # the chart's own version; this stand-in is used only when no version was set.
-  # Local-path tests must see it, while published charts keep the caller's pin.
-  mock_resource "helm_release" {
-    defaults = { version = "0.0.0-from-local-chart" }
-  }
-}
+mock_provider "helm" {}
 mock_provider "kubernetes" {}
 mock_provider "null" {}
 
@@ -905,31 +896,6 @@ run "scheduled_backups_require_chart_deployment" {
   expect_failures = [var.helm]
 }
 
-run "local_chart_override_preserves_worker_image_registry" {
-  command = plan
-
-  variables {
-    clickhouse_backup     = { bucket_name = "test-clickhouse-backups" }
-    clickhouse_domain     = "clickhouse.example.com"
-    otel_collector_domain = "otel.example.com"
-    helm = {
-      chart_registry = "oci://registry-1.docker.io/montecarlodata"
-      chart_version  = "5.1.0"
-      chart_path     = "tests/fixtures/local-chart"
-      clickhouse     = { backup = { enabled = true } }
-    }
-  }
-
-  assert {
-    condition = (
-      helm_release.ao_data_platform[0].chart == abspath("tests/fixtures/local-chart") &&
-      helm_release.ao_data_platform[0].version == "0.0.0-from-local-chart" &&
-      yamldecode(helm_release.ao_data_platform[0].values[0]).llmWorker.image.repository == "registry-1.docker.io/montecarlodata/ao-llm-worker"
-    )
-    error_message = "The local chart must receive no version constraint and keep the worker image registry unchanged."
-  }
-}
-
 run "scheduled_backups_reject_published_charts_without_backup_support" {
   # Storage, domains, and replica settings satisfy the other Helm checks.
   command = plan
@@ -946,63 +912,6 @@ run "scheduled_backups_reject_published_charts_without_backup_support" {
   }
 
   expect_failures = [helm_release.ao_data_platform]
-}
-
-run "local_chart_override_rejects_missing_files" {
-  command = plan
-
-  variables { helm = { deploy_charts = false, chart_path = "tests/fixtures/not-present.tgz" } }
-  expect_failures = [var.helm]
-}
-
-run "local_chart_accepts_a_packaged_snapshot" {
-  command = plan
-
-  variables {
-    clickhouse_domain     = "clickhouse.example.com"
-    otel_collector_domain = "otel.example.com"
-    helm = {
-      chart_registry = "oci://registry-1.docker.io/montecarlodata"
-      chart_version  = "5.2.0"
-      chart_path     = "tests/fixtures/local-chart-0.0.0.tgz"
-    }
-  }
-
-  assert {
-    condition = (
-      helm_release.ao_data_platform[0].chart == abspath("tests/fixtures/local-chart-0.0.0.tgz") &&
-      helm_release.ao_data_platform[0].version == "0.0.0-from-local-chart"
-    )
-    error_message = "An existing packaged chart must be accepted with no version constraint for reproducible local testing."
-  }
-}
-
-run "local_chart_override_keeps_registry_required" {
-  command = plan
-
-  variables {
-    clickhouse_domain     = "clickhouse.example.com"
-    otel_collector_domain = "otel.example.com"
-    helm                  = { chart_path = "tests/fixtures/local-chart", chart_version = "5.2.0" }
-  }
-
-  expect_failures = [var.helm]
-}
-
-run "local_chart_rejects_directory_without_chart_metadata" {
-  command = plan
-
-  variables { helm = { deploy_charts = false, chart_path = "tests/fixtures" } }
-
-  expect_failures = [var.helm]
-}
-
-run "local_chart_rejects_existing_non_package_file" {
-  command = plan
-
-  variables { helm = { deploy_charts = false, chart_path = "tests/fixtures/local-chart/Chart.yaml" } }
-
-  expect_failures = [var.helm]
 }
 
 run "scheduled_backups_accept_next_major_chart_version" {
@@ -1147,4 +1056,71 @@ run "scheduled_backups_reject_older_major_with_large_minor_chart_version" {
   }
 
   expect_failures = [helm_release.ao_data_platform]
+}
+
+run "scheduled_backups_use_a_published_development_chart" {
+  command = plan
+
+  variables {
+    clickhouse_backup     = { bucket_name = "test-clickhouse-backups" }
+    clickhouse_domain     = "clickhouse.example.com"
+    otel_collector_domain = "otel.example.com"
+    helm = {
+      chart_registry = "oci://registry-1.docker.io/montecarlodata"
+      chart_version  = "5.2.0-dev.gabcdef1"
+      clickhouse     = { backup = { enabled = true } }
+    }
+  }
+
+  assert {
+    condition = (
+      helm_release.ao_data_platform[0].chart == "oci://registry-1.docker.io/montecarlodata/ao-data-platform" &&
+      helm_release.ao_data_platform[0].version == "5.2.0-dev.gabcdef1" &&
+      yamldecode(helm_release.ao_data_platform[0].values[0]).clickhouse.backup.enabled &&
+      yamldecode(helm_release.ao_data_platform[0].values[0]).llmWorker.image.repository == "registry-1.docker.io/montecarlodata/ao-llm-worker"
+    )
+    error_message = "Development backups must use the published chart and exact version, with the same worker image registry as a release installation."
+  }
+}
+
+run "scheduled_backups_reject_unversioned_development_builds" {
+  # Storage, domains, and replica settings satisfy the other Helm checks.
+  command = plan
+
+  variables {
+    clickhouse_backup     = { bucket_name = "test-clickhouse-backups" }
+    clickhouse_domain     = "clickhouse.example.com"
+    otel_collector_domain = "otel.example.com"
+    helm = {
+      chart_registry = "oci://registry-1.docker.io/montecarlodata"
+      chart_version  = "0.0.0-dev.gabcdef1"
+      clickhouse     = { backup = { enabled = true } }
+    }
+  }
+
+  expect_failures = [helm_release.ao_data_platform]
+}
+
+run "published_charts_require_registry" {
+  command = plan
+
+  variables {
+    clickhouse_domain     = "clickhouse.example.com"
+    otel_collector_domain = "otel.example.com"
+    helm                  = { chart_version = "5.2.0-dev.gabcdef1" }
+  }
+
+  expect_failures = [var.helm]
+}
+
+run "published_charts_require_version" {
+  command = plan
+
+  variables {
+    clickhouse_domain     = "clickhouse.example.com"
+    otel_collector_domain = "otel.example.com"
+    helm                  = { chart_registry = "oci://registry-1.docker.io/montecarlodata" }
+  }
+
+  expect_failures = [var.helm]
 }
