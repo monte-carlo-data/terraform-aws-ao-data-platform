@@ -1,4 +1,6 @@
 locals {
+  clickhouse_backup_enabled = var.clickhouse_backup != null
+
   effective_cluster_name = var.cluster.create ? var.cluster.name : var.cluster.existing_cluster_name
 
   # Region-qualified base for account-global IAM role names. IAM roles are
@@ -370,4 +372,9 @@ locals {
   # Derived (not read from the role resource) so the output stays plan-known;
   # the name is fixed by this module, so the ARN is deterministic.
   trace_export_writer_role_arn = local.trace_export_ingest_enabled ? "arn:${data.aws_partition.current.partition}:iam::${data.aws_caller_identity.trace_export_ingest[0].account_id}:role/${local.region_qualified_name}-trace-export-writer" : null
+}
+
+# Read the bucket owner only when backup storage is enabled.
+data "aws_caller_identity" "clickhouse_backup" {
+  count = local.clickhouse_backup_enabled ? 1 : 0
 }

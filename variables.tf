@@ -802,7 +802,7 @@ variable "helm" {
   }
 }
 
-# --- Trace Export Ingest ---
+# --- ClickHouse Backup ---
 
 variable "clickhouse_backup" {
   description = <<-EOT
@@ -811,7 +811,9 @@ variable "clickhouse_backup" {
     the future backup SQL user. Null creates none of these resources.
 
     bucket_name must be a new, globally unique S3 bucket name. No automatic
-    expiry is configured; the backup software will delete old backups.
+    expiry is configured. Until backup software is configured to delete old
+    backups, files accumulate. The password is generated for a new backup user;
+    supplying an existing password is not supported.
     service_account_name identifies the future Kubernetes service account in
     the module's montecarlo namespace that can assume the role. Creating and
     attaching that service account, delivering the password, and creating the
@@ -838,7 +840,17 @@ variable "clickhouse_backup" {
     )
     error_message = "clickhouse_backup.service_account_name must be a lowercase Kubernetes name of at most 63 characters, using letters, digits, and hyphens."
   }
+
+  validation {
+    condition = var.clickhouse_backup == null ? true : !contains(
+      ["default", "opentelemetry-collector", "llm-worker"],
+      var.clickhouse_backup.service_account_name,
+    )
+    error_message = "clickhouse_backup.service_account_name must be a dedicated service account, not \"default\" or another module workload's account."
+  }
 }
+
+# --- Trace Export Ingest ---
 
 variable "trace_export_ingest" {
   description = <<-EOT

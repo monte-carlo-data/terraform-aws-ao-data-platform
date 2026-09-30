@@ -291,13 +291,15 @@ The module creates:
 
 - A dedicated S3 bucket with public access blocked, AWS KMS encryption by
   default, and a policy rejecting unencrypted connections. A separate KMS key
-  encrypts backup files, with automatic key rotation enabled. There are no
-  automatic file-expiry rules; the backup software must manage retention.
+  encrypts backup files, with automatic key rotation and S3 Bucket Keys enabled.
+  There are no automatic file-expiry rules. Files remain until cleanup is
+  configured in the backup software or they are deliberately deleted.
 - A separate IAM role that can list, read, write, delete, and abort incomplete
-  uploads only in that bucket, plus `kms:GenerateDataKey` and `kms:Decrypt` on
+  uploads only in that bucket in this AWS account, plus `kms:GenerateDataKey` and `kms:Decrypt` on
   the backup key for uploads and restores. Only the named service account in
-  this cluster's `montecarlo` namespace can assume it. Existing workload roles
-  are unchanged.
+  this cluster's `montecarlo` namespace can assume it. Use a dedicated account;
+  `default`, `opentelemetry-collector`, and `llm-worker` are rejected so existing
+  workloads cannot inherit backup access. Existing workload roles are unchanged.
 - A generated 32-character password at
   `<cluster>/clickhouse/backup-credentials` in Secrets Manager, encrypted with
   the module's existing secrets key. When the module installs External Secrets
@@ -306,10 +308,16 @@ The module creates:
   role access to the backup secret and the secrets key before configuring
   password delivery.
 
+The backup password is generated-only by design: this block prepares a fresh
+backup installation, rather than adopting an existing database password. Unlike
+the other users, it has no `clickhouse_passwords` override. The installation must
+configure its database user with the generated secret.
+
 The `clickhouse_backup` output provides the bucket, role, intended service
-account, SQL username, and secret ARN. It does not expose the password. Like the
-module's other generated credentials, the password remains in Terraform state;
-keep that state private.
+account, SQL username, and `password_secret_arn`. The same ARN is available as
+`clickhouse_backup_credentials_secret_arn`. Neither output exposes the password.
+Like the module's other generated credentials, the password remains in Terraform
+state; keep that state private.
 
 This prepares the resources for the backup installation. It does not create the
 ClickHouse `backup` user, deliver its password, attach the AWS role to a running
@@ -318,15 +326,57 @@ service account with an `eks.amazonaws.com/role-arn` annotation using the output
 role ARN, then assign it to the service that uploads the backup files. These
 steps do not require rebuilding the EKS cluster.
 
-The bucket has `force_destroy = false`: removing this configuration will fail
-while backup files remain. Delete files deliberately before deleting the bucket.
-The password secret follows the existing module convention of immediate deletion
-when Terraform removes it. Removing the backup key schedules its deletion after
-seven days; keep that key if any retained backup files still need it.
-
 Changing an existing bucket's default encryption affects new uploads only;
 existing files keep their previous encryption. Backup clients can use the bucket
-default by leaving their encryption settings unset.
+default by leaving their encryption settings unset. Explicit encryption settings
+must specify both `aws:kms` and this backup key's ARN; other settings are rejected.
+
+**Keeping or removing backups.** Keep `clickhouse_backup` enabled while backups
+are needed. `force_destroy = false` prevents Terraform from deleting a nonempty
+bucket, and Terraform deletes the bucket before scheduling deletion of its key.
+This is not full protection against teardown: Terraform can still remove
+the bucket policy, access settings, and password secret before the bucket fails.
+The secret is deleted immediately; the backup key has a 30-day deletion window.
+Scheduling key deletion makes it unusable immediately, and after deletion its
+encrypted files cannot be recovered.
+
+To remove the cluster but keep backups, first transfer the existing backup
+resources into a separate Terraform configuration and state. Preserve the bucket
+and its public-access block, ownership controls, encryption configuration and
+policy; the original backup KMS key and alias; and permissions for a restore
+operator to read and decrypt the files. Preserve the password secret, its version
+and generated password state, and the shared `pipeline_secrets` key and alias if
+keeping that credential. The shared key also protects other pipeline passwords.
+Check that the destination plan preserves these objects and the cluster teardown
+plan excludes them before proceeding. Do not just remove the bucket and key from
+state and apply the unchanged module: that attempts to create replacements.
+
+If deliberately discarding all backups, stop backup jobs and wait for running
+operations to finish, delete the files, then review the Terraform removal plan.
+Do not empty the bucket merely to get a failed destroy to finish.
+
+**Recovering a key pending deletion.** Use the deployment's AWS profile and region.
+Find the original key ARN in the KMS console or, while it remains in state, run:
+
+```bash
+terraform state show 'module.ao_data_platform.aws_kms_key.clickhouse_backup[0]'
+```
+
+Use your caller's module name if it differs from the examples. Set
+`AO_BACKUP_KEY_ARN` to that original key ARN, then run before its deletion date:
+
+```bash
+aws kms cancel-key-deletion --key-id "$AO_BACKUP_KEY_ARN"
+aws kms enable-key --key-id "$AO_BACKUP_KEY_ARN"
+aws kms describe-key --key-id "$AO_BACKUP_KEY_ARN" \
+  --query 'KeyMetadata.KeyState' --output text
+```
+
+Cancellation leaves the key `Disabled`; enabling it is a separate required step
+(AWS reference: https://docs.aws.amazon.com/kms/latest/APIReference/API_CancelKeyDeletion.html).
+Confirm `Enabled`, restore any removed bucket protections and access permissions,
+and reconcile Terraform's configuration and state with the original key before
+another apply. Creating a new key does not recover the old files.
 
 ### Least-privilege ClickHouse users
 
@@ -585,13 +635,9 @@ To use a StorageClass you manage outside this module, set `clickhouse_storage_cl
 | `helm.llm_worker.resources` | `object` | `null` | Kubernetes resource requests/limits for the LLM-worker pods. Same shape as `helm.clickhouse.resources`. Omit to use chart defaults. |
 | `trace_export_ingest` | `object` | `null` | Optional trace-export ingest leg — see [Trace-export ingest leg](#trace-export-ingest-leg). Shape: `{ producer_execution_role_arn = string, agent_role_arn = optional(string), bucket_name = optional(string), prefix = optional(string, "traces/"), lifecycle_days = optional(number, 3), kms_key_arn = optional(string) }`. `producer_execution_role_arn` is the external role trusted to assume the writer role (exact ARN or role-name wildcard; literal account ID enforced); the trust condition's `sts:ExternalId` value comes from the separate `trace_export_external_id` variable, which is required when this block is set. `agent_role_arn` optionally grants one additional role `s3:PutObject` on the prefix via the bucket policy. `prefix` accepts multi-segment values (`"traces/tenant-a/"`) and is normalized to one trailing `/`. `kms_key_arn` switches the bucket to SSE-KMS (Bucket Keys on) and widens writer/collector policies accordingly. Unset (default), no resources are created and the plan is unchanged from previous releases. |
 | `trace_export_external_id` | `string` (sensitive) | `null` | The `sts:ExternalId` value the external producer supplies when assuming the trace-export writer role (min 8 chars). Required when `trace_export_ingest` is set. Marked `sensitive`, so caller-supplied values are redacted in plan/apply output and CI logs — supply via a `.tfvars` file or `TF_VAR_trace_export_external_id`. Values remain readable in Terraform state — protect state accordingly. |
-| `clickhouse_backup` | `object` | `null` | Optional backup bucket, scoped IAM role, and stored password. Requires `bucket_name`; `service_account_name` defaults to `clickhouse-backup`. See [ClickHouse backup storage](#clickhouse-backup-storage). |
+| `clickhouse_backup` | `object` | `null` | Optional backup bucket, scoped IAM role, and generated password for a fresh backup installation. Requires `bucket_name`; `service_account_name` defaults to `clickhouse-backup` and cannot be `default`, `opentelemetry-collector`, or `llm-worker`. Files do not expire until backup cleanup is configured. See [ClickHouse backup storage](#clickhouse-backup-storage). |
 
 ## Outputs
-
-The `clickhouse_backup` output is an object containing `bucket_name`, `bucket_arn`,
-`iam_role_arn`, `namespace`, `service_account_name`, `username`, and
-`password_secret_arn`. It is null when backup storage is disabled.
 
 | Name | Description |
 |------|-------------|
@@ -611,6 +657,8 @@ The `clickhouse_backup` output is an object containing `bucket_name`, `bucket_ar
 | `clickhouse_schema_owner_credentials_secret_arn` | Secrets Manager ARN for the ClickHouse schema_owner user password |
 | `clickhouse_llm_worker_credentials_secret_arn` | Secrets Manager ARN for the ClickHouse llm_worker user password |
 | `clickhouse_readonly_user_credentials_secret_arn` | Secrets Manager ARN for the password of the ClickHouse SQL user `readonly_user` (profile: readonly, SELECT-only). Null when `helm.clickhouse.readonly_user` is disabled. |
+| `clickhouse_backup_credentials_secret_arn` | Secrets Manager ARN for the generated ClickHouse backup user password; also available as `clickhouse_backup.password_secret_arn`. Null when `clickhouse_backup` is unset. Never includes the password. |
+| `clickhouse_backup` | Backup installation references: `bucket_name`, `bucket_arn`, `iam_role_arn`, `namespace`, `service_account_name`, `username`, and `password_secret_arn`. Null when `clickhouse_backup` is unset. Never includes the password. |
 | `clickhouse_node_group` | Identity of the dedicated ClickHouse node group when active: `{ availability_zone, instance_type, size, label = { key, value }, taint = { key, value, effect } }`. Null when not active (`helm.deploy_charts = false`, `cluster.create = false`, or `manage_legacy_clickhouse_node_group = false`). Useful for verifying the resolved AZ during plan/apply review. |
 | `trace_export_ingest_bucket` | Name of the trace-export ingest bucket. Null when `trace_export_ingest` is unset. |
 | `trace_export_ingest_prefix` | Normalized key prefix the producer must write beneath. Null when `trace_export_ingest` is unset. |

@@ -1,6 +1,7 @@
 # Plan-only tests: every provider is mocked, so these cannot access AWS or a
-# Kubernetes cluster. Only computed IDs/passwords are supplied by the mocks;
-# the policies and resource settings under test come from the real module.
+# Kubernetes cluster. The mocks supply computed IDs/passwords and data lookups
+# such as account identity, availability zones, and cluster certificates. The
+# policies and resource settings under test come from the real module.
 
 mock_provider "aws" {
   override_during = plan
@@ -16,6 +17,11 @@ mock_provider "aws" {
       identity              = [{ oidc = [{ issuer = "https://oidc.eks.us-east-1.amazonaws.com/id/TESTOIDC" }] }]
       certificate_authority = [{ data = "dGVzdC1jYQ==" }]
     }
+  }
+
+  override_data {
+    target = data.aws_caller_identity.clickhouse_backup[0]
+    values = { account_id = "123456789012" }
   }
 
   override_data {
@@ -135,6 +141,7 @@ run "backup_disabled_by_default" {
 
   assert {
     condition = alltrue([
+      length(data.aws_caller_identity.clickhouse_backup) == 0,
       length(aws_s3_bucket.clickhouse_backup) == 0,
       length(aws_s3_bucket_public_access_block.clickhouse_backup) == 0,
       length(aws_s3_bucket_ownership_controls.clickhouse_backup) == 0,
@@ -152,8 +159,8 @@ run "backup_disabled_by_default" {
   }
 
   assert {
-    condition     = output.clickhouse_backup == null
-    error_message = "The backup output must be null when the feature is disabled."
+    condition     = output.clickhouse_backup == null && output.clickhouse_backup_credentials_secret_arn == null
+    error_message = "Both backup outputs must be null when the feature is disabled."
   }
 
   assert {
@@ -208,11 +215,12 @@ run "backup_storage_is_private_and_not_force_deleted" {
 
   assert {
     condition = (
+      one(aws_s3_bucket_server_side_encryption_configuration.clickhouse_backup[0].rule).bucket_key_enabled &&
       one(one(aws_s3_bucket_server_side_encryption_configuration.clickhouse_backup[0].rule).apply_server_side_encryption_by_default).sse_algorithm == "aws:kms" &&
       one(one(aws_s3_bucket_server_side_encryption_configuration.clickhouse_backup[0].rule).apply_server_side_encryption_by_default).kms_master_key_id == aws_kms_key.clickhouse_backup[0].arn &&
       aws_kms_key.clickhouse_backup[0].arn != aws_kms_key.pipeline_secrets.arn
     )
-    error_message = "Backup files must use their own KMS key by default, separate from the key used for passwords."
+    error_message = "Backup files must use their own KMS key by default, separate from the passwords key, with S3 Bucket Keys enabled."
   }
 
   assert {
@@ -220,11 +228,11 @@ run "backup_storage_is_private_and_not_force_deleted" {
       length(aws_kms_key.clickhouse_backup) == 1 &&
       length(aws_kms_alias.clickhouse_backup) == 1 &&
       aws_kms_key.clickhouse_backup[0].enable_key_rotation &&
-      aws_kms_key.clickhouse_backup[0].deletion_window_in_days == 7 &&
+      aws_kms_key.clickhouse_backup[0].deletion_window_in_days == 30 &&
       aws_kms_alias.clickhouse_backup[0].name == "alias/test-cluster-clickhouse-backup" &&
       aws_kms_alias.clickhouse_backup[0].target_key_id == aws_kms_key.clickhouse_backup[0].key_id
     )
-    error_message = "Enabling backups must create one named KMS key with automatic rotation and a seven-day deletion waiting period."
+    error_message = "Enabling backups must create one named KMS key with automatic rotation and a 30-day deletion waiting period."
   }
 
   assert {
@@ -237,6 +245,59 @@ run "backup_storage_is_private_and_not_force_deleted" {
       try(tostring(statement.Condition.Bool["aws:SecureTransport"]) == "false", false)
     ])
     error_message = "The bucket policy must reject unencrypted connections for everyone, covering both the bucket and its objects."
+  }
+}
+
+run "backup_bucket_rejects_explicit_encryption_overrides" {
+  command = plan
+
+  variables {
+    clickhouse_backup = { bucket_name = "test-clickhouse-backups" }
+  }
+
+  assert {
+    condition = (
+      length(jsondecode(aws_s3_bucket_policy.clickhouse_backup[0].policy).Statement) == 5 &&
+      toset([for statement in jsondecode(aws_s3_bucket_policy.clickhouse_backup[0].policy).Statement : statement.Sid]) == toset([
+        "DenyInsecureTransport", "DenyNonKmsEncryption", "DenyOtherKmsKeys",
+        "DenyKmsWithoutKeyId", "DenyCustomerProvidedEncryptionKeys",
+      ]) &&
+      alltrue([
+        for statement in jsondecode(aws_s3_bucket_policy.clickhouse_backup[0].policy).Statement :
+        statement.Effect == "Deny" && statement.Principal == "*" &&
+        toset(flatten([statement.Action])) == toset(["s3:PutObject"]) &&
+        toset(flatten([statement.Resource])) == toset(["arn:aws:s3:::test-clickhouse-backups/*"])
+        if statement.Sid != "DenyInsecureTransport"
+      ])
+    )
+    error_message = "The bucket policy must contain the existing TLS denial and exactly four encryption denials covering every uploader and every backup object."
+  }
+
+  # Check the actual AWS condition structure, without inventing a second policy
+  # evaluator. Header-presence guards matter: StringNotEqualsIfExists in a Deny
+  # would also reject uploads that rely on the bucket's default encryption.
+  assert {
+    condition = jsonencode({
+      for statement in jsondecode(aws_s3_bucket_policy.clickhouse_backup[0].policy).Statement :
+      statement.Sid => statement.Condition if statement.Sid != "DenyInsecureTransport"
+      }) == jsonencode({
+      DenyNonKmsEncryption = {
+        Null            = { "s3:x-amz-server-side-encryption" = "false" }
+        StringNotEquals = { "s3:x-amz-server-side-encryption" = "aws:kms" }
+      }
+      DenyOtherKmsKeys = {
+        Null            = { "s3:x-amz-server-side-encryption-aws-kms-key-id" = "false" }
+        StringNotEquals = { "s3:x-amz-server-side-encryption-aws-kms-key-id" = aws_kms_key.clickhouse_backup[0].arn }
+      }
+      DenyKmsWithoutKeyId = {
+        StringEquals = { "s3:x-amz-server-side-encryption" = "aws:kms" }
+        Null         = { "s3:x-amz-server-side-encryption-aws-kms-key-id" = "true" }
+      }
+      DenyCustomerProvidedEncryptionKeys = {
+        Null = { "s3:x-amz-server-side-encryption-customer-algorithm" = "false" }
+      }
+    })
+    error_message = "Allow headerless default-KMS uploads; reject explicit wrong algorithms, different keys, KMS without a key ID, and customer-provided encryption keys."
   }
 }
 
@@ -293,18 +354,20 @@ run "backup_role_can_only_use_its_backup_bucket_and_key" {
     condition = anytrue([
       for statement in jsondecode(aws_iam_role_policy.clickhouse_backup[0].policy).Statement :
       toset(flatten([statement.Action])) == toset(["s3:ListBucket", "s3:GetBucketLocation"]) &&
-      toset(flatten([statement.Resource])) == toset(["arn:aws:s3:::test-clickhouse-backups"])
+      toset(flatten([statement.Resource])) == toset(["arn:aws:s3:::test-clickhouse-backups"]) &&
+      try(statement.Condition.StringEquals["s3:ResourceAccount"] == "123456789012", false)
     ])
-    error_message = "Bucket-listing permissions must be limited to this backup bucket."
+    error_message = "Bucket-listing permissions must be limited to this backup bucket owned by the current AWS account."
   }
 
   assert {
     condition = anytrue([
       for statement in jsondecode(aws_iam_role_policy.clickhouse_backup[0].policy).Statement :
       toset(flatten([statement.Action])) == toset(["s3:GetObject", "s3:PutObject", "s3:DeleteObject", "s3:AbortMultipartUpload"]) &&
-      toset(flatten([statement.Resource])) == toset(["arn:aws:s3:::test-clickhouse-backups/*"])
+      toset(flatten([statement.Resource])) == toset(["arn:aws:s3:::test-clickhouse-backups/*"]) &&
+      try(statement.Condition.StringEquals["s3:ResourceAccount"] == "123456789012", false)
     ])
-    error_message = "Object permissions must permit backup and restore operations only within this backup bucket."
+    error_message = "Object permissions must permit backup and restore operations only within this backup bucket owned by the current AWS account."
   }
 
   assert {
@@ -315,6 +378,18 @@ run "backup_role_can_only_use_its_backup_bucket_and_key" {
       toset(flatten([statement.Resource])) == toset([aws_kms_key.clickhouse_backup[0].arn])
     ])
     error_message = "Key permissions must allow only generating data keys and decrypting with the dedicated backup key."
+  }
+
+  assert {
+    condition = length(setintersection(
+      toset(flatten([for statement in jsondecode(aws_iam_role_policy.clickhouse_backup[0].policy).Statement : statement.Action])),
+      toset([
+        "s3:GetBucketVersioning", "s3:PutBucketVersioning", "s3:ListBucketVersions",
+        "s3:GetObjectVersion", "s3:DeleteObjectVersion",
+        "s3:GetLifecycleConfiguration", "s3:PutLifecycleConfiguration",
+      ]),
+    )) == 0
+    error_message = "The backup software must not inspect or change bucket versioning/lifecycle settings, or read or delete previous object versions."
   }
 }
 
@@ -347,6 +422,11 @@ run "backup_password_is_generated_and_stored_in_the_existing_key" {
       username             = "backup"
     }
     error_message = "Expose the storage and identity references needed for the backup job, without exposing its password."
+  }
+
+  assert {
+    condition     = output.clickhouse_backup_credentials_secret_arn == output.clickhouse_backup.password_secret_arn
+    error_message = "The flat credentials output must reference the same secret as the unchanged backup output object."
   }
 }
 
@@ -418,5 +498,192 @@ run "backup_storage_supports_an_externally_managed_secrets_operator" {
       length(aws_iam_role.clickhouse_backup) == 1
     )
     error_message = "Backup storage and its password must still be available when the caller manages External Secrets separately, without creating an operator role or policy."
+  }
+}
+
+# Input validation must also protect callers that create storage without Helm.
+# Every rejected case inherits helm.deploy_charts = false from this file.
+
+run "backup_rejects_uppercase_bucket" {
+  command = plan
+
+  variables {
+    clickhouse_backup = {
+      bucket_name = "Test-clickhouse-backups"
+    }
+  }
+
+  expect_failures = [var.clickhouse_backup]
+}
+
+run "backup_rejects_reserved_bucket_prefix_xn" {
+  command = plan
+
+  variables {
+    clickhouse_backup = {
+      bucket_name = "xn--backup-test"
+    }
+  }
+
+  expect_failures = [var.clickhouse_backup]
+}
+
+run "backup_rejects_reserved_bucket_prefix_sthree" {
+  command = plan
+
+  variables {
+    clickhouse_backup = {
+      bucket_name = "sthree-backup-test"
+    }
+  }
+
+  expect_failures = [var.clickhouse_backup]
+}
+
+run "backup_rejects_reserved_bucket_prefix_demo" {
+  command = plan
+
+  variables {
+    clickhouse_backup = {
+      bucket_name = "amzn-s3-demo-backup-test"
+    }
+  }
+
+  expect_failures = [var.clickhouse_backup]
+}
+
+run "backup_rejects_reserved_bucket_suffix_alias" {
+  command = plan
+
+  variables {
+    clickhouse_backup = {
+      bucket_name = "backup-test-s3alias"
+    }
+  }
+
+  expect_failures = [var.clickhouse_backup]
+}
+
+run "backup_rejects_reserved_bucket_suffix_object_lambda" {
+  command = plan
+
+  variables {
+    clickhouse_backup = {
+      bucket_name = "backup-test--ol-s3"
+    }
+  }
+
+  expect_failures = [var.clickhouse_backup]
+}
+
+run "backup_rejects_reserved_bucket_suffix_directory" {
+  command = plan
+
+  variables {
+    clickhouse_backup = {
+      bucket_name = "backup-test--x-s3"
+    }
+  }
+
+  expect_failures = [var.clickhouse_backup]
+}
+
+run "backup_rejects_reserved_bucket_suffix_table" {
+  command = plan
+
+  variables {
+    clickhouse_backup = {
+      bucket_name = "backup-test--table-s3"
+    }
+  }
+
+  expect_failures = [var.clickhouse_backup]
+}
+
+run "backup_rejects_invalid_service_account" {
+  command = plan
+
+  variables {
+    clickhouse_backup = {
+      bucket_name          = "test-clickhouse-backups"
+      service_account_name = "backup_jobs"
+    }
+  }
+
+  expect_failures = [var.clickhouse_backup]
+}
+
+run "backup_rejects_64_character_service_account" {
+  command = plan
+
+  variables {
+    clickhouse_backup = {
+      bucket_name          = "test-clickhouse-backups"
+      service_account_name = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    }
+  }
+
+  expect_failures = [var.clickhouse_backup]
+}
+
+run "backup_rejects_default_service_account" {
+  command = plan
+
+  variables {
+    clickhouse_backup = {
+      bucket_name          = "test-clickhouse-backups"
+      service_account_name = "default"
+    }
+  }
+
+  expect_failures = [var.clickhouse_backup]
+}
+
+run "backup_rejects_collector_service_account" {
+  command = plan
+
+  variables {
+    clickhouse_backup = {
+      bucket_name          = "test-clickhouse-backups"
+      service_account_name = "opentelemetry-collector"
+    }
+  }
+
+  expect_failures = [var.clickhouse_backup]
+}
+
+run "backup_rejects_worker_service_account" {
+  command = plan
+
+  variables {
+    clickhouse_backup = {
+      bucket_name          = "test-clickhouse-backups"
+      service_account_name = "llm-worker"
+    }
+  }
+
+  expect_failures = [var.clickhouse_backup]
+}
+
+run "backup_accepts_63_character_names_without_helm" {
+  command = plan
+
+  variables {
+    clickhouse_backup = {
+      bucket_name          = "backup-${join("", [for _ in range(56) : "a"])}"
+      service_account_name = "backup-${join("", [for _ in range(56) : "a"])}"
+    }
+  }
+
+  assert {
+    condition = (
+      var.helm.deploy_charts == false &&
+      length(var.clickhouse_backup.bucket_name) == 63 &&
+      length(var.clickhouse_backup.service_account_name) == 63 &&
+      aws_s3_bucket.clickhouse_backup[0].bucket == var.clickhouse_backup.bucket_name &&
+      output.clickhouse_backup.service_account_name == var.clickhouse_backup.service_account_name &&
+      jsondecode(aws_iam_role.clickhouse_backup[0].assume_role_policy).Statement[0].Condition.StringEquals["oidc.eks.us-east-1.amazonaws.com/id/TESTOIDC:sub"] == "system:serviceaccount:montecarlo:${var.clickhouse_backup.service_account_name}"
+    )
+    error_message = "Valid bucket and dedicated service-account names at the 63-character limit must work when only storage is requested."
   }
 }

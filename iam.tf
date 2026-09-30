@@ -666,3 +666,62 @@ resource "aws_iam_role_policy" "external_secrets" {
     ]
   })
 }
+
+resource "aws_iam_role" "clickhouse_backup" {
+  count = local.clickhouse_backup_enabled ? 1 : 0
+
+  # IAM adds a unique suffix; keep the prefix within its 38-character limit.
+  name_prefix = "${substr(local.region_qualified_name, 0, 24)}-backup-"
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect    = "Allow"
+      Principal = { Federated = local.oidc_provider_arn }
+      Action    = "sts:AssumeRoleWithWebIdentity"
+      Condition = {
+        StringEquals = {
+          "${local.oidc_provider_url}:sub" = "system:serviceaccount:${kubernetes_namespace_v1.montecarlo.metadata[0].name}:${var.clickhouse_backup.service_account_name}"
+          "${local.oidc_provider_url}:aud" = "sts.amazonaws.com"
+        }
+      }
+    }]
+  })
+  tags = var.tags
+}
+
+resource "aws_iam_role_policy" "clickhouse_backup" {
+  count = local.clickhouse_backup_enabled ? 1 : 0
+
+  name = "clickhouse-backup-storage"
+  role = aws_iam_role.clickhouse_backup[0].id
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Sid       = "BackupBucket"
+        Effect    = "Allow"
+        Action    = ["s3:ListBucket", "s3:GetBucketLocation"]
+        Resource  = aws_s3_bucket.clickhouse_backup[0].arn
+        Condition = { StringEquals = { "s3:ResourceAccount" = data.aws_caller_identity.clickhouse_backup[0].account_id } }
+      },
+      {
+        Sid    = "BackupFiles"
+        Effect = "Allow"
+        Action = [
+          "s3:GetObject",
+          "s3:PutObject",
+          "s3:DeleteObject",
+          "s3:AbortMultipartUpload",
+        ]
+        Resource  = "${aws_s3_bucket.clickhouse_backup[0].arn}/*"
+        Condition = { StringEquals = { "s3:ResourceAccount" = data.aws_caller_identity.clickhouse_backup[0].account_id } }
+      },
+      {
+        Sid      = "BackupEncryptionKey"
+        Effect   = "Allow"
+        Action   = ["kms:GenerateDataKey", "kms:Decrypt"]
+        Resource = aws_kms_key.clickhouse_backup[0].arn
+      },
+    ]
+  })
+}
