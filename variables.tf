@@ -743,9 +743,10 @@ variable "helm" {
         enabled = bool
       }), null)
       backup = optional(object({
-        enabled = optional(bool, false)
-        suspend = optional(bool, false)
-        image   = optional(string, null)
+        enabled               = optional(bool, false)
+        suspend               = optional(bool, false)
+        image                 = optional(string, null)
+        api_password_revision = optional(string, "1")
         cleanup = optional(object({
           enabled         = optional(bool, false)
           dry_run         = optional(bool, true)
@@ -834,7 +835,7 @@ variable "helm" {
     condition = !var.helm.clickhouse.backup.cleanup.enabled || var.helm.clickhouse.backup.cleanup.dry_run || (
       can(regex("^[^[:space:]@]+@sha256:[0-9a-f]{64}$", var.helm.clickhouse.backup.image))
     )
-    error_message = "Actual backup cleanup requires an explicit helm.clickhouse.backup.image pinned by @sha256:<64 lowercase hex digits>. Publish the patched image first; cleanup also checks that both running copies report version 2.8.1-ao1300.1 before deleting anything."
+    error_message = "Actual backup cleanup requires an explicit helm.clickhouse.backup.image pinned by @sha256:<64 lowercase hex digits>. Publish the patched image first; cleanup also checks that both running copies report version 2.8.1-mc.2 before deleting anything."
   }
 
   validation {
@@ -847,6 +848,19 @@ variable "helm" {
       floor(var.helm.clickhouse.backup.cleanup.timeout_seconds) == var.helm.clickhouse.backup.cleanup.timeout_seconds
     )
     error_message = "Backup cleanup keep_last must be a positive whole number, keep_days a nonnegative whole number, and timeout_seconds a whole number of at least 60."
+  }
+
+  validation {
+    condition = !var.helm.clickhouse.backup.enabled || can(regex(
+      "^[a-zA-Z0-9][a-zA-Z0-9._:/-]*@sha256:[0-9a-f]{64}$",
+      var.helm.clickhouse.backup.image,
+    ))
+    error_message = "Scheduled backups require helm.clickhouse.backup.image pinned by SHA-256 digest to the patched backup build documented by the chart."
+  }
+
+  validation {
+    condition     = can(regex("^[A-Za-z0-9][A-Za-z0-9._-]{0,62}$", var.helm.clickhouse.backup.api_password_revision))
+    error_message = "helm.clickhouse.backup.api_password_revision must contain 1-63 letters, numbers, dots, underscores, or hyphens and start with a letter or number. Change it whenever the API password changes."
   }
 
   validation {

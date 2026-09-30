@@ -427,6 +427,7 @@ resource "helm_release" "ao_data_platform" {
     aws_iam_role_policy.clickhouse_backup,
     # Install the monitor only after its metrics permission is attached.
     aws_iam_role_policy.clickhouse_backup_monitor,
+    aws_iam_role_policy.external_secrets,
 
     # Every ClickHouse/Keeper node must exist before the chart schedules those
     # pods. Their PVCs use a WaitForFirstConsumer storage class, so a pod that

@@ -656,6 +656,7 @@ resource "aws_iam_role_policy" "external_secrets" {
           local.clickhouse_admin_enabled ? [aws_secretsmanager_secret.clickhouse_admin_password[0].arn] : [],
           local.clickhouse_readonly_user_enabled ? [aws_secretsmanager_secret.clickhouse_readonly_user_password[0].arn] : [],
           local.clickhouse_backup_enabled ? [aws_secretsmanager_secret.clickhouse_backup[0].arn] : [],
+          local.clickhouse_backup_install_enabled ? [aws_secretsmanager_secret.clickhouse_backup_probe[0].arn] : [],
         )
       },
       {

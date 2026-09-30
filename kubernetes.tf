@@ -22,7 +22,10 @@ resource "kubernetes_secret_v1" "clickhouse_backup_api" {
   }
 
   type = "Opaque"
-  data = { password = random_password.clickhouse_backup_api[0].result }
+  data = {
+    password = random_password.clickhouse_backup_api[0].result
+    revision = var.helm.clickhouse.backup.api_password_revision
+  }
 }
 
 # gp3 StorageClass — cluster-wide EBS storage class used by the ao-data-platform chart.

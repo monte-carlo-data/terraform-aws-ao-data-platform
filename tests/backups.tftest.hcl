@@ -104,6 +104,14 @@ mock_provider "aws" {
   }
 
   override_resource {
+    target = aws_secretsmanager_secret.clickhouse_backup_probe[0]
+    values = {
+      id  = "arn:aws:secretsmanager:us-east-1:123456789012:secret:test-cluster/clickhouse/backup-probe-credentials-ABCDEF"
+      arn = "arn:aws:secretsmanager:us-east-1:123456789012:secret:test-cluster/clickhouse/backup-probe-credentials-ABCDEF"
+    }
+  }
+
+  override_resource {
     target = aws_secretsmanager_secret.clickhouse_otel_password
     values = { arn = "arn:aws:secretsmanager:us-east-1:123456789012:secret:test-cluster/clickhouse/otel-credentials-ABCDEF" }
   }
@@ -147,6 +155,11 @@ mock_provider "random" {
   override_resource {
     target = random_password.clickhouse_backup[0]
     values = { result = "00000000000000000000000000000000" }
+  }
+
+  override_resource {
+    target = random_password.clickhouse_backup_probe[0]
+    values = { result = "22222222222222222222222222222222" }
   }
 
   override_resource {
@@ -203,6 +216,9 @@ run "backup_disabled_by_default" {
       length(aws_sns_topic_policy.clickhouse_backup) == 0,
       length(aws_cloudwatch_metric_alarm.clickhouse_backup) == 0,
       output.clickhouse_backup_monitoring == null,
+      length(random_password.clickhouse_backup_probe) == 0,
+      length(aws_secretsmanager_secret.clickhouse_backup_probe) == 0,
+      length(aws_secretsmanager_secret_version.clickhouse_backup_probe) == 0,
       length(keys(local.helm_clickhouse_backup_block)) == 0,
     ])
     error_message = "Existing callers must not receive backup storage, encryption keys, access, or credentials unless they enable backups."
@@ -780,7 +796,7 @@ run "scheduled_backups_use_existing_storage_and_a_separate_api_password" {
     helm = {
       chart_registry = "oci://registry-1.docker.io/montecarlodata"
       chart_version  = "5.2.0"
-      clickhouse     = { backup = { enabled = true } }
+      clickhouse     = { backup = { enabled = true, image = "registry.example.com/backup@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" } }
     }
   }
 
@@ -816,11 +832,20 @@ run "scheduled_backups_use_existing_storage_and_a_separate_api_password" {
         path    = "clickhouse"
       }
       serviceAccount = { name = "custom-backup" }
-      externalSecret = {
-        secretStoreRef = { name = "aws-secrets-manager", kind = "ClusterSecretStore" }
-        remoteRef      = { key = "test-cluster/clickhouse/backup-credentials" }
+      user = {
+        externalSecret = {
+          secretStoreRef = { name = "aws-secrets-manager", kind = "ClusterSecretStore" }
+          remoteRef      = { key = "test-cluster/clickhouse/backup-credentials" }
+        }
       }
-      api      = { existingSecret = "ao-clickhouse-backup-api" }
+      sidecar = { image = "registry.example.com/backup@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" }
+      probe = {
+        externalSecret = {
+          secretStoreRef = { name = "aws-secrets-manager", kind = "ClusterSecretStore" }
+          remoteRef      = { key = "test-cluster/clickhouse/backup-probe-credentials" }
+        }
+      }
+      api      = { existingSecret = "ao-clickhouse-backup-api", passwordRevision = "1" }
       schedule = { suspend = false }
     })
     error_message = "The chart must use the existing bucket, role, stored database password and trusted service account; only the separate API secret's name belongs in values."
@@ -830,6 +855,7 @@ run "scheduled_backups_use_existing_storage_and_a_separate_api_password" {
     condition = (
       !strcontains(helm_release.ao_data_platform[0].values[0], "11111111111111111111111111111111") &&
       !strcontains(helm_release.ao_data_platform[0].values[0], "00000000000000000000000000000000") &&
+      !strcontains(helm_release.ao_data_platform[0].values[0], "22222222222222222222222222222222") &&
       !issensitive(helm_release.ao_data_platform[0].values[0])
     )
     error_message = "Neither password value may enter the Helm release values."
@@ -881,7 +907,7 @@ run "scheduled_backups_can_be_installed_with_the_schedule_paused" {
     helm = {
       chart_registry = "oci://registry-1.docker.io/montecarlodata"
       chart_version  = "5.2.0"
-      clickhouse     = { backup = { enabled = true, suspend = true } }
+      clickhouse     = { backup = { enabled = true, image = "registry.example.com/backup@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", suspend = true } }
     }
   }
 
@@ -904,7 +930,7 @@ run "scheduled_backups_require_existing_storage" {
     helm = {
       chart_registry = "oci://registry-1.docker.io/montecarlodata"
       chart_version  = "5.2.0"
-      clickhouse     = { backup = { enabled = true } }
+      clickhouse     = { backup = { enabled = true, image = "registry.example.com/backup@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" } }
     }
   }
 
@@ -921,7 +947,7 @@ run "scheduled_backups_reject_the_default_service_account" {
     helm = {
       chart_registry = "oci://registry-1.docker.io/montecarlodata"
       chart_version  = "5.2.0"
-      clickhouse     = { backup = { enabled = true } }
+      clickhouse     = { backup = { enabled = true, image = "registry.example.com/backup@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" } }
     }
   }
 
@@ -934,7 +960,7 @@ run "scheduled_backups_require_chart_deployment" {
   variables {
     helm = {
       deploy_charts = false
-      clickhouse    = { backup = { enabled = true } }
+      clickhouse    = { backup = { enabled = true, image = "registry.example.com/backup@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" } }
     }
   }
 
@@ -952,7 +978,7 @@ run "scheduled_backups_reject_published_charts_without_backup_support" {
     helm = {
       chart_registry = "oci://registry-1.docker.io/montecarlodata"
       chart_version  = "5.1.0"
-      clickhouse     = { backup = { enabled = true } }
+      clickhouse     = { backup = { enabled = true, image = "registry.example.com/backup@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" } }
     }
   }
 
@@ -969,7 +995,7 @@ run "backup_monitoring_limits_access_and_wires_external_alarms" {
     helm = {
       chart_registry = "oci://registry-1.docker.io/montecarlodata"
       chart_version  = "5.3.0"
-      clickhouse     = { backup = { enabled = true } }
+      clickhouse     = { backup = { enabled = true, image = "registry.example.com/backup@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" } }
     }
   }
 
@@ -1067,7 +1093,7 @@ run "cleanup_is_explicit_and_defaults_to_a_dry_run" {
     helm = {
       chart_registry = "oci://registry-1.docker.io/montecarlodata"
       chart_version  = "5.3.0"
-      clickhouse     = { backup = { enabled = true, cleanup = { enabled = true } } }
+      clickhouse     = { backup = { enabled = true, image = "registry.example.com/backup@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", cleanup = { enabled = true } } }
     }
   }
   assert {
@@ -1094,7 +1120,7 @@ run "cleanup_and_monitoring_use_a_published_development_chart" {
     helm = {
       chart_registry = "oci://registry-1.docker.io/montecarlodata"
       chart_version  = "5.3.0-dev.g0123456789abcdef0123456789abcdef01234567"
-      clickhouse = { backup = { enabled = true, cleanup = {
+      clickhouse = { backup = { enabled = true, image = "registry.example.com/backup@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", cleanup = {
         enabled = true, dry_run = true, keep_last = 3, keep_days = 30, timeout_seconds = 600
       } } }
     }
@@ -1128,7 +1154,7 @@ run "monitoring_rejects_published_charts_without_monitoring_support" {
     helm = {
       chart_registry = "oci://registry-1.docker.io/montecarlodata"
       chart_version  = "5.2.0"
-      clickhouse     = { backup = { enabled = true } }
+      clickhouse     = { backup = { enabled = true, image = "registry.example.com/backup@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" } }
     }
   }
   expect_failures = [aws_iam_role.clickhouse_backup_monitor]
@@ -1145,7 +1171,7 @@ run "cleanup_rejects_published_charts_without_cleanup_support" {
     helm = {
       chart_registry = "oci://registry-1.docker.io/montecarlodata"
       chart_version  = "5.2.0"
-      clickhouse     = { backup = { enabled = true, cleanup = { enabled = true } } }
+      clickhouse     = { backup = { enabled = true, image = "registry.example.com/backup@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", cleanup = { enabled = true } } }
     }
   }
   expect_failures = [helm_release.ao_data_platform]
@@ -1181,7 +1207,7 @@ run "cleanup_rejects_a_tag_without_a_digest_even_if_it_names_the_patch" {
       chart_version  = "5.3.0"
       clickhouse = { backup = {
         enabled = true
-        image   = "registry.example.com/ao-clickhouse-backup:2.8.1-ao1300.1"
+        image   = "registry.example.com/ao-clickhouse-backup:2.8.1-mc.2"
         cleanup = { enabled = true, dry_run = false }
       } }
     }
@@ -1210,7 +1236,7 @@ run "cleanup_accepts_an_explicit_digest_and_passes_the_image_to_helm" {
   }
   assert {
     condition = (
-      yamldecode(helm_release.ao_data_platform[0].values[0]).clickhouse.backup.image == var.helm.clickhouse.backup.image &&
+      yamldecode(helm_release.ao_data_platform[0].values[0]).clickhouse.backup.sidecar.image == var.helm.clickhouse.backup.image &&
       yamldecode(helm_release.ao_data_platform[0].values[0]).clickhouse.backup.cleanup.dryRun == false
     )
     error_message = "The explicit immutable image and deletion setting must reach the chart, which checks the running version before cleanup."
@@ -1228,13 +1254,13 @@ run "backup_image_override_is_allowed_without_cleanup" {
       chart_version  = "5.2.0"
       clickhouse = { backup = {
         enabled = true
-        image   = "registry.example.com/ao-clickhouse-backup:2.8.1-ao1300.1"
+        image   = "registry.example.com/ao-clickhouse-backup@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
       } }
     }
   }
   assert {
     condition = (
-      yamldecode(helm_release.ao_data_platform[0].values[0]).clickhouse.backup.image == var.helm.clickhouse.backup.image &&
+      yamldecode(helm_release.ao_data_platform[0].values[0]).clickhouse.backup.sidecar.image == var.helm.clickhouse.backup.image &&
       !can(yamldecode(helm_release.ao_data_platform[0].values[0]).clickhouse.backup.cleanup)
     )
     error_message = "An image override alone must not enable cleanup or require its newer chart version."
@@ -1274,7 +1300,7 @@ run "cleanup_requires_two_clickhouse_copies" {
     helm = {
       chart_registry = "oci://registry-1.docker.io/montecarlodata"
       chart_version  = "5.3.0"
-      clickhouse     = { backup = { enabled = true, cleanup = { enabled = true } } }
+      clickhouse     = { backup = { enabled = true, image = "registry.example.com/backup@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", cleanup = { enabled = true } } }
     }
   }
   expect_failures = [helm_release.ao_data_platform]
@@ -1308,7 +1334,7 @@ run "scheduled_backups_accept_next_major_chart_version" {
     helm = {
       chart_registry = "oci://registry-1.docker.io/montecarlodata"
       chart_version  = "6.0.0"
-      clickhouse     = { backup = { enabled = true } }
+      clickhouse     = { backup = { enabled = true, image = "registry.example.com/backup@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" } }
     }
   }
 
@@ -1332,7 +1358,7 @@ run "scheduled_backups_accept_double_digit_minor_chart_version" {
     helm = {
       chart_registry = "oci://registry-1.docker.io/montecarlodata"
       chart_version  = "5.10.0"
-      clickhouse     = { backup = { enabled = true } }
+      clickhouse     = { backup = { enabled = true, image = "registry.example.com/backup@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" } }
     }
   }
 
@@ -1356,7 +1382,7 @@ run "scheduled_backups_accept_v_prefix_chart_version" {
     helm = {
       chart_registry = "oci://registry-1.docker.io/montecarlodata"
       chart_version  = "v5.2.0"
-      clickhouse     = { backup = { enabled = true } }
+      clickhouse     = { backup = { enabled = true, image = "registry.example.com/backup@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" } }
     }
   }
 
@@ -1381,7 +1407,7 @@ run "scheduled_backups_reject_incomplete_chart_version" {
     helm = {
       chart_registry = "oci://registry-1.docker.io/montecarlodata"
       chart_version  = "5.2"
-      clickhouse     = { backup = { enabled = true } }
+      clickhouse     = { backup = { enabled = true, image = "registry.example.com/backup@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" } }
     }
   }
 
@@ -1399,7 +1425,7 @@ run "scheduled_backups_reject_invalid_patch_chart_version" {
     helm = {
       chart_registry = "oci://registry-1.docker.io/montecarlodata"
       chart_version  = "5.2.not-a-number"
-      clickhouse     = { backup = { enabled = true } }
+      clickhouse     = { backup = { enabled = true, image = "registry.example.com/backup@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" } }
     }
   }
 
@@ -1417,7 +1443,7 @@ run "scheduled_backups_reject_version_range_chart_version" {
     helm = {
       chart_registry = "oci://registry-1.docker.io/montecarlodata"
       chart_version  = ">=5.2.0"
-      clickhouse     = { backup = { enabled = true } }
+      clickhouse     = { backup = { enabled = true, image = "registry.example.com/backup@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" } }
     }
   }
 
@@ -1435,7 +1461,7 @@ run "scheduled_backups_reject_older_major_with_large_minor_chart_version" {
     helm = {
       chart_registry = "oci://registry-1.docker.io/montecarlodata"
       chart_version  = "4.1002.0"
-      clickhouse     = { backup = { enabled = true } }
+      clickhouse     = { backup = { enabled = true, image = "registry.example.com/backup@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" } }
     }
   }
 
@@ -1452,7 +1478,7 @@ run "scheduled_backups_use_a_published_development_chart" {
     helm = {
       chart_registry = "oci://registry-1.docker.io/montecarlodata"
       chart_version  = "5.2.0-dev.gabcdef1"
-      clickhouse     = { backup = { enabled = true } }
+      clickhouse     = { backup = { enabled = true, image = "registry.example.com/backup@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" } }
     }
   }
 
@@ -1478,7 +1504,7 @@ run "scheduled_backups_reject_unversioned_development_builds" {
     helm = {
       chart_registry = "oci://registry-1.docker.io/montecarlodata"
       chart_version  = "0.0.0-dev.gabcdef1"
-      clickhouse     = { backup = { enabled = true } }
+      clickhouse     = { backup = { enabled = true, image = "registry.example.com/backup@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" } }
     }
   }
 
@@ -1521,7 +1547,7 @@ run "cleanup_and_monitoring_accept_next_major_chart_version" {
     helm = {
       chart_registry = "oci://registry-1.docker.io/montecarlodata"
       chart_version  = "6.0.0"
-      clickhouse = { backup = { enabled = true, cleanup = {
+      clickhouse = { backup = { enabled = true, image = "registry.example.com/backup@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", cleanup = {
         enabled = true, dry_run = true, keep_last = 3, keep_days = 30, timeout_seconds = 600
       } } }
     }
@@ -1551,7 +1577,7 @@ run "cleanup_and_monitoring_accept_double_digit_minor_chart_version" {
     helm = {
       chart_registry = "oci://registry-1.docker.io/montecarlodata"
       chart_version  = "5.10.0"
-      clickhouse = { backup = { enabled = true, cleanup = {
+      clickhouse = { backup = { enabled = true, image = "registry.example.com/backup@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", cleanup = {
         enabled = true, dry_run = true, keep_last = 3, keep_days = 30, timeout_seconds = 600
       } } }
     }
@@ -1581,7 +1607,7 @@ run "cleanup_rejects_older_development_charts" {
     helm = {
       chart_registry = "oci://registry-1.docker.io/montecarlodata"
       chart_version  = "5.2.0-dev.gabcdef1"
-      clickhouse     = { backup = { enabled = true, cleanup = { enabled = true } } }
+      clickhouse     = { backup = { enabled = true, image = "registry.example.com/backup@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", cleanup = { enabled = true } } }
     }
   }
   expect_failures = [helm_release.ao_data_platform]
@@ -1598,8 +1624,69 @@ run "monitoring_rejects_older_development_charts" {
     helm = {
       chart_registry = "oci://registry-1.docker.io/montecarlodata"
       chart_version  = "5.2.0-dev.gabcdef1"
-      clickhouse     = { backup = { enabled = true } }
+      clickhouse     = { backup = { enabled = true, image = "registry.example.com/backup@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" } }
     }
   }
   expect_failures = [aws_iam_role.clickhouse_backup_monitor]
+}
+
+run "probe_password_and_revision_are_wired_without_exposing_passwords" {
+  command = plan
+  variables {
+    clickhouse_backup     = { bucket_name = "test-clickhouse-backups" }
+    clickhouse_domain     = "clickhouse.example.com"
+    otel_collector_domain = "otel.example.com"
+    helm = {
+      chart_registry = "oci://registry-1.docker.io/montecarlodata"
+      chart_version  = "5.2.0"
+      clickhouse = { backup = {
+        enabled               = true
+        image                 = "registry.example.com/backup@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        api_password_revision = "rotation-2"
+      } }
+    }
+  }
+  assert {
+    condition = (
+      aws_secretsmanager_secret.clickhouse_backup_probe[0].name == "test-cluster/clickhouse/backup-probe-credentials" &&
+      aws_secretsmanager_secret.clickhouse_backup_probe[0].kms_key_id == aws_kms_key.pipeline_secrets.arn &&
+      nonsensitive(aws_secretsmanager_secret_version.clickhouse_backup_probe[0].secret_string) == "22222222222222222222222222222222" &&
+      contains(jsondecode(aws_iam_role_policy.external_secrets[0].policy).Statement[0].Resource, aws_secretsmanager_secret.clickhouse_backup_probe[0].arn) &&
+      nonsensitive(kubernetes_secret_v1.clickhouse_backup_api[0].data.revision) == "rotation-2" &&
+      yamldecode(helm_release.ao_data_platform[0].values[0]).clickhouse.backup.api.passwordRevision == "rotation-2"
+    )
+    error_message = "The probe password must be encrypted, readable by External Secrets, and the API revision must agree between Secret and chart."
+  }
+}
+
+run "backup_rejects_missing_image" {
+  command = plan
+  variables {
+    helm = { deploy_charts = false, clickhouse = { backup = { enabled = true } } }
+  }
+  expect_failures = [var.helm]
+}
+
+run "backup_rejects_tag_only_image" {
+  command = plan
+  variables {
+    helm = { deploy_charts = false, clickhouse = { backup = { enabled = true, image = "registry.example.com/backup:latest" } } }
+  }
+  expect_failures = [var.helm]
+}
+
+run "backup_rejects_empty_revision" {
+  command = plan
+  variables {
+    helm = { deploy_charts = false, clickhouse = { backup = { api_password_revision = "" } } }
+  }
+  expect_failures = [var.helm]
+}
+
+run "backup_rejects_unsafe_revision" {
+  command = plan
+  variables {
+    helm = { deploy_charts = false, clickhouse = { backup = { api_password_revision = "bad/value" } } }
+  }
+  expect_failures = [var.helm]
 }

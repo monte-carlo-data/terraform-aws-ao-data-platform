@@ -253,9 +253,6 @@ locals {
   # fail the minimum-version check when a gated feature is enabled.
   chart_version_parts = try([for component in regex("^v?([0-9]+)\\.([0-9]+)\\.[0-9]+(?:-[0-9A-Za-z.-]+)?(?:\\+[0-9A-Za-z.-]+)?$", var.helm.chart_version) : tonumber(component)], [0, 0])
 
-  helm_clickhouse_backup_image = var.helm.clickhouse.backup.image == null ? {} : {
-    image = var.helm.clickhouse.backup.image
-  }
   helm_clickhouse_backup_cleanup = var.helm.clickhouse.backup.cleanup.enabled ? {
     cleanup = {
       enabled        = true
@@ -287,13 +284,25 @@ locals {
         path    = "clickhouse"
       }
       serviceAccount = { name = var.clickhouse_backup.service_account_name }
-      externalSecret = {
-        secretStoreRef = { name = "aws-secrets-manager", kind = "ClusterSecretStore" }
-        remoteRef      = { key = aws_secretsmanager_secret.clickhouse_backup[0].name }
+      user = {
+        externalSecret = {
+          secretStoreRef = { name = "aws-secrets-manager", kind = "ClusterSecretStore" }
+          remoteRef      = { key = aws_secretsmanager_secret.clickhouse_backup[0].name }
+        }
       }
-      api      = { existingSecret = kubernetes_secret_v1.clickhouse_backup_api[0].metadata[0].name }
+      sidecar = { image = var.helm.clickhouse.backup.image }
+      probe = {
+        externalSecret = {
+          secretStoreRef = { name = "aws-secrets-manager", kind = "ClusterSecretStore" }
+          remoteRef      = { key = aws_secretsmanager_secret.clickhouse_backup_probe[0].name }
+        }
+      }
+      api = {
+        existingSecret   = kubernetes_secret_v1.clickhouse_backup_api[0].metadata[0].name
+        passwordRevision = var.helm.clickhouse.backup.api_password_revision
+      }
       schedule = { suspend = var.helm.clickhouse.backup.suspend }
-    }, local.helm_clickhouse_backup_image, local.helm_clickhouse_backup_cleanup, local.helm_clickhouse_backup_monitoring)
+    }, local.helm_clickhouse_backup_cleanup, local.helm_clickhouse_backup_monitoring)
   } : {}
 
   # Singleton maps merged into clickhouse helm values when the dedicated CH
