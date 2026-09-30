@@ -312,6 +312,11 @@ run "backup_role_trusts_only_the_selected_service_account" {
   }
 
   assert {
+    condition     = aws_iam_role.clickhouse_backup[0].name == "test-cluster-us-east-1-clickhouse-backup"
+    error_message = "The backup role name must contain the cluster and region without a generated suffix."
+  }
+
+  assert {
     condition = (
       length(jsondecode(aws_iam_role.clickhouse_backup[0].assume_role_policy).Statement) == 1 &&
       jsondecode(aws_iam_role.clickhouse_backup[0].assume_role_policy).Statement[0].Effect == "Allow" &&
@@ -332,6 +337,24 @@ run "backup_role_trusts_only_the_selected_service_account" {
   assert {
     condition     = output.clickhouse_backup.service_account_name == "backup-jobs" && output.clickhouse_backup.namespace == "montecarlo"
     error_message = "The output must name the same service account and namespace permitted by the role."
+  }
+}
+
+run "backup_role_name_preserves_the_full_cluster_and_region" {
+  command = plan
+
+  variables {
+    region = "us-west-1"
+    cluster = {
+      create                = false
+      existing_cluster_name = "test-cluster-long-name"
+    }
+    clickhouse_backup = { bucket_name = "test-clickhouse-backups" }
+  }
+
+  assert {
+    condition     = aws_iam_role.clickhouse_backup[0].name == "test-cluster-long-name-us-west-1-clickhouse-backup"
+    error_message = "A longer cluster name must not truncate the region from the backup role name."
   }
 }
 
