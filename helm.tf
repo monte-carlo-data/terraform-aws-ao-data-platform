@@ -201,8 +201,8 @@ resource "helm_release" "ao_data_platform" {
   count = var.helm.deploy_charts ? 1 : 0
 
   name             = "ao-data-platform"
-  chart            = var.helm.chart_path == null ? "${var.helm.chart_registry}/ao-data-platform" : abspath(pathexpand(var.helm.chart_path))
-  version          = var.helm.chart_path == null ? var.helm.chart_version : null
+  chart            = "${var.helm.chart_registry}/ao-data-platform"
+  version          = var.helm.chart_version
   namespace        = kubernetes_namespace_v1.montecarlo.metadata[0].name
   create_namespace = false
   wait_for_jobs    = true
@@ -345,19 +345,19 @@ resource "helm_release" "ao_data_platform" {
     }
 
     precondition {
-      condition = !var.helm.clickhouse.backup.enabled || var.helm.chart_path != null || (
+      condition = !var.helm.clickhouse.backup.enabled || (
         local.chart_version_parts[0] > 5 ||
         (local.chart_version_parts[0] == 5 && local.chart_version_parts[1] >= 2)
       )
-      error_message = "Scheduled backups require helm.chart_version >= 5.2.0 or a development-only helm.chart_path containing backup support; older published charts ignore the backup settings."
+      error_message = "Scheduled backups require helm.chart_version based on 5.2.0 or later. Use a published release or development build containing backup support; older charts ignore the backup settings."
     }
 
     precondition {
-      condition = !var.helm.clickhouse.backup.cleanup.enabled || var.helm.chart_path != null || (
+      condition = !var.helm.clickhouse.backup.cleanup.enabled || (
         local.chart_version_parts[0] > 5 ||
         (local.chart_version_parts[0] == 5 && local.chart_version_parts[1] >= 3)
       )
-      error_message = "Backup cleanup requires helm.chart_version >= 5.3.0 or a development-only helm.chart_path containing cleanup support."
+      error_message = "Backup cleanup requires helm.chart_version based on 5.3.0 or later. Use a published release or development build containing cleanup support."
     }
 
     precondition {

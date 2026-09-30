@@ -64,11 +64,11 @@ resource "aws_iam_role" "clickhouse_backup_monitor" {
       error_message = "clickhouse_backup_monitoring requires clickhouse_backup storage and helm.clickhouse.backup.enabled = true with chart deployment enabled."
     }
     precondition {
-      condition = var.helm.chart_path != null || (
+      condition = (
         local.chart_version_parts[0] > 5 ||
         (local.chart_version_parts[0] == 5 && local.chart_version_parts[1] >= 3)
       )
-      error_message = "Backup monitoring requires helm.chart_version >= 5.3.0 or a development-only helm.chart_path containing monitoring support."
+      error_message = "Backup monitoring requires helm.chart_version based on 5.3.0 or later. Use a published release or development build containing monitoring support."
     }
   }
 }
