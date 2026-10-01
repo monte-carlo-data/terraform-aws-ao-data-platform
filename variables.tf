@@ -600,10 +600,9 @@ variable "helm" {
     later, including development builds. Both enabled and suspend default to false.
     suspend pauses new scheduled jobs; it does not stop active jobs or prevent
     ClickHouse pod restarts when backup software is enabled or disabled.
-    keep_shared_credentials defaults to false. Set it to true only for the
-    first paused upgrade from shared backup credentials; enabled and suspend
-    must both be true. After checking the new pods, apply false while still
-    paused, verify the installation, then resume the schedule.
+    image must select stock altinity/clickhouse-backup 2.8.1 by SHA-256 digest.
+    The chart waits for credentials before starting the backup API and uses
+    a startup copy of its configuration. Password changes require a pod restart.
     The module creates a separate backup API password in a Kubernetes Secret;
     it passes only the Secret name in Helm values.
 
@@ -747,11 +746,10 @@ variable "helm" {
         enabled = bool
       }), null)
       backup = optional(object({
-        enabled                 = optional(bool, false)
-        suspend                 = optional(bool, false)
-        keep_shared_credentials = optional(bool, false)
-        image                   = optional(string, null)
-        api_password_revision   = optional(string, "1")
+        enabled               = optional(bool, false)
+        suspend               = optional(bool, false)
+        image                 = optional(string, null)
+        api_password_revision = optional(string, "1")
         cleanup = optional(object({
           enabled         = optional(bool, false)
           dry_run         = optional(bool, true)
@@ -828,19 +826,8 @@ variable "helm" {
   }
 
   validation {
-    condition = var.helm.clickhouse.backup.image == null ? true : (
-      can(regex("^[a-zA-Z0-9][a-zA-Z0-9._:/-]*(@sha256:[0-9a-f]{64})?$", var.helm.clickhouse.backup.image)) &&
-      !can(regex("://", var.helm.clickhouse.backup.image)) &&
-      !endswith(var.helm.clickhouse.backup.image, "/")
-    )
-    error_message = "helm.clickhouse.backup.image must be a nonempty container image reference without spaces or a URL scheme. When present, its SHA-256 digest must contain 64 lowercase hexadecimal characters."
-  }
-
-  validation {
-    condition = !var.helm.clickhouse.backup.cleanup.enabled || var.helm.clickhouse.backup.cleanup.dry_run || (
-      can(regex("^[^[:space:]@]+@sha256:[0-9a-f]{64}$", var.helm.clickhouse.backup.image))
-    )
-    error_message = "Actual backup cleanup requires an explicit helm.clickhouse.backup.image pinned by @sha256:<64 lowercase hex digits>. Publish the patched image first; cleanup also checks that both running copies report version 2.8.1-mc.2 before deleting anything."
+    condition     = !var.helm.clickhouse.backup.cleanup.enabled || var.helm.clickhouse.backup.cleanup.dry_run
+    error_message = "Automatic backup deletion is unavailable with the current stock image. Altinity clickhouse-backup 2.8.1 leaves native JSON objects behind; keep cleanup.dry_run = true until a fixed upstream release is tested."
   }
 
   validation {
@@ -856,18 +843,11 @@ variable "helm" {
   }
 
   validation {
-    condition = !var.helm.clickhouse.backup.keep_shared_credentials || (
-      var.helm.clickhouse.backup.enabled && var.helm.clickhouse.backup.suspend
-    )
-    error_message = "helm.clickhouse.backup.keep_shared_credentials requires enabled = true and suspend = true. Keep backup jobs paused until both upgrade stages and their checks are complete."
-  }
-
-  validation {
-    condition = !var.helm.clickhouse.backup.enabled || can(regex(
-      "^[a-zA-Z0-9][a-zA-Z0-9._:/-]*@sha256:[0-9a-f]{64}$",
+    condition = var.helm.clickhouse.backup.image == null ? !var.helm.clickhouse.backup.enabled : can(regex(
+      "^(?:(?:docker\\.io|registry-1\\.docker\\.io)/)?altinity/clickhouse-backup(?::2\\.8\\.1)?@sha256:08016b048f7e6035c048501315c2a788e5a782f15f168e042c7bd48d5a388cc4$",
       var.helm.clickhouse.backup.image,
     ))
-    error_message = "Scheduled backups require helm.clickhouse.backup.image pinned by SHA-256 digest to the patched backup build documented by the chart."
+    error_message = "helm.clickhouse.backup.image must select stock altinity/clickhouse-backup 2.8.1 at @sha256:08016b048f7e6035c048501315c2a788e5a782f15f168e042c7bd48d5a388cc4. The image is required when backups are enabled; docker.io/ and registry-1.docker.io/ prefixes and the :2.8.1 tag are optional."
   }
 
   validation {

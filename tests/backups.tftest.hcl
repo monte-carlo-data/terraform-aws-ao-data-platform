@@ -796,7 +796,7 @@ run "scheduled_backups_use_existing_storage_and_a_separate_api_password" {
     helm = {
       chart_registry = "oci://registry-1.docker.io/montecarlodata"
       chart_version  = "5.2.0"
-      clickhouse     = { backup = { enabled = true, image = "registry.example.com/backup@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" } }
+      clickhouse     = { backup = { enabled = true, image = "altinity/clickhouse-backup:2.8.1@sha256:08016b048f7e6035c048501315c2a788e5a782f15f168e042c7bd48d5a388cc4" } }
     }
   }
 
@@ -838,16 +838,15 @@ run "scheduled_backups_use_existing_storage_and_a_separate_api_password" {
           remoteRef      = { key = "test-cluster/clickhouse/backup-credentials" }
         }
       }
-      sidecar = { image = "registry.example.com/backup@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" }
+      sidecar = { image = "altinity/clickhouse-backup:2.8.1@sha256:08016b048f7e6035c048501315c2a788e5a782f15f168e042c7bd48d5a388cc4" }
       probe = {
         externalSecret = {
           secretStoreRef = { name = "aws-secrets-manager", kind = "ClusterSecretStore" }
           remoteRef      = { key = "test-cluster/clickhouse/backup-probe-credentials" }
         }
       }
-      api       = { existingSecret = "ao-clickhouse-backup-api", passwordRevision = "1" }
-      schedule  = { suspend = false }
-      migration = { keepSharedCredentials = false }
+      api      = { existingSecret = "ao-clickhouse-backup-api", passwordRevision = "1" }
+      schedule = { suspend = false }
     })
     error_message = "The chart must use the existing bucket, role, stored database password and trusted service account; only the separate API secret's name belongs in values."
   }
@@ -908,84 +907,17 @@ run "scheduled_backups_can_be_installed_with_the_schedule_paused" {
     helm = {
       chart_registry = "oci://registry-1.docker.io/montecarlodata"
       chart_version  = "5.2.0"
-      clickhouse     = { backup = { enabled = true, image = "registry.example.com/backup@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", suspend = true } }
+      clickhouse     = { backup = { enabled = true, image = "altinity/clickhouse-backup:2.8.1@sha256:08016b048f7e6035c048501315c2a788e5a782f15f168e042c7bd48d5a388cc4", suspend = true } }
     }
   }
 
   assert {
     condition = (
       yamldecode(helm_release.ao_data_platform[0].values[0]).clickhouse.backup.schedule.suspend &&
-      !yamldecode(helm_release.ao_data_platform[0].values[0]).clickhouse.backup.migration.keepSharedCredentials &&
       length(kubernetes_secret_v1.clickhouse_backup_api) == 1
     )
-    error_message = "Pausing jobs must preserve the installed setup and API password without retaining shared credentials by default."
+    error_message = "Pausing jobs must preserve the installed setup and API password."
   }
-}
-
-run "backup_upgrade_retains_shared_credentials_only_while_paused" {
-  command = plan
-
-  variables {
-    clickhouse_backup     = { bucket_name = "test-clickhouse-backups" }
-    clickhouse_domain     = "clickhouse.example.com"
-    otel_collector_domain = "otel.example.com"
-    helm = {
-      chart_registry = "oci://registry-1.docker.io/montecarlodata"
-      chart_version  = "5.2.0"
-      clickhouse = { backup = {
-        enabled                 = true
-        suspend                 = true
-        keep_shared_credentials = true
-        image                   = "registry.example.com/backup@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-      } }
-    }
-  }
-
-  assert {
-    condition = (
-      yamldecode(helm_release.ao_data_platform[0].values[0]).clickhouse.backup.enabled &&
-      yamldecode(helm_release.ao_data_platform[0].values[0]).clickhouse.backup.schedule.suspend &&
-      yamldecode(helm_release.ao_data_platform[0].values[0]).clickhouse.backup.migration.keepSharedCredentials &&
-      length(aws_secretsmanager_secret_version.clickhouse_backup) == 1 &&
-      length(aws_secretsmanager_secret_version.clickhouse_backup_probe) == 1
-    )
-    error_message = "The first upgrade stage must retain shared credentials with backups installed, jobs paused, and both database passwords present."
-  }
-}
-
-run "backup_upgrade_rejects_shared_credentials_without_backups" {
-  command = plan
-
-  variables {
-    helm = {
-      deploy_charts = false
-      clickhouse    = { backup = { enabled = false, suspend = true, keep_shared_credentials = true } }
-    }
-  }
-
-  expect_failures = [var.helm]
-}
-
-run "backup_upgrade_rejects_shared_credentials_with_running_schedule" {
-  command = plan
-
-  variables {
-    clickhouse_backup     = { bucket_name = "test-clickhouse-backups" }
-    clickhouse_domain     = "clickhouse.example.com"
-    otel_collector_domain = "otel.example.com"
-    helm = {
-      chart_registry = "oci://registry-1.docker.io/montecarlodata"
-      chart_version  = "5.2.0"
-      clickhouse = { backup = {
-        enabled                 = true
-        suspend                 = false
-        keep_shared_credentials = true
-        image                   = "registry.example.com/backup@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-      } }
-    }
-  }
-
-  expect_failures = [var.helm]
 }
 
 run "scheduled_backups_require_existing_storage" {
@@ -998,7 +930,7 @@ run "scheduled_backups_require_existing_storage" {
     helm = {
       chart_registry = "oci://registry-1.docker.io/montecarlodata"
       chart_version  = "5.2.0"
-      clickhouse     = { backup = { enabled = true, image = "registry.example.com/backup@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" } }
+      clickhouse     = { backup = { enabled = true, image = "altinity/clickhouse-backup:2.8.1@sha256:08016b048f7e6035c048501315c2a788e5a782f15f168e042c7bd48d5a388cc4" } }
     }
   }
 
@@ -1015,7 +947,7 @@ run "scheduled_backups_reject_the_default_service_account" {
     helm = {
       chart_registry = "oci://registry-1.docker.io/montecarlodata"
       chart_version  = "5.2.0"
-      clickhouse     = { backup = { enabled = true, image = "registry.example.com/backup@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" } }
+      clickhouse     = { backup = { enabled = true, image = "altinity/clickhouse-backup:2.8.1@sha256:08016b048f7e6035c048501315c2a788e5a782f15f168e042c7bd48d5a388cc4" } }
     }
   }
 
@@ -1028,7 +960,7 @@ run "scheduled_backups_require_chart_deployment" {
   variables {
     helm = {
       deploy_charts = false
-      clickhouse    = { backup = { enabled = true, image = "registry.example.com/backup@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" } }
+      clickhouse    = { backup = { enabled = true, image = "altinity/clickhouse-backup:2.8.1@sha256:08016b048f7e6035c048501315c2a788e5a782f15f168e042c7bd48d5a388cc4" } }
     }
   }
 
@@ -1046,7 +978,7 @@ run "scheduled_backups_reject_published_charts_without_backup_support" {
     helm = {
       chart_registry = "oci://registry-1.docker.io/montecarlodata"
       chart_version  = "5.1.0"
-      clickhouse     = { backup = { enabled = true, image = "registry.example.com/backup@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" } }
+      clickhouse     = { backup = { enabled = true, image = "altinity/clickhouse-backup:2.8.1@sha256:08016b048f7e6035c048501315c2a788e5a782f15f168e042c7bd48d5a388cc4" } }
     }
   }
 
@@ -1063,7 +995,7 @@ run "backup_monitoring_limits_access_and_wires_external_alarms" {
     helm = {
       chart_registry = "oci://registry-1.docker.io/montecarlodata"
       chart_version  = "5.3.0"
-      clickhouse     = { backup = { enabled = true, image = "registry.example.com/backup@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" } }
+      clickhouse     = { backup = { enabled = true, image = "altinity/clickhouse-backup:2.8.1@sha256:08016b048f7e6035c048501315c2a788e5a782f15f168e042c7bd48d5a388cc4" } }
     }
   }
 
@@ -1165,7 +1097,7 @@ run "monitoring_rejects_shared_backup_service_account" {
     helm = {
       chart_registry = "oci://registry-1.docker.io/montecarlodata"
       chart_version  = "5.3.0"
-      clickhouse     = { backup = { enabled = true, image = "registry.example.com/backup@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" } }
+      clickhouse     = { backup = { enabled = true, image = "altinity/clickhouse-backup:2.8.1@sha256:08016b048f7e6035c048501315c2a788e5a782f15f168e042c7bd48d5a388cc4" } }
     }
   }
 
@@ -1185,7 +1117,7 @@ run "backup_monitor_account_name_is_allowed_without_monitoring" {
     helm = {
       chart_registry = "oci://registry-1.docker.io/montecarlodata"
       chart_version  = "5.3.0"
-      clickhouse     = { backup = { enabled = true, image = "registry.example.com/backup@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" } }
+      clickhouse     = { backup = { enabled = true, image = "altinity/clickhouse-backup:2.8.1@sha256:08016b048f7e6035c048501315c2a788e5a782f15f168e042c7bd48d5a388cc4" } }
     }
   }
 
@@ -1212,7 +1144,7 @@ run "cleanup_is_explicit_and_defaults_to_a_dry_run" {
     helm = {
       chart_registry = "oci://registry-1.docker.io/montecarlodata"
       chart_version  = "5.3.0"
-      clickhouse     = { backup = { enabled = true, image = "registry.example.com/backup@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", cleanup = { enabled = true } } }
+      clickhouse     = { backup = { enabled = true, image = "altinity/clickhouse-backup:2.8.1@sha256:08016b048f7e6035c048501315c2a788e5a782f15f168e042c7bd48d5a388cc4", cleanup = { enabled = true } } }
     }
   }
   assert {
@@ -1239,7 +1171,7 @@ run "cleanup_and_monitoring_use_a_published_development_chart" {
     helm = {
       chart_registry = "oci://registry-1.docker.io/montecarlodata"
       chart_version  = "5.3.0-dev.g0123456789abcdef0123456789abcdef01234567"
-      clickhouse = { backup = { enabled = true, image = "registry.example.com/backup@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", cleanup = {
+      clickhouse = { backup = { enabled = true, image = "altinity/clickhouse-backup:2.8.1@sha256:08016b048f7e6035c048501315c2a788e5a782f15f168e042c7bd48d5a388cc4", cleanup = {
         enabled = true, dry_run = true, keep_last = 3, keep_days = 30, timeout_seconds = 600
       } } }
     }
@@ -1273,7 +1205,7 @@ run "monitoring_rejects_published_charts_without_monitoring_support" {
     helm = {
       chart_registry = "oci://registry-1.docker.io/montecarlodata"
       chart_version  = "5.2.0"
-      clickhouse     = { backup = { enabled = true, image = "registry.example.com/backup@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" } }
+      clickhouse     = { backup = { enabled = true, image = "altinity/clickhouse-backup:2.8.1@sha256:08016b048f7e6035c048501315c2a788e5a782f15f168e042c7bd48d5a388cc4" } }
     }
   }
   expect_failures = [aws_iam_role.clickhouse_backup_monitor]
@@ -1290,7 +1222,7 @@ run "cleanup_rejects_published_charts_without_cleanup_support" {
     helm = {
       chart_registry = "oci://registry-1.docker.io/montecarlodata"
       chart_version  = "5.2.0"
-      clickhouse     = { backup = { enabled = true, image = "registry.example.com/backup@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", cleanup = { enabled = true } } }
+      clickhouse     = { backup = { enabled = true, image = "altinity/clickhouse-backup:2.8.1@sha256:08016b048f7e6035c048501315c2a788e5a782f15f168e042c7bd48d5a388cc4", cleanup = { enabled = true } } }
     }
   }
   expect_failures = [helm_release.ao_data_platform]
@@ -1313,7 +1245,7 @@ run "cleanup_rejects_actual_deletion_without_a_pinned_image" {
   expect_failures = [var.helm]
 }
 
-run "cleanup_rejects_a_tag_without_a_digest_even_if_it_names_the_patch" {
+run "cleanup_rejects_actual_deletion_even_with_a_pinned_stock_image" {
   command = plan
   variables {
     clickhouse_backup             = { bucket_name = "test-clickhouse-backups" }
@@ -1326,7 +1258,7 @@ run "cleanup_rejects_a_tag_without_a_digest_even_if_it_names_the_patch" {
       chart_version  = "5.3.0"
       clickhouse = { backup = {
         enabled = true
-        image   = "registry.example.com/ao-clickhouse-backup:2.8.1-mc.2"
+        image   = "altinity/clickhouse-backup:2.8.1@sha256:08016b048f7e6035c048501315c2a788e5a782f15f168e042c7bd48d5a388cc4"
         cleanup = { enabled = true, dry_run = false }
       } }
     }
@@ -1334,35 +1266,7 @@ run "cleanup_rejects_a_tag_without_a_digest_even_if_it_names_the_patch" {
   expect_failures = [var.helm]
 }
 
-run "cleanup_accepts_an_explicit_digest_and_passes_the_image_to_helm" {
-  command = plan
-  variables {
-    clickhouse_backup             = { bucket_name = "test-clickhouse-backups" }
-    clickhouse_domain             = "clickhouse.example.com"
-    otel_collector_domain         = "otel.example.com"
-    clickhouse_replica_count      = 2
-    clickhouse_availability_zones = ["us-east-1a", "us-east-1b"]
-    helm = {
-      chart_registry = "oci://registry-1.docker.io/montecarlodata"
-      chart_version  = "5.3.0"
-      clickhouse = { backup = {
-        enabled = true
-        # Format-only test value, not a published image.
-        image   = "registry.example.com/ao-clickhouse-backup@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
-        cleanup = { enabled = true, dry_run = false }
-      } }
-    }
-  }
-  assert {
-    condition = (
-      yamldecode(helm_release.ao_data_platform[0].values[0]).clickhouse.backup.sidecar.image == var.helm.clickhouse.backup.image &&
-      yamldecode(helm_release.ao_data_platform[0].values[0]).clickhouse.backup.cleanup.dryRun == false
-    )
-    error_message = "The explicit immutable image and deletion setting must reach the chart, which checks the running version before cleanup."
-  }
-}
-
-run "backup_image_override_is_allowed_without_cleanup" {
+run "stock_backup_image_does_not_enable_cleanup" {
   command = plan
   variables {
     clickhouse_backup     = { bucket_name = "test-clickhouse-backups" }
@@ -1373,7 +1277,7 @@ run "backup_image_override_is_allowed_without_cleanup" {
       chart_version  = "5.2.0"
       clickhouse = { backup = {
         enabled = true
-        image   = "registry.example.com/ao-clickhouse-backup@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        image   = "altinity/clickhouse-backup:2.8.1@sha256:08016b048f7e6035c048501315c2a788e5a782f15f168e042c7bd48d5a388cc4"
       } }
     }
   }
@@ -1382,7 +1286,7 @@ run "backup_image_override_is_allowed_without_cleanup" {
       yamldecode(helm_release.ao_data_platform[0].values[0]).clickhouse.backup.sidecar.image == var.helm.clickhouse.backup.image &&
       !can(yamldecode(helm_release.ao_data_platform[0].values[0]).clickhouse.backup.cleanup)
     )
-    error_message = "An image override alone must not enable cleanup or require its newer chart version."
+    error_message = "Selecting the stock image must not enable cleanup or require its newer chart version."
   }
 }
 
@@ -1419,7 +1323,7 @@ run "cleanup_requires_two_clickhouse_copies" {
     helm = {
       chart_registry = "oci://registry-1.docker.io/montecarlodata"
       chart_version  = "5.3.0"
-      clickhouse     = { backup = { enabled = true, image = "registry.example.com/backup@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", cleanup = { enabled = true } } }
+      clickhouse     = { backup = { enabled = true, image = "altinity/clickhouse-backup:2.8.1@sha256:08016b048f7e6035c048501315c2a788e5a782f15f168e042c7bd48d5a388cc4", cleanup = { enabled = true } } }
     }
   }
   expect_failures = [helm_release.ao_data_platform]
@@ -1453,7 +1357,7 @@ run "scheduled_backups_accept_next_major_chart_version" {
     helm = {
       chart_registry = "oci://registry-1.docker.io/montecarlodata"
       chart_version  = "6.0.0"
-      clickhouse     = { backup = { enabled = true, image = "registry.example.com/backup@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" } }
+      clickhouse     = { backup = { enabled = true, image = "altinity/clickhouse-backup:2.8.1@sha256:08016b048f7e6035c048501315c2a788e5a782f15f168e042c7bd48d5a388cc4" } }
     }
   }
 
@@ -1477,7 +1381,7 @@ run "scheduled_backups_accept_double_digit_minor_chart_version" {
     helm = {
       chart_registry = "oci://registry-1.docker.io/montecarlodata"
       chart_version  = "5.10.0"
-      clickhouse     = { backup = { enabled = true, image = "registry.example.com/backup@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" } }
+      clickhouse     = { backup = { enabled = true, image = "altinity/clickhouse-backup:2.8.1@sha256:08016b048f7e6035c048501315c2a788e5a782f15f168e042c7bd48d5a388cc4" } }
     }
   }
 
@@ -1501,7 +1405,7 @@ run "scheduled_backups_accept_v_prefix_chart_version" {
     helm = {
       chart_registry = "oci://registry-1.docker.io/montecarlodata"
       chart_version  = "v5.2.0"
-      clickhouse     = { backup = { enabled = true, image = "registry.example.com/backup@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" } }
+      clickhouse     = { backup = { enabled = true, image = "altinity/clickhouse-backup:2.8.1@sha256:08016b048f7e6035c048501315c2a788e5a782f15f168e042c7bd48d5a388cc4" } }
     }
   }
 
@@ -1526,7 +1430,7 @@ run "scheduled_backups_reject_incomplete_chart_version" {
     helm = {
       chart_registry = "oci://registry-1.docker.io/montecarlodata"
       chart_version  = "5.2"
-      clickhouse     = { backup = { enabled = true, image = "registry.example.com/backup@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" } }
+      clickhouse     = { backup = { enabled = true, image = "altinity/clickhouse-backup:2.8.1@sha256:08016b048f7e6035c048501315c2a788e5a782f15f168e042c7bd48d5a388cc4" } }
     }
   }
 
@@ -1544,7 +1448,7 @@ run "scheduled_backups_reject_invalid_patch_chart_version" {
     helm = {
       chart_registry = "oci://registry-1.docker.io/montecarlodata"
       chart_version  = "5.2.not-a-number"
-      clickhouse     = { backup = { enabled = true, image = "registry.example.com/backup@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" } }
+      clickhouse     = { backup = { enabled = true, image = "altinity/clickhouse-backup:2.8.1@sha256:08016b048f7e6035c048501315c2a788e5a782f15f168e042c7bd48d5a388cc4" } }
     }
   }
 
@@ -1562,7 +1466,7 @@ run "scheduled_backups_reject_version_range_chart_version" {
     helm = {
       chart_registry = "oci://registry-1.docker.io/montecarlodata"
       chart_version  = ">=5.2.0"
-      clickhouse     = { backup = { enabled = true, image = "registry.example.com/backup@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" } }
+      clickhouse     = { backup = { enabled = true, image = "altinity/clickhouse-backup:2.8.1@sha256:08016b048f7e6035c048501315c2a788e5a782f15f168e042c7bd48d5a388cc4" } }
     }
   }
 
@@ -1580,7 +1484,7 @@ run "scheduled_backups_reject_older_major_with_large_minor_chart_version" {
     helm = {
       chart_registry = "oci://registry-1.docker.io/montecarlodata"
       chart_version  = "4.1002.0"
-      clickhouse     = { backup = { enabled = true, image = "registry.example.com/backup@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" } }
+      clickhouse     = { backup = { enabled = true, image = "altinity/clickhouse-backup:2.8.1@sha256:08016b048f7e6035c048501315c2a788e5a782f15f168e042c7bd48d5a388cc4" } }
     }
   }
 
@@ -1597,7 +1501,7 @@ run "scheduled_backups_use_a_published_development_chart" {
     helm = {
       chart_registry = "oci://registry-1.docker.io/montecarlodata"
       chart_version  = "5.2.0-dev.gabcdef1"
-      clickhouse     = { backup = { enabled = true, image = "registry.example.com/backup@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" } }
+      clickhouse     = { backup = { enabled = true, image = "altinity/clickhouse-backup:2.8.1@sha256:08016b048f7e6035c048501315c2a788e5a782f15f168e042c7bd48d5a388cc4" } }
     }
   }
 
@@ -1623,7 +1527,7 @@ run "scheduled_backups_reject_unversioned_development_builds" {
     helm = {
       chart_registry = "oci://registry-1.docker.io/montecarlodata"
       chart_version  = "0.0.0-dev.gabcdef1"
-      clickhouse     = { backup = { enabled = true, image = "registry.example.com/backup@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" } }
+      clickhouse     = { backup = { enabled = true, image = "altinity/clickhouse-backup:2.8.1@sha256:08016b048f7e6035c048501315c2a788e5a782f15f168e042c7bd48d5a388cc4" } }
     }
   }
 
@@ -1666,7 +1570,7 @@ run "cleanup_and_monitoring_accept_next_major_chart_version" {
     helm = {
       chart_registry = "oci://registry-1.docker.io/montecarlodata"
       chart_version  = "6.0.0"
-      clickhouse = { backup = { enabled = true, image = "registry.example.com/backup@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", cleanup = {
+      clickhouse = { backup = { enabled = true, image = "altinity/clickhouse-backup:2.8.1@sha256:08016b048f7e6035c048501315c2a788e5a782f15f168e042c7bd48d5a388cc4", cleanup = {
         enabled = true, dry_run = true, keep_last = 3, keep_days = 30, timeout_seconds = 600
       } } }
     }
@@ -1696,7 +1600,7 @@ run "cleanup_and_monitoring_accept_double_digit_minor_chart_version" {
     helm = {
       chart_registry = "oci://registry-1.docker.io/montecarlodata"
       chart_version  = "5.10.0"
-      clickhouse = { backup = { enabled = true, image = "registry.example.com/backup@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", cleanup = {
+      clickhouse = { backup = { enabled = true, image = "altinity/clickhouse-backup:2.8.1@sha256:08016b048f7e6035c048501315c2a788e5a782f15f168e042c7bd48d5a388cc4", cleanup = {
         enabled = true, dry_run = true, keep_last = 3, keep_days = 30, timeout_seconds = 600
       } } }
     }
@@ -1726,7 +1630,7 @@ run "cleanup_rejects_older_development_charts" {
     helm = {
       chart_registry = "oci://registry-1.docker.io/montecarlodata"
       chart_version  = "5.2.0-dev.gabcdef1"
-      clickhouse     = { backup = { enabled = true, image = "registry.example.com/backup@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", cleanup = { enabled = true } } }
+      clickhouse     = { backup = { enabled = true, image = "altinity/clickhouse-backup:2.8.1@sha256:08016b048f7e6035c048501315c2a788e5a782f15f168e042c7bd48d5a388cc4", cleanup = { enabled = true } } }
     }
   }
   expect_failures = [helm_release.ao_data_platform]
@@ -1743,7 +1647,7 @@ run "monitoring_rejects_older_development_charts" {
     helm = {
       chart_registry = "oci://registry-1.docker.io/montecarlodata"
       chart_version  = "5.2.0-dev.gabcdef1"
-      clickhouse     = { backup = { enabled = true, image = "registry.example.com/backup@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" } }
+      clickhouse     = { backup = { enabled = true, image = "altinity/clickhouse-backup:2.8.1@sha256:08016b048f7e6035c048501315c2a788e5a782f15f168e042c7bd48d5a388cc4" } }
     }
   }
   expect_failures = [aws_iam_role.clickhouse_backup_monitor]
@@ -1760,7 +1664,7 @@ run "probe_password_and_revision_are_wired_without_exposing_passwords" {
       chart_version  = "5.2.0"
       clickhouse = { backup = {
         enabled               = true
-        image                 = "registry.example.com/backup@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        image                 = "altinity/clickhouse-backup:2.8.1@sha256:08016b048f7e6035c048501315c2a788e5a782f15f168e042c7bd48d5a388cc4"
         api_password_revision = "rotation-2"
       } }
     }
@@ -1802,7 +1706,7 @@ run "backup_rejects_tag_only_image" {
     helm = {
       chart_registry = "oci://registry-1.docker.io/montecarlodata"
       chart_version  = "5.2.0"
-      clickhouse     = { backup = { enabled = true, image = "registry.example.com/backup:latest" } }
+      clickhouse     = { backup = { enabled = true, image = "altinity/clickhouse-backup:2.8.1" } }
     }
   }
   expect_failures = [var.helm]
@@ -1820,6 +1724,84 @@ run "backup_rejects_unsafe_revision" {
   command = plan
   variables {
     helm = { deploy_charts = false, clickhouse = { backup = { api_password_revision = "bad/value" } } }
+  }
+  expect_failures = [var.helm]
+}
+
+run "backup_accepts_stock_digest_without_tag" {
+  command = plan
+  variables {
+    clickhouse_backup     = { bucket_name = "test-clickhouse-backups" }
+    clickhouse_domain     = "clickhouse.example.com"
+    otel_collector_domain = "otel.example.com"
+    helm = {
+      chart_registry = "oci://registry-1.docker.io/montecarlodata"
+      chart_version  = "5.2.0"
+      clickhouse     = { backup = { enabled = true, image = "altinity/clickhouse-backup@sha256:08016b048f7e6035c048501315c2a788e5a782f15f168e042c7bd48d5a388cc4" } }
+    }
+  }
+  assert {
+    condition     = yamldecode(helm_release.ao_data_platform[0].values[0]).clickhouse.backup.sidecar.image == var.helm.clickhouse.backup.image
+    error_message = "The supported stock image reference must reach the chart unchanged."
+  }
+}
+
+run "backup_accepts_stock_docker_hub_prefix" {
+  command = plan
+  variables {
+    clickhouse_backup     = { bucket_name = "test-clickhouse-backups" }
+    clickhouse_domain     = "clickhouse.example.com"
+    otel_collector_domain = "otel.example.com"
+    helm = {
+      chart_registry = "oci://registry-1.docker.io/montecarlodata"
+      chart_version  = "5.2.0"
+      clickhouse     = { backup = { enabled = true, image = "docker.io/altinity/clickhouse-backup:2.8.1@sha256:08016b048f7e6035c048501315c2a788e5a782f15f168e042c7bd48d5a388cc4" } }
+    }
+  }
+  assert {
+    condition     = yamldecode(helm_release.ao_data_platform[0].values[0]).clickhouse.backup.sidecar.image == var.helm.clickhouse.backup.image
+    error_message = "The supported stock image reference must reach the chart unchanged."
+  }
+}
+
+run "backup_accepts_stock_registry_prefix" {
+  command = plan
+  variables {
+    clickhouse_backup     = { bucket_name = "test-clickhouse-backups" }
+    clickhouse_domain     = "clickhouse.example.com"
+    otel_collector_domain = "otel.example.com"
+    helm = {
+      chart_registry = "oci://registry-1.docker.io/montecarlodata"
+      chart_version  = "5.2.0"
+      clickhouse     = { backup = { enabled = true, image = "registry-1.docker.io/altinity/clickhouse-backup@sha256:08016b048f7e6035c048501315c2a788e5a782f15f168e042c7bd48d5a388cc4" } }
+    }
+  }
+  assert {
+    condition     = yamldecode(helm_release.ao_data_platform[0].values[0]).clickhouse.backup.sidecar.image == var.helm.clickhouse.backup.image
+    error_message = "The supported stock image reference must reach the chart unchanged."
+  }
+}
+
+run "backup_rejects_custom_repository" {
+  command = plan
+  variables {
+    helm = { deploy_charts = false, clickhouse = { backup = { image = "registry.example.com/backup@sha256:08016b048f7e6035c048501315c2a788e5a782f15f168e042c7bd48d5a388cc4" } } }
+  }
+  expect_failures = [var.helm]
+}
+
+run "backup_rejects_other_version" {
+  command = plan
+  variables {
+    helm = { deploy_charts = false, clickhouse = { backup = { image = "altinity/clickhouse-backup:2.8.0@sha256:08016b048f7e6035c048501315c2a788e5a782f15f168e042c7bd48d5a388cc4" } } }
+  }
+  expect_failures = [var.helm]
+}
+
+run "backup_rejects_unverified_digest" {
+  command = plan
+  variables {
+    helm = { deploy_charts = false, clickhouse = { backup = { image = "altinity/clickhouse-backup:2.8.1@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" } } }
   }
   expect_failures = [var.helm]
 }

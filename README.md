@@ -307,12 +307,13 @@ Add this block to your existing `helm.clickhouse` settings:
 backup = {
   enabled = true
   suspend = true # Pauses the schedule only; enabling still restarts ClickHouse.
-  image   = "<published-backup-image>@sha256:<64-character-digest>"
+  image   = "altinity/clickhouse-backup:2.8.1@sha256:08016b048f7e6035c048501315c2a788e5a782f15f168e042c7bd48d5a388cc4"
 }
 ```
 
-Replace the image and digest placeholders with the matching published patched
-backup image. The digest is required even while the schedule is paused.
+The module accepts this exact stock digest, with an optional `:2.8.1` tag and
+optional `docker.io/` or `registry-1.docker.io/` prefix. The image is required even
+while the schedule is paused. The module does not build or publish an image.
 
 Keep the pause in your Terraform configuration until the installation is checked,
 then set `suspend = false` to start jobs. Its default is `false`, so enabling
@@ -361,16 +362,25 @@ Do not enable the chart while conflicting self-managed resources remain.
 **Current limits.** This release uses one fixed schedule every four hours UTC:
 the first successful run each UTC day is full, and later runs save changes from
 an earlier backup. The module does not expose schedule customization. Cleanup
-is optional and disabled by default; when enabled, it previews deletions by
-default until `cleanup.dry_run = false` is explicitly set. A tested restore
+is optional and disabled by default; when enabled, it previews deletions only.
+Automatic deletion is unavailable with the current stock image. A tested restore
 procedure is not yet documented. Do not add S3 expiry on current files
 independently: incremental backups can still need their older full backup.
 
-**Backup software and passwords.** Set `helm.clickhouse.backup.image` to a
-published image by its `@sha256:` digest. Build it from the chart repository's
-`images/clickhouse-backup` directory: its fixes prevent passwords appearing in
-logs and keep a missing backup password from blocking ClickHouse startup. The
-unmodified upstream image does not provide these guarantees.
+**Backup software and passwords.** Use stock `altinity/clickhouse-backup:2.8.1`
+with the digest documented by the chart. The chart waits for nonempty credentials
+and a matching API revision before starting the helper. It reads a startup copy
+of the configuration, so later Secret updates require a helper restart. Keep the
+old database password valid until all helpers have restarted when rotating it.
+The stock tool can log credentials on failed authentication. Use dummy passwords
+for denied-access checks, never put passwords in URLs, and pause and drain backup
+work before rotating credentials; a revision check alone cannot remove this
+upstream behavior.
+
+The chart keeps the tool's ClickHouse timeout at four hours, the stock image's
+minimum for embedded backups. The default Job stops waiting after three hours;
+this does not cancel server-side work. The scheduler checks for running operations
+before starting another backup. This module uses the chart's schedule defaults.
 
 The module creates a separate `backup_probe` password in Secrets Manager. The
 chart uses it only to check table names and replication status before selecting
@@ -378,35 +388,6 @@ a copy for backup. It cannot read application rows. External Secrets receives
 permission to read this password; the password value never enters Helm values.
 Missing backup or probe passwords disable that backup function without removing
 the database's normal users.
-
-**Upgrading an existing backup installation.** Moving the backup password out
-of the shared database user file takes two paused applies. Fresh installations
-leave `helm.clickhouse.backup.keep_shared_credentials = false`, its default.
-
-1. Pause the existing schedule with `helm.clickhouse.backup.suspend = true` and
-   wait for any running backup or restore to finish.
-2. Select the new published chart and patched backup image. Keep backups enabled
-   and paused, set `helm.clickhouse.backup.keep_shared_credentials = true`, and
-   apply the first stage. This keeps the old shared password available while
-   ClickHouse replaces the pods with pods that mount the separate user files.
-   Terraform publishes both database passwords before Helm installs the chart.
-3. From the matching chart checkout, run:
-
-   ```bash
-   python3 hack/check-backup-upgrade.py --context <context> --namespace <namespace> --chi otel --cronjob otel-backup
-   ```
-
-   Before proceeding, it must confirm that both copies use the new pod template,
-   mount the separate backup and probe user files, and have no legacy XML
-   reference to the shared backup password.
-4. Set `helm.clickhouse.backup.keep_shared_credentials = false`, keep
-   `suspend = true`, and apply the second stage. Check database access,
-   replication, and backup behavior before setting `suspend = false` to resume
-   scheduled jobs. Do not remove the shared password in the first stage.
-
-The module rejects `keep_shared_credentials = true` unless backups are enabled
-and the schedule is paused. It maps to the chart's
-`clickhouse.backup.migration.keepSharedCredentials` setting.
 
 **Backup API password.** Terraform continues to own
 `montecarlo/ao-clickhouse-backup-api`. It contains `password` and `revision` keys;
@@ -462,14 +443,15 @@ pin its matching published registry and version. Review a fresh plan against the
 existing state before applying. A different published chart may change the
 running workload; do not assume the plan only changes where Helm downloads it.
 
-**Cleanup and monitoring.** Chart 5.3.0 or later supports cleanup after a successful scheduled backup.
-This requires exactly two ClickHouse copies:
+**Cleanup previews and monitoring.** Chart 5.3.0 or later can report which old
+backups would be deleted after a successful scheduled backup. Previewing cleanup
+requires exactly two ClickHouse copies:
 
 ```hcl
 # Inside helm.clickhouse.backup, alongside enabled = true:
 cleanup = {
   enabled   = true
-  dry_run   = true # Preview the proposed deletions first.
+  dry_run   = true # Required: automatic deletion is unavailable.
   keep_last = 2    # Short development test; also keep any full backups these need.
   keep_days = 0    # Set 30 to also keep the last 30 days for a real deployment.
 }
@@ -485,19 +467,14 @@ Cleanup is disabled by default. When enabled, it reports which backups would be
 deleted while keeping the newest two and the earlier backups they depend on.
 `keep_days` additionally protects backups within that age; no S3 file-expiry
 rule is created. Upstream `clickhouse-backup` 2.8.1 leaves `serialization.json`
-files behind when deleting native backups, so actual deletion requires the
-patched build `2.8.1-mc.2`. Build, test, and publish that image first. Then set
-`helm.clickhouse.backup.image` to its full `repository@sha256:<digest>` reference
-and set `cleanup.dry_run = false` only when ready to delete old backups.
-Terraform requires a SHA-256 digest for deletion; it cannot verify the image's
-contents or availability. Before deleting anything, the chart's cleanup script
-checks that both running ClickHouse copies use the required patched tool version.
-No patched image is published by this module. Set the published patched image
-by its SHA-256 digest whenever backups are enabled, including cleanup previews.
-Leaving `image` unset is rejected before installation.
-`timeout_seconds` defaults to 1800 and must be at least 60. Cleanup runs inside
-the scheduled backup Job, so a cleanup error also fails that Job and reaches
-the same failure alert.
+files behind when deleting native backups, so automatic deletion is unavailable.
+Terraform rejects `cleanup.enabled = true` with `cleanup.dry_run = false` even
+when the image is pinned by digest. A tested upstream fix is required before
+this module can support deletion. Keep the existing backups; do not substitute
+S3 expiry for cleanup that understands which full backups are still needed.
+`timeout_seconds` defaults to 1800 and must be at least 60. The preview runs
+inside the scheduled backup Job, so a preview error also fails that Job and
+reaches the same failure alert.
 
 Monitoring is independent of that Job: a separate check runs every five minutes
 and reads Kubernetes' record of scheduled backup results. Manual backups do not
@@ -825,8 +802,7 @@ To use a StorageClass you manage outside this module, set `clickhouse_storage_cl
 | `helm.clickhouse.readonly_user` | `object` | `null` | Optionally provisions a second SELECT-only ClickHouse user (`readonly_user`, profile `readonly`). Shape: `{ enabled = bool }`. When `enabled = true`, a Secrets Manager secret + ExternalSecret pipeline mirroring the otel user is created and the toggle is forwarded to the chart; the password comes from `clickhouse_passwords.readonly_user` (or is auto-generated). **Requires chart version >= 1.2.0.** Omit (or `null`) to disable. |
 | `helm.clickhouse.backup.enabled` | `bool` | `false` | Install scheduled backups. Requires `helm.deploy_charts = true`, `clickhouse_backup` set with a dedicated service account, and a compatible published chart with base version >= 5.2.0. Enabling or disabling restarts ClickHouse pods. See [ClickHouse backups](#clickhouse-backups). |
 | `helm.clickhouse.backup.suspend` | `bool` | `false` | Pause new scheduled backup runs while keeping the installation. Running work continues. Persist `true` before maintenance; enabling with the default `false` starts the schedule on the first apply. |
-| `helm.clickhouse.backup.keep_shared_credentials` | `bool` | `false` | Temporarily retain the shared backup password during the first upgrade stage. Requires backups enabled and paused. Set to `false` only after `hack/check-backup-upgrade.py` confirms both copies use the separate user files; keep jobs paused through the second apply and its checks. Fresh installations leave this `false`. |
-| `helm.clickhouse.backup.image` | `string` | `null` | Required when backups are enabled. Published backup image pinned by `@sha256:` digest, built with the chart repository's password logging and startup fixes. |
+| `helm.clickhouse.backup.image` | `string` | `null` | Required when backups are enabled. Stock `altinity/clickhouse-backup:2.8.1` pinned to the chart's documented SHA-256 digest. The module does not build an image. |
 | `helm.clickhouse.backup.api_password_revision` | `string` | `"1"` | Change this whenever replacing the API password. It updates the Secret revision and pod annotation together, causing the backup processes to restart. |
 | `clickhouse_passwords` | `object` (sensitive) | `{}` (all auto-generated) | Passwords for the ClickHouse SQL users. Shape: `{ admin = optional(string), otel = optional(string), monte_carlo = optional(string), schema_owner = optional(string), llm_worker = optional(string), readonly_user = optional(string) }`. Any field left null is auto-generated. Marked `sensitive`, so caller-supplied values are redacted in plan/apply output and CI logs — supply via a `.tfvars` file or `TF_VAR_clickhouse_passwords`. Stored in Secrets Manager and synced into the cluster by ESO; never passed through Helm values. Values remain readable in Terraform state — protect state accordingly. |
 | `helm.opentelemetry_collector.resources` | `object` | `null` | Kubernetes resource requests/limits for the OTel Collector pods. Same shape as `helm.clickhouse.resources`. Omit to use chart defaults. |

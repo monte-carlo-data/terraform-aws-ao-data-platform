@@ -301,8 +301,7 @@ locals {
         existingSecret   = kubernetes_secret_v1.clickhouse_backup_api[0].metadata[0].name
         passwordRevision = var.helm.clickhouse.backup.api_password_revision
       }
-      schedule  = { suspend = var.helm.clickhouse.backup.suspend }
-      migration = { keepSharedCredentials = var.helm.clickhouse.backup.keep_shared_credentials }
+      schedule = { suspend = var.helm.clickhouse.backup.suspend }
     }, local.helm_clickhouse_backup_cleanup, local.helm_clickhouse_backup_monitoring)
   } : {}
 
