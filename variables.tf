@@ -600,6 +600,10 @@ variable "helm" {
     later, including development builds. Both enabled and suspend default to false.
     suspend pauses new scheduled jobs; it does not stop active jobs or prevent
     ClickHouse pod restarts when backup software is enabled or disabled.
+    keep_shared_credentials defaults to false. Set it to true only for the
+    first paused upgrade from shared backup credentials; enabled and suspend
+    must both be true. After checking the new pods, apply false while still
+    paused, verify the installation, then resume the schedule.
     The module creates a separate backup API password in a Kubernetes Secret;
     it passes only the Secret name in Helm values.
 
@@ -743,10 +747,11 @@ variable "helm" {
         enabled = bool
       }), null)
       backup = optional(object({
-        enabled               = optional(bool, false)
-        suspend               = optional(bool, false)
-        image                 = optional(string, null)
-        api_password_revision = optional(string, "1")
+        enabled                 = optional(bool, false)
+        suspend                 = optional(bool, false)
+        keep_shared_credentials = optional(bool, false)
+        image                   = optional(string, null)
+        api_password_revision   = optional(string, "1")
       }), {})
     }), {})
 
@@ -808,6 +813,13 @@ variable "helm" {
   validation {
     condition     = !var.helm.clickhouse.backup.enabled || var.helm.deploy_charts
     error_message = "helm.clickhouse.backup.enabled requires helm.deploy_charts = true."
+  }
+
+  validation {
+    condition = !var.helm.clickhouse.backup.keep_shared_credentials || (
+      var.helm.clickhouse.backup.enabled && var.helm.clickhouse.backup.suspend
+    )
+    error_message = "helm.clickhouse.backup.keep_shared_credentials requires enabled = true and suspend = true. Keep backup jobs paused until both upgrade stages and their checks are complete."
   }
 
   validation {
