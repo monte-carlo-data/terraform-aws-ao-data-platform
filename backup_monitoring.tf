@@ -3,6 +3,8 @@
 locals {
   clickhouse_backup_monitoring_enabled = var.clickhouse_backup_monitoring != null
   clickhouse_backup_metric_namespace   = "AO/ClickHouseBackup"
+  # A missing backup-status report must not clear an existing failure. The
+  # separate monitor alarm detects missing reports instead.
   clickhouse_backup_monitor_alarms = {
     failed = {
       metric              = "BackupJobFailed"
@@ -10,7 +12,7 @@ locals {
       comparison_operator = "GreaterThanOrEqualToThreshold"
       statistic           = "Maximum"
       evaluation_periods  = 1
-      treat_missing_data  = "notBreaching"
+      treat_missing_data  = "ignore"
     }
     overdue = {
       metric              = "BackupOverdue"
@@ -18,7 +20,7 @@ locals {
       comparison_operator = "GreaterThanOrEqualToThreshold"
       statistic           = "Maximum"
       evaluation_periods  = 1
-      treat_missing_data  = "notBreaching"
+      treat_missing_data  = "ignore"
     }
     monitor = {
       metric              = "MonitorHealthy"
@@ -62,6 +64,12 @@ resource "aws_iam_role" "clickhouse_backup_monitor" {
     precondition {
       condition     = local.clickhouse_backup_install_enabled
       error_message = "clickhouse_backup_monitoring requires clickhouse_backup storage and helm.clickhouse.backup.enabled = true with chart deployment enabled."
+    }
+    # This role exists only when monitoring is enabled. Backups alone may use
+    # this name, but the two workloads must never share an account or role trust.
+    precondition {
+      condition     = var.clickhouse_backup == null ? true : var.clickhouse_backup.service_account_name != "clickhouse-backup-monitor"
+      error_message = "Backup monitoring requires clickhouse_backup.service_account_name to differ from the reserved \"clickhouse-backup-monitor\" account."
     }
     precondition {
       condition = (

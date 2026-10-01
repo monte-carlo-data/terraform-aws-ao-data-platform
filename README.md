@@ -504,10 +504,15 @@ and reads Kubernetes' record of scheduled backup results. Manual backups do not
 reset the last-success time. Its AWS role can only publish backup metrics; it
 cannot read passwords or change backup files. CloudWatch sends email when a
 scheduled backup or cleanup fails, when no scheduled backup finishes within the
-allowed time, or when the monitor itself stops reporting. The monitor alarm uses
-three five-minute periods; CloudWatch also looks at earlier measurements, so a
-missing report can take longer than 15 minutes to trigger an alert. Verify the
-observed delivery time during the development test. Recovery sends an email too.
+allowed time, or when the monitor itself stops reporting. Missing backup-status
+metrics preserve the failed and overdue alarms' current states instead of
+reporting recovery. The separate monitor alarm treats missing reports as a
+failure. Its account, `clickhouse-backup-monitor`, must differ from
+`clickhouse_backup.service_account_name` when monitoring is enabled.
+The monitor alarm uses three five-minute periods. CloudWatch also looks at
+earlier measurements, so a missing report can take longer than 15 minutes to
+trigger an alert. Verify the observed delivery time during the development test.
+Recovery sends an email too.
 The CloudWatch check continues outside the cluster if Kubernetes stops running.
 **After apply, confirm the AWS SNS email
 subscription**; messages cannot arrive until that confirmation is complete.

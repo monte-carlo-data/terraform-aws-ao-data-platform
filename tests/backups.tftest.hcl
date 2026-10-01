@@ -1122,18 +1122,18 @@ run "backup_monitoring_limits_access_and_wires_external_alarms" {
       aws_cloudwatch_metric_alarm.clickhouse_backup["failed"].metric_name == "BackupJobFailed" &&
       aws_cloudwatch_metric_alarm.clickhouse_backup["failed"].comparison_operator == "GreaterThanOrEqualToThreshold" &&
       aws_cloudwatch_metric_alarm.clickhouse_backup["failed"].evaluation_periods == 1 &&
-      aws_cloudwatch_metric_alarm.clickhouse_backup["failed"].treat_missing_data == "notBreaching" &&
+      aws_cloudwatch_metric_alarm.clickhouse_backup["failed"].treat_missing_data == "ignore" &&
       aws_cloudwatch_metric_alarm.clickhouse_backup["overdue"].metric_name == "BackupOverdue" &&
       aws_cloudwatch_metric_alarm.clickhouse_backup["overdue"].comparison_operator == "GreaterThanOrEqualToThreshold" &&
       aws_cloudwatch_metric_alarm.clickhouse_backup["overdue"].evaluation_periods == 1 &&
-      aws_cloudwatch_metric_alarm.clickhouse_backup["overdue"].treat_missing_data == "notBreaching" &&
+      aws_cloudwatch_metric_alarm.clickhouse_backup["overdue"].treat_missing_data == "ignore" &&
       aws_cloudwatch_metric_alarm.clickhouse_backup["monitor"].metric_name == "MonitorHealthy" &&
       aws_cloudwatch_metric_alarm.clickhouse_backup["monitor"].comparison_operator == "LessThanThreshold" &&
       aws_cloudwatch_metric_alarm.clickhouse_backup["monitor"].evaluation_periods == 3 &&
       aws_cloudwatch_metric_alarm.clickhouse_backup["monitor"].datapoints_to_alarm == 3 &&
       aws_cloudwatch_metric_alarm.clickhouse_backup["monitor"].treat_missing_data == "breaching"
     )
-    error_message = "Alarms must detect failed/overdue scheduled backups and separately alert if the five-minute monitor stops reporting."
+    error_message = "Failed/overdue alarms must preserve their state when reports are missing; the separate monitor alarm must treat missing reports as a failure."
   }
 
   assert {
@@ -1147,6 +1147,57 @@ run "backup_monitoring_limits_access_and_wires_external_alarms" {
       maxAgeSeconds = 15300
     })
     error_message = "The chart must use the dedicated metrics role and the same cluster identity as the alarms."
+  }
+}
+
+run "monitoring_rejects_shared_backup_service_account" {
+  # Backups, domains, image, and chart version satisfy the other preconditions.
+  command = plan
+
+  variables {
+    clickhouse_backup = {
+      bucket_name          = "test-clickhouse-backups"
+      service_account_name = "clickhouse-backup-monitor"
+    }
+    clickhouse_backup_monitoring = { alert_email = "backups@example.com" }
+    clickhouse_domain            = "clickhouse.example.com"
+    otel_collector_domain        = "otel.example.com"
+    helm = {
+      chart_registry = "oci://registry-1.docker.io/montecarlodata"
+      chart_version  = "5.3.0"
+      clickhouse     = { backup = { enabled = true, image = "registry.example.com/backup@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" } }
+    }
+  }
+
+  expect_failures = [aws_iam_role.clickhouse_backup_monitor]
+}
+
+run "backup_monitor_account_name_is_allowed_without_monitoring" {
+  command = plan
+
+  variables {
+    clickhouse_backup = {
+      bucket_name          = "test-clickhouse-backups"
+      service_account_name = "clickhouse-backup-monitor"
+    }
+    clickhouse_domain     = "clickhouse.example.com"
+    otel_collector_domain = "otel.example.com"
+    helm = {
+      chart_registry = "oci://registry-1.docker.io/montecarlodata"
+      chart_version  = "5.3.0"
+      clickhouse     = { backup = { enabled = true, image = "registry.example.com/backup@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" } }
+    }
+  }
+
+  assert {
+    condition = (
+      length(aws_iam_role.clickhouse_backup_monitor) == 0 &&
+      length(aws_cloudwatch_metric_alarm.clickhouse_backup) == 0 &&
+      !can(yamldecode(helm_release.ao_data_platform[0].values[0]).clickhouse.backup.monitoring) &&
+      yamldecode(helm_release.ao_data_platform[0].values[0]).clickhouse.backup.serviceAccount.name == "clickhouse-backup-monitor" &&
+      jsondecode(aws_iam_role.clickhouse_backup[0].assume_role_policy).Statement[0].Condition.StringEquals["oidc.eks.us-east-1.amazonaws.com/id/TESTOIDC:sub"] == "system:serviceaccount:montecarlo:clickhouse-backup-monitor"
+    )
+    error_message = "The account name remains valid for backups alone when no monitor account or role is installed."
   }
 }
 
