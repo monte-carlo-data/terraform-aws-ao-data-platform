@@ -385,10 +385,15 @@ leave `helm.clickhouse.backup.keep_shared_credentials = false`, its default.
    apply the first stage. This keeps the old shared password available while
    ClickHouse replaces the pods with pods that mount the separate user files.
    Terraform publishes both database passwords before Helm installs the chart.
-3. Run `hack/check-backup-upgrade.py` from the matching chart checkout. Before
-   proceeding, it must confirm that both copies use the new pod template, mount
-   the separate backup and probe user files, and have no legacy XML reference
-   to the shared backup password.
+3. From the matching chart checkout, run:
+
+   ```bash
+   python3 hack/check-backup-upgrade.py --context <context> --namespace <namespace> --chi otel --cronjob otel-backup
+   ```
+
+   Before proceeding, it must confirm that both copies use the new pod template,
+   mount the separate backup and probe user files, and have no legacy XML
+   reference to the shared backup password.
 4. Set `helm.clickhouse.backup.keep_shared_credentials = false`, keep
    `suspend = true`, and apply the second stage. Check database access,
    replication, and backup behavior before setting `suspend = false` to resume
