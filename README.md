@@ -307,8 +307,12 @@ Add this block to your existing `helm.clickhouse` settings:
 backup = {
   enabled = true
   suspend = true # Pauses the schedule only; enabling still restarts ClickHouse.
+  image   = "<published-backup-image>@sha256:<64-character-digest>"
 }
 ```
+
+Replace the image and digest placeholders with the matching published patched
+backup image. The digest is required even while the schedule is paused.
 
 Keep the pause in your Terraform configuration until the installation is checked,
 then set `suspend = false` to start jobs. Its default is `false`, so enabling
