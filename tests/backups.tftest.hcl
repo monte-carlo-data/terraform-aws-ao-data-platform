@@ -845,8 +845,9 @@ run "scheduled_backups_use_existing_storage_and_a_separate_api_password" {
           remoteRef      = { key = "test-cluster/clickhouse/backup-probe-credentials" }
         }
       }
-      api      = { existingSecret = "ao-clickhouse-backup-api", passwordRevision = "1" }
-      schedule = { suspend = false }
+      api       = { existingSecret = "ao-clickhouse-backup-api", passwordRevision = "1" }
+      schedule  = { suspend = false }
+      migration = { keepSharedCredentials = false }
     })
     error_message = "The chart must use the existing bucket, role, stored database password and trusted service account; only the separate API secret's name belongs in values."
   }
@@ -914,10 +915,77 @@ run "scheduled_backups_can_be_installed_with_the_schedule_paused" {
   assert {
     condition = (
       yamldecode(helm_release.ao_data_platform[0].values[0]).clickhouse.backup.schedule.suspend &&
+      !yamldecode(helm_release.ao_data_platform[0].values[0]).clickhouse.backup.migration.keepSharedCredentials &&
       length(kubernetes_secret_v1.clickhouse_backup_api) == 1
     )
-    error_message = "Pausing jobs must preserve the installed setup and API password."
+    error_message = "Pausing jobs must preserve the installed setup and API password without retaining shared credentials by default."
   }
+}
+
+run "backup_upgrade_retains_shared_credentials_only_while_paused" {
+  command = plan
+
+  variables {
+    clickhouse_backup     = { bucket_name = "test-clickhouse-backups" }
+    clickhouse_domain     = "clickhouse.example.com"
+    otel_collector_domain = "otel.example.com"
+    helm = {
+      chart_registry = "oci://registry-1.docker.io/montecarlodata"
+      chart_version  = "5.2.0"
+      clickhouse = { backup = {
+        enabled                 = true
+        suspend                 = true
+        keep_shared_credentials = true
+        image                   = "registry.example.com/backup@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      } }
+    }
+  }
+
+  assert {
+    condition = (
+      yamldecode(helm_release.ao_data_platform[0].values[0]).clickhouse.backup.enabled &&
+      yamldecode(helm_release.ao_data_platform[0].values[0]).clickhouse.backup.schedule.suspend &&
+      yamldecode(helm_release.ao_data_platform[0].values[0]).clickhouse.backup.migration.keepSharedCredentials &&
+      length(aws_secretsmanager_secret_version.clickhouse_backup) == 1 &&
+      length(aws_secretsmanager_secret_version.clickhouse_backup_probe) == 1
+    )
+    error_message = "The first upgrade stage must retain shared credentials with backups installed, jobs paused, and both database passwords present."
+  }
+}
+
+run "backup_upgrade_rejects_shared_credentials_without_backups" {
+  command = plan
+
+  variables {
+    helm = {
+      deploy_charts = false
+      clickhouse    = { backup = { enabled = false, suspend = true, keep_shared_credentials = true } }
+    }
+  }
+
+  expect_failures = [var.helm]
+}
+
+run "backup_upgrade_rejects_shared_credentials_with_running_schedule" {
+  command = plan
+
+  variables {
+    clickhouse_backup     = { bucket_name = "test-clickhouse-backups" }
+    clickhouse_domain     = "clickhouse.example.com"
+    otel_collector_domain = "otel.example.com"
+    helm = {
+      chart_registry = "oci://registry-1.docker.io/montecarlodata"
+      chart_version  = "5.2.0"
+      clickhouse = { backup = {
+        enabled                 = true
+        suspend                 = false
+        keep_shared_credentials = true
+        image                   = "registry.example.com/backup@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      } }
+    }
+  }
+
+  expect_failures = [var.helm]
 }
 
 run "scheduled_backups_require_existing_storage" {

@@ -375,6 +375,30 @@ permission to read this password; the password value never enters Helm values.
 Missing backup or probe passwords disable that backup function without removing
 the database's normal users.
 
+**Upgrading an existing backup installation.** Moving the backup password out
+of the shared database user file takes two paused applies. Fresh installations
+leave `helm.clickhouse.backup.keep_shared_credentials = false`, its default.
+
+1. Pause the existing schedule with `helm.clickhouse.backup.suspend = true` and
+   wait for any running backup or restore to finish.
+2. Select the new published chart and patched backup image. Keep backups enabled
+   and paused, set `helm.clickhouse.backup.keep_shared_credentials = true`, and
+   apply the first stage. This keeps the old shared password available while
+   ClickHouse replaces the pods with pods that mount the separate user files.
+   Terraform publishes both database passwords before Helm installs the chart.
+3. Run `hack/check-backup-upgrade.py` from the matching chart checkout. Before
+   proceeding, it must confirm that both copies use the new pod template, mount
+   the separate backup and probe user files, and have no legacy XML reference
+   to the shared backup password.
+4. Set `helm.clickhouse.backup.keep_shared_credentials = false`, keep
+   `suspend = true`, and apply the second stage. Check database access,
+   replication, and backup behavior before setting `suspend = false` to resume
+   scheduled jobs. Do not remove the shared password in the first stage.
+
+The module rejects `keep_shared_credentials = true` unless backups are enabled
+and the schedule is paused. It maps to the chart's
+`clickhouse.backup.migration.keepSharedCredentials` setting.
+
 **Backup API password.** Terraform continues to own
 `montecarlo/ao-clickhouse-backup-api`. It contains `password` and `revision` keys;
 Helm receives only its name and `helm.clickhouse.backup.api_password_revision`.
@@ -786,6 +810,7 @@ To use a StorageClass you manage outside this module, set `clickhouse_storage_cl
 | `helm.clickhouse.readonly_user` | `object` | `null` | Optionally provisions a second SELECT-only ClickHouse user (`readonly_user`, profile `readonly`). Shape: `{ enabled = bool }`. When `enabled = true`, a Secrets Manager secret + ExternalSecret pipeline mirroring the otel user is created and the toggle is forwarded to the chart; the password comes from `clickhouse_passwords.readonly_user` (or is auto-generated). **Requires chart version >= 1.2.0.** Omit (or `null`) to disable. |
 | `helm.clickhouse.backup.enabled` | `bool` | `false` | Install scheduled backups. Requires `helm.deploy_charts = true`, `clickhouse_backup` set with a dedicated service account, and a compatible published chart with base version >= 5.2.0. Enabling or disabling restarts ClickHouse pods. See [ClickHouse backups](#clickhouse-backups). |
 | `helm.clickhouse.backup.suspend` | `bool` | `false` | Pause new scheduled backup runs while keeping the installation. Running work continues. Persist `true` before maintenance; enabling with the default `false` starts the schedule on the first apply. |
+| `helm.clickhouse.backup.keep_shared_credentials` | `bool` | `false` | Temporarily retain the shared backup password during the first upgrade stage. Requires backups enabled and paused. Set to `false` only after `hack/check-backup-upgrade.py` confirms both copies use the separate user files; keep jobs paused through the second apply and its checks. Fresh installations leave this `false`. |
 | `helm.clickhouse.backup.image` | `string` | `null` | Required when backups are enabled. Published backup image pinned by `@sha256:` digest, built with the chart repository's password logging and startup fixes. |
 | `helm.clickhouse.backup.api_password_revision` | `string` | `"1"` | Change this whenever replacing the API password. It updates the Secret revision and pod annotation together, causing the backup processes to restart. |
 | `clickhouse_passwords` | `object` (sensitive) | `{}` (all auto-generated) | Passwords for the ClickHouse SQL users. Shape: `{ admin = optional(string), otel = optional(string), monte_carlo = optional(string), schema_owner = optional(string), llm_worker = optional(string), readonly_user = optional(string) }`. Any field left null is auto-generated. Marked `sensitive`, so caller-supplied values are redacted in plan/apply output and CI logs — supply via a `.tfvars` file or `TF_VAR_clickhouse_passwords`. Stored in Secrets Manager and synced into the cluster by ESO; never passed through Helm values. Values remain readable in Terraform state — protect state accordingly. |
