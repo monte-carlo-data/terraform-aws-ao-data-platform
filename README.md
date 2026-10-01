@@ -492,8 +492,9 @@ and set `cleanup.dry_run = false` only when ready to delete old backups.
 Terraform requires a SHA-256 digest for deletion; it cannot verify the image's
 contents or availability. Before deleting anything, the chart's cleanup script
 checks that both running ClickHouse copies use the required patched tool version.
-No patched image is published by this module. Leaving `image` unset preserves
-the chart's default image and permits cleanup previews only.
+No patched image is published by this module. Set the published patched image
+by its SHA-256 digest whenever backups are enabled, including cleanup previews.
+Leaving `image` unset is rejected before installation.
 `timeout_seconds` defaults to 1800 and must be at least 60. Cleanup runs inside
 the scheduled backup Job, so a cleanup error also fails that Job and reaches
 the same failure alert.
