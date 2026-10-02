@@ -65,12 +65,6 @@ resource "aws_iam_role" "clickhouse_backup_monitor" {
       condition     = local.clickhouse_backup_install_enabled
       error_message = "clickhouse_backup_monitoring requires clickhouse_backup storage and helm.clickhouse.backup.enabled = true with chart deployment enabled."
     }
-    # This role exists only when monitoring is enabled. Backups alone may use
-    # this name, but the two workloads must never share an account or role trust.
-    precondition {
-      condition     = var.clickhouse_backup == null ? true : var.clickhouse_backup.service_account_name != "clickhouse-backup-monitor"
-      error_message = "Backup monitoring requires clickhouse_backup.service_account_name to differ from the reserved \"clickhouse-backup-monitor\" account."
-    }
     precondition {
       condition = (
         local.chart_version_parts[0] > 5 ||

@@ -349,8 +349,7 @@ run "backup_bucket_rejects_explicit_encryption_overrides" {
   }
 
   # Check the actual AWS condition structure, without inventing a second policy
-  # evaluator. Header-presence guards matter: StringNotEqualsIfExists in a Deny
-  # would also reject uploads that rely on the bucket's default encryption.
+  # evaluator. See the policy comment in s3.tf for why the Null guards are needed.
   assert {
     condition = jsonencode({
       for statement in jsondecode(aws_s3_bucket_policy.clickhouse_backup[0].policy).Statement :
@@ -614,6 +613,30 @@ run "backup_rejects_uppercase_bucket" {
   expect_failures = [var.clickhouse_backup]
 }
 
+run "backup_rejects_64_character_bucket" {
+  command = plan
+
+  variables {
+    clickhouse_backup = {
+      bucket_name = "backup-${join("", [for _ in range(57) : "a"])}"
+    }
+  }
+
+  expect_failures = [var.clickhouse_backup]
+}
+
+run "backup_rejects_2_character_bucket" {
+  command = plan
+
+  variables {
+    clickhouse_backup = {
+      bucket_name = "ab"
+    }
+  }
+
+  expect_failures = [var.clickhouse_backup]
+}
+
 run "backup_rejects_reserved_bucket_prefix_xn" {
   command = plan
 
@@ -757,6 +780,32 @@ run "backup_rejects_worker_service_account" {
     clickhouse_backup = {
       bucket_name          = "test-clickhouse-backups"
       service_account_name = "llm-worker"
+    }
+  }
+
+  expect_failures = [var.clickhouse_backup]
+}
+
+run "backup_rejects_scheduler_service_account" {
+  command = plan
+
+  variables {
+    clickhouse_backup = {
+      bucket_name          = "test-clickhouse-backups"
+      service_account_name = "otel-backup-job"
+    }
+  }
+
+  expect_failures = [var.clickhouse_backup]
+}
+
+run "backup_rejects_monitor_service_account" {
+  command = plan
+
+  variables {
+    clickhouse_backup = {
+      bucket_name          = "test-clickhouse-backups"
+      service_account_name = "clickhouse-backup-monitor"
     }
   }
 
@@ -1101,10 +1150,10 @@ run "monitoring_rejects_shared_backup_service_account" {
     }
   }
 
-  expect_failures = [aws_iam_role.clickhouse_backup_monitor]
+  expect_failures = [var.clickhouse_backup]
 }
 
-run "backup_monitor_account_name_is_allowed_without_monitoring" {
+run "backup_monitor_account_name_is_rejected_without_monitoring" {
   command = plan
 
   variables {
@@ -1121,16 +1170,7 @@ run "backup_monitor_account_name_is_allowed_without_monitoring" {
     }
   }
 
-  assert {
-    condition = (
-      length(aws_iam_role.clickhouse_backup_monitor) == 0 &&
-      length(aws_cloudwatch_metric_alarm.clickhouse_backup) == 0 &&
-      !can(yamldecode(helm_release.ao_data_platform[0].values[0]).clickhouse.backup.monitoring) &&
-      yamldecode(helm_release.ao_data_platform[0].values[0]).clickhouse.backup.serviceAccount.name == "clickhouse-backup-monitor" &&
-      jsondecode(aws_iam_role.clickhouse_backup[0].assume_role_policy).Statement[0].Condition.StringEquals["oidc.eks.us-east-1.amazonaws.com/id/TESTOIDC:sub"] == "system:serviceaccount:montecarlo:clickhouse-backup-monitor"
-    )
-    error_message = "The account name remains valid for backups alone when no monitor account or role is installed."
-  }
+  expect_failures = [var.clickhouse_backup]
 }
 
 run "cleanup_is_explicit_and_defaults_to_a_dry_run" {
