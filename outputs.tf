@@ -92,16 +92,29 @@ output "clickhouse_backup_credentials_secret_arn" {
   value       = local.clickhouse_backup_enabled ? aws_secretsmanager_secret.clickhouse_backup[0].arn : null
 }
 
+output "clickhouse_backup_probe_credentials_secret_arn" {
+  description = "Secrets Manager ARN for the generated backup_probe password. Available with backup storage, including separately installed charts. Null when clickhouse_backup is unset. Never includes the password."
+  value       = local.clickhouse_backup_enabled ? aws_secretsmanager_secret.clickhouse_backup_probe[0].arn : null
+}
+
+output "clickhouse_backup_api_credentials_secret_arn" {
+  description = "Secrets Manager ARN for the generated backup API password and revision JSON. Null unless this module installs scheduled backups. Never includes the password."
+  value       = local.clickhouse_backup_install_enabled ? aws_secretsmanager_secret.clickhouse_backup_api[0].arn : null
+}
+
 output "clickhouse_backup" {
   description = "Backup storage and credential references for installing the backup software. Null while clickhouse_backup is unset. The password itself is never output."
   value = local.clickhouse_backup_enabled ? {
-    bucket_name          = aws_s3_bucket.clickhouse_backup[0].id
-    bucket_arn           = aws_s3_bucket.clickhouse_backup[0].arn
-    iam_role_arn         = aws_iam_role.clickhouse_backup[0].arn
-    namespace            = kubernetes_namespace_v1.montecarlo.metadata[0].name
-    service_account_name = var.clickhouse_backup.service_account_name
-    username             = "backup"
-    password_secret_arn  = aws_secretsmanager_secret.clickhouse_backup[0].arn
+    bucket_name               = aws_s3_bucket.clickhouse_backup[0].id
+    bucket_arn                = aws_s3_bucket.clickhouse_backup[0].arn
+    iam_role_arn              = aws_iam_role.clickhouse_backup[0].arn
+    namespace                 = kubernetes_namespace_v1.montecarlo.metadata[0].name
+    service_account_name      = var.clickhouse_backup.service_account_name
+    username                  = "backup"
+    password_secret_arn       = aws_secretsmanager_secret.clickhouse_backup[0].arn
+    probe_username            = "backup_probe"
+    probe_password_secret_arn = aws_secretsmanager_secret.clickhouse_backup_probe[0].arn
+    api_password_secret_arn   = local.clickhouse_backup_install_enabled ? aws_secretsmanager_secret.clickhouse_backup_api[0].arn : null
   } : null
 }
 

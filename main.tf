@@ -244,16 +244,17 @@ locals {
     }
   } : {}
 
-  # Storage remains independently enabled. Installing the software adds only
-  # chart values and a backup API password, using the existing AWS resources.
+  # Storage independently creates the bucket, role, backup password, and probe
+  # password. Installing adds chart values and an API password in Secrets Manager,
+  # including permission for External Secrets to read it.
   clickhouse_backup_install_enabled = var.helm.deploy_charts && var.helm.clickhouse.backup.enabled && local.clickhouse_backup_enabled
 
-  # Compare numeric major/minor parts, so 5.10 and 6.0 sort above 5.2.
+  # Compare numeric major/minor parts, so 5.10.0 and 6.0.0 sort above 5.2.0.
   # Incomplete versions, ranges, and unparseable strings become [0, 0] and
   # fail the minimum-version check when a gated feature is enabled.
   chart_version_parts = try([for component in regex("^v?([0-9]+)\\.([0-9]+)\\.[0-9]+(?:-[0-9A-Za-z.-]+)?(?:\\+[0-9A-Za-z.-]+)?$", var.helm.chart_version) : tonumber(component)], [0, 0])
   helm_clickhouse_backup_block = local.clickhouse_backup_install_enabled ? {
-    backup = {
+    backup = merge({
       enabled  = true
       provider = "aws"
       aws = {
@@ -269,7 +270,6 @@ locals {
           remoteRef      = { key = aws_secretsmanager_secret.clickhouse_backup[0].name }
         }
       }
-      sidecar = { image = var.helm.clickhouse.backup.image }
       probe = {
         externalSecret = {
           secretStoreRef = { name = "aws-secrets-manager", kind = "ClusterSecretStore" }
@@ -277,11 +277,21 @@ locals {
         }
       }
       api = {
-        existingSecret   = kubernetes_secret_v1.clickhouse_backup_api[0].metadata[0].name
         passwordRevision = var.helm.clickhouse.backup.api_password_revision
+        externalSecret = {
+          secretStoreRef = { name = "aws-secrets-manager", kind = "ClusterSecretStore" }
+          # A changed version updates the ExternalSecret immediately instead of
+          # waiting for its periodic refresh. AWS version IDs need ESO's uuid/ prefix.
+          remoteRef = {
+            key     = aws_secretsmanager_secret.clickhouse_backup_api[0].name
+            version = "uuid/${aws_secretsmanager_secret_version.clickhouse_backup_api[0].version_id}"
+          }
+        }
       }
       schedule = { suspend = var.helm.clickhouse.backup.suspend }
-    }
+      }, var.helm.clickhouse.backup.image == null ? {} : {
+      sidecar = { image = var.helm.clickhouse.backup.image }
+    })
   } : {}
 
   # Singleton maps merged into clickhouse helm values when the dedicated CH

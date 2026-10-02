@@ -591,20 +591,24 @@ variable "helm" {
     checked minimum of helm.chart_version >= 5.2.0.
 
     Development installs also use published charts. Pin chart_version to a
-    concrete development version such as 5.2.0-dev.gabcdef1 after that package
-    has been published. Development versions must meet the same base-version
-    requirements as releases; 0.0.0 development builds do not enable backups.
+    published pre-release version with a base of 5.2.0 or later. Pre-release
+    versions must meet the same base-version requirements as releases; 0.0.0
+    development builds fail the backup version check.
 
     clickhouse.backup: enabled installs scheduled backups using clickhouse_backup
     storage and requires deploy_charts and a published chart based on 5.2.0 or
     later, including development builds. Both enabled and suspend default to false.
     suspend pauses new scheduled jobs; it does not stop active jobs or prevent
     ClickHouse pod restarts when backup software is enabled or disabled.
-    image must select stock altinity/clickhouse-backup 2.8.1 by SHA-256 digest.
-    The chart waits for credentials before starting the backup API and uses
-    a startup copy of its configuration. Password changes require a pod restart.
-    The module creates a separate backup API password in a Kubernetes Secret;
-    it passes only the Secret name in Helm values.
+    image is optional; null uses the chart's verified default. An override must
+    contain a SHA-256 digest; the chart checks which digest it supports and allows
+    the same image from another registry. The chart waits for credentials before
+    starting the backup API and uses a startup copy of its configuration.
+    api_password_revision defaults to "1"; changing it generates a new API
+    password and restarts the ClickHouse pods. Pause backup work first.
+    The API password and revision are stored together in Secrets Manager and
+    delivered by External Secrets. Helm receives only the secret reference and
+    revision, never the password.
 
     The clustered/HA Keeper topology (keeper_availability_zones) requires
     chart_version >= "2.3.0" — the first chart version exposing the keeper.*
@@ -814,11 +818,11 @@ variable "helm" {
   }
 
   validation {
-    condition = var.helm.clickhouse.backup.image == null ? !var.helm.clickhouse.backup.enabled : can(regex(
-      "^(?:(?:docker\\.io|registry-1\\.docker\\.io)/)?altinity/clickhouse-backup(?::2\\.8\\.1)?@sha256:08016b048f7e6035c048501315c2a788e5a782f15f168e042c7bd48d5a388cc4$",
+    condition = var.helm.clickhouse.backup.image == null ? true : can(regex(
+      "^[^[:space:]@]+@sha256:[0-9a-f]{64}$",
       var.helm.clickhouse.backup.image,
     ))
-    error_message = "helm.clickhouse.backup.image must select stock altinity/clickhouse-backup 2.8.1 at @sha256:08016b048f7e6035c048501315c2a788e5a782f15f168e042c7bd48d5a388cc4. The image is required when backups are enabled; docker.io/ and registry-1.docker.io/ prefixes and the :2.8.1 tag are optional."
+    error_message = "helm.clickhouse.backup.image must be null to use the chart default, or an image reference ending in @sha256: followed by 64 lowercase hexadecimal characters. The chart checks that the digest is supported."
   }
 
   validation {
@@ -848,8 +852,9 @@ variable "helm" {
 variable "clickhouse_backup" {
   description = <<-EOT
     Optional ClickHouse backup storage. Creates a private, encrypted S3 bucket,
-    a bucket-scoped IAM role, and a generated password in Secrets Manager for
-    the backup database user. Null creates none of these resources.
+    a bucket-scoped IAM role, and generated passwords in Secrets Manager for
+    the backup database user and its read-only probe. Null creates none of these
+    resources.
 
     bucket_name must be a new, globally unique S3 bucket name. No automatic
     expiry is configured, and this release does not delete old backups, so
@@ -859,8 +864,10 @@ variable "clickhouse_backup" {
     montecarlo that can assume the role. With helm.clickhouse.backup.enabled,
     the chart creates this account, copies the stored database password through
     External Secrets, and configures the ClickHouse backup user. Do not create
-    the account separately for this installation. With chart deployment off,
-    the caller must install and configure the backup software separately.
+    the account separately for this installation. Storage alone does not install
+    backups: helm.clickhouse.backup.enabled defaults to false. With chart
+    deployment off, the caller must install and configure the software and API
+    credentials separately, using the generated backup and probe passwords.
   EOT
   type = object({
     bucket_name          = string

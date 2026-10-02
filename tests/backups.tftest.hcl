@@ -97,6 +97,19 @@ mock_provider "aws" {
   }
 
   override_resource {
+    target = aws_secretsmanager_secret.clickhouse_backup_api[0]
+    values = {
+      id  = "arn:aws:secretsmanager:us-east-1:123456789012:secret:test-cluster/clickhouse/backup-api-credentials-ABCDEF"
+      arn = "arn:aws:secretsmanager:us-east-1:123456789012:secret:test-cluster/clickhouse/backup-api-credentials-ABCDEF"
+    }
+  }
+
+  override_resource {
+    target = aws_secretsmanager_secret_version.clickhouse_backup_api[0]
+    values = { version_id = "33333333-3333-3333-3333-333333333333" }
+  }
+
+  override_resource {
     target = aws_secretsmanager_secret.clickhouse_otel_password
     values = { arn = "arn:aws:secretsmanager:us-east-1:123456789012:secret:test-cluster/clickhouse/otel-credentials-ABCDEF" }
   }
@@ -193,7 +206,8 @@ run "backup_disabled_by_default" {
       length(aws_secretsmanager_secret.clickhouse_backup) == 0,
       length(aws_secretsmanager_secret_version.clickhouse_backup) == 0,
       length(random_password.clickhouse_backup_api) == 0,
-      length(kubernetes_secret_v1.clickhouse_backup_api) == 0,
+      length(aws_secretsmanager_secret.clickhouse_backup_api) == 0,
+      length(aws_secretsmanager_secret_version.clickhouse_backup_api) == 0,
       length(random_password.clickhouse_backup_probe) == 0,
       length(aws_secretsmanager_secret.clickhouse_backup_probe) == 0,
       length(aws_secretsmanager_secret_version.clickhouse_backup_probe) == 0,
@@ -203,8 +217,8 @@ run "backup_disabled_by_default" {
   }
 
   assert {
-    condition     = output.clickhouse_backup == null && output.clickhouse_backup_credentials_secret_arn == null
-    error_message = "Both backup outputs must be null when the feature is disabled."
+    condition     = output.clickhouse_backup == null && output.clickhouse_backup_credentials_secret_arn == null && output.clickhouse_backup_probe_credentials_secret_arn == null && output.clickhouse_backup_api_credentials_secret_arn == null
+    error_message = "All backup outputs must be null when the feature is disabled."
   }
 
   assert {
@@ -241,10 +255,16 @@ run "backup_storage_is_private_and_not_force_deleted" {
   assert {
     condition = (
       length(random_password.clickhouse_backup_api) == 0 &&
-      length(kubernetes_secret_v1.clickhouse_backup_api) == 0 &&
+      length(aws_secretsmanager_secret.clickhouse_backup_api) == 0 &&
+      length(aws_secretsmanager_secret_version.clickhouse_backup_api) == 0 &&
+      length(random_password.clickhouse_backup_probe) == 1 &&
+      length(aws_secretsmanager_secret.clickhouse_backup_probe) == 1 &&
+      length(aws_secretsmanager_secret_version.clickhouse_backup_probe) == 1 &&
+      output.clickhouse_backup_probe_credentials_secret_arn == aws_secretsmanager_secret.clickhouse_backup_probe[0].arn &&
+      output.clickhouse_backup_api_credentials_secret_arn == null &&
       length(keys(local.helm_clickhouse_backup_block)) == 0
     )
-    error_message = "Existing storage-only callers must not install backups or create API credentials."
+    error_message = "Storage-only callers receive the probe credential for separately installed charts, without installing backups or creating API credentials."
   }
 
   assert {
@@ -487,21 +507,24 @@ run "backup_password_is_generated_and_stored_in_the_existing_key" {
   }
 
   assert {
-    condition = output.clickhouse_backup == {
-      bucket_name          = "test-clickhouse-backups"
-      bucket_arn           = "arn:aws:s3:::test-clickhouse-backups"
-      iam_role_arn         = "arn:aws:iam::123456789012:role/test-cluster-us-east-1-clickhouse-backup"
-      service_account_name = "clickhouse-backup"
-      namespace            = "montecarlo"
-      password_secret_arn  = "arn:aws:secretsmanager:us-east-1:123456789012:secret:test-cluster/clickhouse/backup-credentials-ABCDEF"
-      username             = "backup"
-    }
+    condition = jsonencode(output.clickhouse_backup) == jsonencode({
+      bucket_name               = "test-clickhouse-backups"
+      bucket_arn                = "arn:aws:s3:::test-clickhouse-backups"
+      iam_role_arn              = "arn:aws:iam::123456789012:role/test-cluster-us-east-1-clickhouse-backup"
+      service_account_name      = "clickhouse-backup"
+      namespace                 = "montecarlo"
+      password_secret_arn       = "arn:aws:secretsmanager:us-east-1:123456789012:secret:test-cluster/clickhouse/backup-credentials-ABCDEF"
+      username                  = "backup"
+      probe_username            = "backup_probe"
+      probe_password_secret_arn = "arn:aws:secretsmanager:us-east-1:123456789012:secret:test-cluster/clickhouse/backup-probe-credentials-ABCDEF"
+      api_password_secret_arn   = null
+    })
     error_message = "Expose the storage and identity references needed for the backup job, without exposing its password."
   }
 
   assert {
     condition     = output.clickhouse_backup_credentials_secret_arn == output.clickhouse_backup.password_secret_arn
-    error_message = "The flat credentials output must reference the same secret as the unchanged backup output object."
+    error_message = "The flat credentials output must reference the same secret as the backup output object."
   }
 }
 
@@ -539,9 +562,10 @@ run "external_secrets_reads_backup_password_without_expanding_other_access" {
         aws_secretsmanager_secret.clickhouse_admin_password[0].arn,
         aws_secretsmanager_secret.clickhouse_readonly_user_password[0].arn,
         aws_secretsmanager_secret.clickhouse_backup[0].arn,
+        aws_secretsmanager_secret.clickhouse_backup_probe[0].arn,
       ])
     ])
-    error_message = "External Secrets must read the backup password alongside all existing passwords, including optional users, without write access or access to unrelated secrets."
+    error_message = "External Secrets must read the backup and probe passwords alongside all existing passwords, including optional users, without write access or access to unrelated secrets."
   }
 
   assert {
@@ -570,6 +594,8 @@ run "backup_storage_supports_an_externally_managed_secrets_operator" {
       length(aws_iam_role.external_secrets) == 0 &&
       length(aws_iam_role_policy.external_secrets) == 0 &&
       length(aws_secretsmanager_secret.clickhouse_backup) == 1 &&
+      length(aws_secretsmanager_secret.clickhouse_backup_probe) == 1 &&
+      output.clickhouse_backup_probe_credentials_secret_arn == aws_secretsmanager_secret.clickhouse_backup_probe[0].arn &&
       length(aws_iam_role.clickhouse_backup) == 1
     )
     error_message = "Backup storage and its password must still be available when the caller manages External Secrets separately, without creating an operator role or policy."
@@ -830,22 +856,28 @@ run "scheduled_backups_use_existing_storage_and_a_separate_api_password" {
   assert {
     condition = (
       length(random_password.clickhouse_backup_api) == 1 &&
-      length(kubernetes_secret_v1.clickhouse_backup_api) == 1 &&
+      length(aws_secretsmanager_secret.clickhouse_backup_api) == 1 &&
       random_password.clickhouse_backup_api[0].length == 32 &&
       random_password.clickhouse_backup_api[0].special == false &&
-      random_password.clickhouse_backup_api[0].keepers == null &&
-      kubernetes_secret_v1.clickhouse_backup_api[0].metadata[0].name == "ao-clickhouse-backup-api" &&
-      kubernetes_secret_v1.clickhouse_backup_api[0].metadata[0].namespace == "montecarlo" &&
-      kubernetes_secret_v1.clickhouse_backup_api[0].type == "Opaque" &&
-      nonsensitive(kubernetes_secret_v1.clickhouse_backup_api[0].data.password) == "11111111111111111111111111111111" &&
-      nonsensitive(kubernetes_secret_v1.clickhouse_backup_api[0].data.password) != nonsensitive(aws_secretsmanager_secret_version.clickhouse_backup[0].secret_string)
+      random_password.clickhouse_backup_api[0].keepers == tomap({ revision = "1" }) &&
+      aws_secretsmanager_secret.clickhouse_backup_api[0].name == "test-cluster/clickhouse/backup-api-credentials" &&
+      aws_secretsmanager_secret.clickhouse_backup_api[0].kms_key_id == aws_kms_key.pipeline_secrets.arn &&
+      aws_secretsmanager_secret_version.clickhouse_backup_api[0].secret_id == aws_secretsmanager_secret.clickhouse_backup_api[0].id &&
+      jsondecode(nonsensitive(aws_secretsmanager_secret_version.clickhouse_backup_api[0].secret_string)) == {
+        password = "11111111111111111111111111111111"
+        revision = "1"
+      } &&
+      output.clickhouse_backup_api_credentials_secret_arn == aws_secretsmanager_secret.clickhouse_backup_api[0].arn &&
+      output.clickhouse_backup.api_password_secret_arn == output.clickhouse_backup_api_credentials_secret_arn &&
+      output.clickhouse_backup.probe_password_secret_arn == output.clickhouse_backup_probe_credentials_secret_arn &&
+      output.clickhouse_backup.probe_username == "backup_probe"
     )
-    error_message = "Installing backups must create one separate, stable 32-character API password in the existing namespace, with no rotation triggers."
+    error_message = "Installing backups must create a separate encrypted 32-character API password, tied to its revision, with both fields in one stored JSON value and only references exposed in outputs."
   }
 
   assert {
-    condition     = issensitive(kubernetes_secret_v1.clickhouse_backup_api[0].data)
-    error_message = "Terraform must keep the Kubernetes password value sensitive."
+    condition     = issensitive(aws_secretsmanager_secret_version.clickhouse_backup_api[0].secret_string)
+    error_message = "Terraform must keep the stored API password value sensitive."
   }
 
   assert {
@@ -872,10 +904,19 @@ run "scheduled_backups_use_existing_storage_and_a_separate_api_password" {
           remoteRef      = { key = "test-cluster/clickhouse/backup-probe-credentials" }
         }
       }
-      api      = { existingSecret = "ao-clickhouse-backup-api", passwordRevision = "1" }
+      api = {
+        passwordRevision = "1"
+        externalSecret = {
+          secretStoreRef = { name = "aws-secrets-manager", kind = "ClusterSecretStore" }
+          remoteRef = {
+            key     = "test-cluster/clickhouse/backup-api-credentials"
+            version = "uuid/33333333-3333-3333-3333-333333333333"
+          }
+        }
+      }
       schedule = { suspend = false }
     })
-    error_message = "The chart must use the existing bucket, role, stored database password and trusted service account; only the separate API secret's name belongs in values."
+    error_message = "The chart must use the existing bucket, role, stored database password and trusted service account; API delivery must use External Secrets with the chart-default target name."
   }
 
   assert {
@@ -885,7 +926,7 @@ run "scheduled_backups_use_existing_storage_and_a_separate_api_password" {
       !strcontains(helm_release.ao_data_platform[0].values[0], "22222222222222222222222222222222") &&
       !issensitive(helm_release.ao_data_platform[0].values[0])
     )
-    error_message = "Neither password value may enter the Helm release values."
+    error_message = "None of the three password values may enter the Helm release values."
   }
 
   assert {
@@ -918,9 +959,13 @@ run "storage_with_chart_installation_stays_off_without_backup_opt_in" {
     condition = (
       !can(yamldecode(helm_release.ao_data_platform[0].values[0]).clickhouse.backup) &&
       length(random_password.clickhouse_backup_api) == 0 &&
-      length(kubernetes_secret_v1.clickhouse_backup_api) == 0
+      length(aws_secretsmanager_secret.clickhouse_backup_api) == 0 &&
+      length(aws_secretsmanager_secret_version.clickhouse_backup_api) == 0 &&
+      length(random_password.clickhouse_backup_probe) == 1 &&
+      length(aws_secretsmanager_secret.clickhouse_backup_probe) == 1 &&
+      length(aws_secretsmanager_secret_version.clickhouse_backup_probe) == 1
     )
-    error_message = "Current applied callers must receive no backup chart values or API resources until they opt in."
+    error_message = "Storage must include the probe credentials even without backup opt-in, while API resources and backup chart values remain absent."
   }
 }
 
@@ -941,7 +986,7 @@ run "scheduled_backups_can_be_installed_with_the_schedule_paused" {
   assert {
     condition = (
       yamldecode(helm_release.ao_data_platform[0].values[0]).clickhouse.backup.schedule.suspend &&
-      length(kubernetes_secret_v1.clickhouse_backup_api) == 1
+      length(aws_secretsmanager_secret.clickhouse_backup_api) == 1
     )
     error_message = "Pausing jobs must preserve the installed setup and API password."
   }
@@ -1165,7 +1210,7 @@ run "scheduled_backups_use_a_published_development_chart" {
     otel_collector_domain = "otel.example.com"
     helm = {
       chart_registry = "oci://registry-1.docker.io/montecarlodata"
-      chart_version  = "5.2.0-dev.gabcdef1"
+      chart_version  = "5.2.0-dev.g0123456789abcdef0123456789abcdef01234567"
       clickhouse     = { backup = { enabled = true, image = "altinity/clickhouse-backup:2.8.1@sha256:08016b048f7e6035c048501315c2a788e5a782f15f168e042c7bd48d5a388cc4" } }
     }
   }
@@ -1173,7 +1218,7 @@ run "scheduled_backups_use_a_published_development_chart" {
   assert {
     condition = (
       helm_release.ao_data_platform[0].chart == "oci://registry-1.docker.io/montecarlodata/ao-data-platform" &&
-      helm_release.ao_data_platform[0].version == "5.2.0-dev.gabcdef1" &&
+      helm_release.ao_data_platform[0].version == "5.2.0-dev.g0123456789abcdef0123456789abcdef01234567" &&
       yamldecode(helm_release.ao_data_platform[0].values[0]).clickhouse.backup.enabled &&
       yamldecode(helm_release.ao_data_platform[0].values[0]).llmWorker.image.repository == "registry-1.docker.io/montecarlodata/ao-llm-worker"
     )
@@ -1191,7 +1236,7 @@ run "scheduled_backups_reject_unversioned_development_builds" {
     otel_collector_domain = "otel.example.com"
     helm = {
       chart_registry = "oci://registry-1.docker.io/montecarlodata"
-      chart_version  = "0.0.0-dev.gabcdef1"
+      chart_version  = "0.0.0-dev.g0123456789abcdef0123456789abcdef01234567"
       clickhouse     = { backup = { enabled = true, image = "altinity/clickhouse-backup:2.8.1@sha256:08016b048f7e6035c048501315c2a788e5a782f15f168e042c7bd48d5a388cc4" } }
     }
   }
@@ -1205,7 +1250,7 @@ run "published_charts_require_registry" {
   variables {
     clickhouse_domain     = "clickhouse.example.com"
     otel_collector_domain = "otel.example.com"
-    helm                  = { chart_version = "5.2.0-dev.gabcdef1" }
+    helm                  = { chart_version = "5.2.0-dev.g0123456789abcdef0123456789abcdef01234567" }
   }
 
   expect_failures = [var.helm]
@@ -1225,6 +1270,7 @@ run "published_charts_require_version" {
 
 run "probe_password_and_revision_are_wired_without_exposing_passwords" {
   command = plan
+
   variables {
     clickhouse_backup     = { bucket_name = "test-clickhouse-backups" }
     clickhouse_domain     = "clickhouse.example.com"
@@ -1239,21 +1285,53 @@ run "probe_password_and_revision_are_wired_without_exposing_passwords" {
       } }
     }
   }
+
   assert {
     condition = (
       aws_secretsmanager_secret.clickhouse_backup_probe[0].name == "test-cluster/clickhouse/backup-probe-credentials" &&
       aws_secretsmanager_secret.clickhouse_backup_probe[0].kms_key_id == aws_kms_key.pipeline_secrets.arn &&
       nonsensitive(aws_secretsmanager_secret_version.clickhouse_backup_probe[0].secret_string) == "22222222222222222222222222222222" &&
-      contains(jsondecode(aws_iam_role_policy.external_secrets[0].policy).Statement[0].Resource, aws_secretsmanager_secret.clickhouse_backup_probe[0].arn) &&
-      nonsensitive(kubernetes_secret_v1.clickhouse_backup_api[0].data.revision) == "rotation-2" &&
-      yamldecode(helm_release.ao_data_platform[0].values[0]).clickhouse.backup.api.passwordRevision == "rotation-2"
+      random_password.clickhouse_backup_probe[0].length == 32 &&
+      random_password.clickhouse_backup_probe[0].special == false &&
+      random_password.clickhouse_backup_api[0].keepers == tomap({ revision = "rotation-2" }) &&
+      jsondecode(nonsensitive(aws_secretsmanager_secret_version.clickhouse_backup_api[0].secret_string)).revision == "rotation-2" &&
+      yamldecode(helm_release.ao_data_platform[0].values[0]).clickhouse.backup.api.passwordRevision == "rotation-2" &&
+      yamldecode(helm_release.ao_data_platform[0].values[0]).clickhouse.backup.api.externalSecret.remoteRef.version == "uuid/${aws_secretsmanager_secret_version.clickhouse_backup_api[0].version_id}"
     )
     error_message = "The probe password must be encrypted, readable by External Secrets, and the API revision must agree between Secret and chart."
   }
+
+  assert {
+    condition = (
+      length(jsondecode(aws_iam_role_policy.external_secrets[0].policy).Statement) == 2 &&
+      alltrue([for statement in jsondecode(aws_iam_role_policy.external_secrets[0].policy).Statement : statement.Effect == "Allow"]) &&
+      anytrue([
+        for statement in jsondecode(aws_iam_role_policy.external_secrets[0].policy).Statement :
+        toset(flatten([statement.Action])) == toset(["secretsmanager:GetSecretValue", "secretsmanager:DescribeSecret"]) &&
+        toset(flatten([statement.Resource])) == toset([
+          aws_secretsmanager_secret.clickhouse_otel_password.arn,
+          aws_secretsmanager_secret.clickhouse_monte_carlo_password.arn,
+          aws_secretsmanager_secret.clickhouse_schema_owner_password.arn,
+          aws_secretsmanager_secret.clickhouse_llm_worker_password.arn,
+          aws_secretsmanager_secret.clickhouse_backup[0].arn,
+          aws_secretsmanager_secret.clickhouse_backup_probe[0].arn,
+          aws_secretsmanager_secret.clickhouse_backup_api[0].arn,
+        ])
+      ]) &&
+      anytrue([
+        for statement in jsondecode(aws_iam_role_policy.external_secrets[0].policy).Statement :
+        toset(flatten([statement.Action])) == toset(["kms:Decrypt"]) &&
+        toset(flatten([statement.Resource])) == toset([aws_kms_key.pipeline_secrets.arn])
+      ])
+    )
+    error_message = "Installed backups must give External Secrets only the original password reads, all three backup credentials, and its existing secrets-key decrypt permission."
+  }
+
 }
 
-run "backup_rejects_missing_image" {
+run "backup_uses_chart_default_when_image_is_unset" {
   command = plan
+
   variables {
     clickhouse_backup     = { bucket_name = "test-clickhouse-backups" }
     clickhouse_domain     = "clickhouse.example.com"
@@ -1264,11 +1342,18 @@ run "backup_rejects_missing_image" {
       clickhouse     = { backup = { enabled = true } }
     }
   }
-  expect_failures = [var.helm]
+
+  assert {
+    condition     = !can(yamldecode(helm_release.ao_data_platform[0].values[0]).clickhouse.backup.sidecar)
+    error_message = "An unset image must omit the sidecar override and use the chart's verified default."
+  }
 }
 
 run "backup_rejects_tag_only_image" {
+  # Only the image lacks a digest; valid chart, domains, default revision, and
+  # empty receivers satisfy the other helm validations.
   command = plan
+
   variables {
     clickhouse_backup     = { bucket_name = "test-clickhouse-backups" }
     clickhouse_domain     = "clickhouse.example.com"
@@ -1279,27 +1364,37 @@ run "backup_rejects_tag_only_image" {
       clickhouse     = { backup = { enabled = true, image = "altinity/clickhouse-backup:2.8.1" } }
     }
   }
+
   expect_failures = [var.helm]
 }
 
 run "backup_rejects_empty_revision" {
+  # Only the revision is empty; charts/backups are disabled, the image is null,
+  # and empty receivers satisfy the other helm validations.
   command = plan
+
   variables {
     helm = { deploy_charts = false, clickhouse = { backup = { api_password_revision = "" } } }
   }
+
   expect_failures = [var.helm]
 }
 
 run "backup_rejects_unsafe_revision" {
+  # Only the revision contains a slash; charts/backups are disabled, the image
+  # is null, and empty receivers satisfy the other helm validations.
   command = plan
+
   variables {
     helm = { deploy_charts = false, clickhouse = { backup = { api_password_revision = "bad/value" } } }
   }
+
   expect_failures = [var.helm]
 }
 
 run "backup_accepts_stock_digest_without_tag" {
   command = plan
+
   variables {
     clickhouse_backup     = { bucket_name = "test-clickhouse-backups" }
     clickhouse_domain     = "clickhouse.example.com"
@@ -1310,6 +1405,7 @@ run "backup_accepts_stock_digest_without_tag" {
       clickhouse     = { backup = { enabled = true, image = "altinity/clickhouse-backup@sha256:08016b048f7e6035c048501315c2a788e5a782f15f168e042c7bd48d5a388cc4" } }
     }
   }
+
   assert {
     condition     = yamldecode(helm_release.ao_data_platform[0].values[0]).clickhouse.backup.sidecar.image == var.helm.clickhouse.backup.image
     error_message = "The supported stock image reference must reach the chart unchanged."
@@ -1318,6 +1414,7 @@ run "backup_accepts_stock_digest_without_tag" {
 
 run "backup_accepts_stock_docker_hub_prefix" {
   command = plan
+
   variables {
     clickhouse_backup     = { bucket_name = "test-clickhouse-backups" }
     clickhouse_domain     = "clickhouse.example.com"
@@ -1328,6 +1425,7 @@ run "backup_accepts_stock_docker_hub_prefix" {
       clickhouse     = { backup = { enabled = true, image = "docker.io/altinity/clickhouse-backup:2.8.1@sha256:08016b048f7e6035c048501315c2a788e5a782f15f168e042c7bd48d5a388cc4" } }
     }
   }
+
   assert {
     condition     = yamldecode(helm_release.ao_data_platform[0].values[0]).clickhouse.backup.sidecar.image == var.helm.clickhouse.backup.image
     error_message = "The supported stock image reference must reach the chart unchanged."
@@ -1336,6 +1434,7 @@ run "backup_accepts_stock_docker_hub_prefix" {
 
 run "backup_accepts_stock_registry_prefix" {
   command = plan
+
   variables {
     clickhouse_backup     = { bucket_name = "test-clickhouse-backups" }
     clickhouse_domain     = "clickhouse.example.com"
@@ -1346,32 +1445,102 @@ run "backup_accepts_stock_registry_prefix" {
       clickhouse     = { backup = { enabled = true, image = "registry-1.docker.io/altinity/clickhouse-backup@sha256:08016b048f7e6035c048501315c2a788e5a782f15f168e042c7bd48d5a388cc4" } }
     }
   }
+
   assert {
     condition     = yamldecode(helm_release.ao_data_platform[0].values[0]).clickhouse.backup.sidecar.image == var.helm.clickhouse.backup.image
     error_message = "The supported stock image reference must reach the chart unchanged."
   }
 }
 
-run "backup_rejects_custom_repository" {
+run "backup_accepts_mirrored_image" {
   command = plan
+
   variables {
-    helm = { deploy_charts = false, clickhouse = { backup = { image = "registry.example.com/backup@sha256:08016b048f7e6035c048501315c2a788e5a782f15f168e042c7bd48d5a388cc4" } } }
+    clickhouse_backup     = { bucket_name = "test-clickhouse-backups" }
+    clickhouse_domain     = "clickhouse.example.com"
+    otel_collector_domain = "otel.example.com"
+    helm = {
+      chart_registry = "oci://registry-1.docker.io/montecarlodata"
+      chart_version  = "5.2.0"
+      clickhouse     = { backup = { enabled = true, image = "registry.example.com/team/backup@sha256:08016b048f7e6035c048501315c2a788e5a782f15f168e042c7bd48d5a388cc4" } }
+    }
   }
+
+  assert {
+    condition     = yamldecode(helm_release.ao_data_platform[0].values[0]).clickhouse.backup.sidecar.image == var.helm.clickhouse.backup.image
+    error_message = "A mirrored image reference must reach the chart unchanged."
+  }
+}
+
+run "backup_leaves_supported_digest_check_to_chart" {
+  # This plan mocks Helm. It proves only that the module does not duplicate the
+  # chart's digest allowlist; the real chart still rejects unsupported images.
+  command = plan
+
+  variables {
+    clickhouse_backup     = { bucket_name = "test-clickhouse-backups" }
+    clickhouse_domain     = "clickhouse.example.com"
+    otel_collector_domain = "otel.example.com"
+    helm = {
+      chart_registry = "oci://registry-1.docker.io/montecarlodata"
+      chart_version  = "5.2.0"
+      clickhouse     = { backup = { enabled = true, image = "registry.example.com/team/backup:future@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" } }
+    }
+  }
+
+  assert {
+    condition     = yamldecode(helm_release.ao_data_platform[0].values[0]).clickhouse.backup.sidecar.image == var.helm.clickhouse.backup.image
+    error_message = "The chart, not the module, must decide which correctly formed image digest it supports."
+  }
+}
+
+run "backup_rejects_short_digest" {
+  # Only the image shape is invalid; charts/backups are disabled and the default
+  # revision and empty receiver configuration satisfy the other helm validations.
+  command = plan
+
+  variables {
+    helm = { deploy_charts = false, clickhouse = { backup = { image = "registry.example.com/backup@sha256:abc123" } } }
+  }
+
   expect_failures = [var.helm]
 }
 
-run "backup_rejects_other_version" {
+run "backup_rejects_image_with_whitespace" {
+  # Only the image shape is invalid; charts/backups are disabled and the default
+  # revision and empty receiver configuration satisfy the other helm validations.
   command = plan
+
   variables {
-    helm = { deploy_charts = false, clickhouse = { backup = { image = "altinity/clickhouse-backup:2.8.0@sha256:08016b048f7e6035c048501315c2a788e5a782f15f168e042c7bd48d5a388cc4" } } }
+    helm = { deploy_charts = false, clickhouse = { backup = { image = "registry.example.com/bad image@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" } } }
   }
+
   expect_failures = [var.helm]
 }
 
-run "backup_rejects_unverified_digest" {
+run "installed_backups_support_a_separately_managed_secrets_operator" {
   command = plan
+
   variables {
-    helm = { deploy_charts = false, clickhouse = { backup = { image = "altinity/clickhouse-backup:2.8.1@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" } } }
+    clickhouse_backup     = { bucket_name = "test-clickhouse-backups" }
+    clickhouse_domain     = "clickhouse.example.com"
+    otel_collector_domain = "otel.example.com"
+    helm = {
+      chart_registry                    = "oci://registry-1.docker.io/montecarlodata"
+      chart_version                     = "5.2.0"
+      install_external_secrets_operator = false
+      clickhouse                        = { backup = { enabled = true } }
+    }
   }
-  expect_failures = [var.helm]
+
+  assert {
+    condition = (
+      length(aws_iam_role.external_secrets) == 0 &&
+      length(aws_iam_role_policy.external_secrets) == 0 &&
+      output.clickhouse_backup_credentials_secret_arn == aws_secretsmanager_secret.clickhouse_backup[0].arn &&
+      output.clickhouse_backup_probe_credentials_secret_arn == aws_secretsmanager_secret.clickhouse_backup_probe[0].arn &&
+      output.clickhouse_backup_api_credentials_secret_arn == aws_secretsmanager_secret.clickhouse_backup_api[0].arn
+    )
+    error_message = "Separately managed External Secrets must receive all three secret references without the module creating its IAM role or policy."
+  }
 }
