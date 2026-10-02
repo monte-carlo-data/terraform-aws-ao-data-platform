@@ -47,6 +47,11 @@ variable "cluster" {
       regardless of whether the dedicated CH NG is active. Set explicitly to 1 to
       opt into a cost-shrunk single-node main pool when HA isn't a requirement.
       max_size remains fixed at 10 to allow autoscaling burst.
+    - main_node_group_ami_release_version: optional EKS machine-image release
+      for the main node group. Set the currently installed release to keep an
+      unrelated apply from updating these machines. When null (default), the
+      main node group continues to select the latest release on each apply.
+      Ignored when create = false.
     - endpoint_public_access: whether the EKS API server keeps its public
       endpoint. Defaults to true. The private endpoint is always enabled, so
       setting this false yields a private-only control plane — every machine
@@ -62,13 +67,14 @@ variable "cluster" {
       endpoint configuration is managed wherever that cluster is managed.
   EOT
   type = object({
-    create                       = optional(bool, true)
-    name                         = optional(string, "monte-carlo")
-    existing_cluster_name        = optional(string, null)
-    node_instance_type           = optional(string, "t3.large")
-    main_node_group_size         = optional(number, null)
-    endpoint_public_access       = optional(bool, true)
-    endpoint_public_access_cidrs = optional(list(string), ["0.0.0.0/0"])
+    create                              = optional(bool, true)
+    name                                = optional(string, "monte-carlo")
+    existing_cluster_name               = optional(string, null)
+    node_instance_type                  = optional(string, "t3.large")
+    main_node_group_size                = optional(number, null)
+    main_node_group_ami_release_version = optional(string)
+    endpoint_public_access              = optional(bool, true)
+    endpoint_public_access_cidrs        = optional(list(string), ["0.0.0.0/0"])
   })
   default = {}
 
@@ -588,7 +594,7 @@ variable "helm" {
     ClickHouse node group this module creates (see clickhouse_node_group).
     This 1.3.0 minimum is not checked automatically; a 1.2.x caller can apply
     and hit the original scheduler deadlock. Scheduled backups have a separate
-    checked minimum of helm.chart_version >= 5.2.0.
+    checked minimum of helm.chart_version >= 5.2.0; cleanup previews require >= 5.3.0.
 
     Development installs also use published charts. Pin chart_version to a
     published pre-release version with a base of 5.2.0 or later. Pre-release
@@ -609,6 +615,19 @@ variable "helm" {
     The API password and revision are stored together in Secrets Manager and
     delivered by External Secrets. Helm receives only the secret reference and
     revision, never the password.
+
+    clickhouse.backup.cleanup: optional preview of which backups could be removed.
+    Defaults: enabled = false, dry_run = true (required when enabled), keep_last = 2,
+    keep_days = 0, timeout_seconds = 1800. keep_last must be a whole number >= 1,
+    keep_days a whole number >= 0, and timeout_seconds a whole number >= 60.
+    Requires enabled backups, exactly two replicas, and a published chart based on
+    5.3.0 or later. The preview cross-checks both replicas' backup catalogs; do not
+    raise the replica count without the table-conversion prerequisites described
+    under clickhouse_replica_count and the README HA section. The preview never
+    deletes backup files. Read its report in the scheduled backup Job's logs.
+    The Job deadline adds timeout_seconds to the backup timeout plus 60 seconds;
+    with the default 10800-second backup timeout, values above 3540 extend it
+    beyond the four-hour schedule and may cause a following run to be skipped.
 
     The clustered/HA Keeper topology (keeper_availability_zones) requires
     chart_version >= "2.3.0" — the first chart version exposing the keeper.*
@@ -754,6 +773,13 @@ variable "helm" {
         suspend               = optional(bool, false)
         image                 = optional(string, null)
         api_password_revision = optional(string, "1")
+        cleanup = optional(object({
+          enabled         = optional(bool, false)
+          dry_run         = optional(bool, true)
+          keep_last       = optional(number, 2)
+          keep_days       = optional(number, 0)
+          timeout_seconds = optional(number, 1800)
+        }), {})
       }), {})
     }), {})
 
@@ -818,6 +844,28 @@ variable "helm" {
   }
 
   validation {
+    condition     = !var.helm.clickhouse.backup.cleanup.enabled || var.helm.clickhouse.backup.enabled
+    error_message = "Backup cleanup requires helm.clickhouse.backup.enabled = true."
+  }
+
+  validation {
+    condition     = !var.helm.clickhouse.backup.cleanup.enabled || var.helm.clickhouse.backup.cleanup.dry_run
+    error_message = "helm.clickhouse.backup.cleanup.dry_run must be true: this module version does not support automatic backup deletion (clickhouse-backup 2.8.1 leaves serialization.json files behind when deleting native backups). With dry_run = true, cleanup reports which backups it would delete without deleting them."
+  }
+
+  validation {
+    condition = (
+      var.helm.clickhouse.backup.cleanup.keep_last >= 1 &&
+      floor(var.helm.clickhouse.backup.cleanup.keep_last) == var.helm.clickhouse.backup.cleanup.keep_last &&
+      var.helm.clickhouse.backup.cleanup.keep_days >= 0 &&
+      floor(var.helm.clickhouse.backup.cleanup.keep_days) == var.helm.clickhouse.backup.cleanup.keep_days &&
+      var.helm.clickhouse.backup.cleanup.timeout_seconds >= 60 &&
+      floor(var.helm.clickhouse.backup.cleanup.timeout_seconds) == var.helm.clickhouse.backup.cleanup.timeout_seconds
+    )
+    error_message = "helm.clickhouse.backup.cleanup.keep_last must be a positive whole number, keep_days a nonnegative whole number, and timeout_seconds a whole number of at least 60."
+  }
+
+  validation {
     condition = var.helm.clickhouse.backup.image == null ? true : can(regex(
       "^[^[:space:]@]+@sha256:[0-9a-f]{64}$",
       var.helm.clickhouse.backup.image,
@@ -857,9 +905,9 @@ variable "clickhouse_backup" {
     resources.
 
     bucket_name must be a new, globally unique S3 bucket name. No automatic
-    expiry is configured, and this release does not delete old backups, so
-    backup files accumulate until cleanup ships. The password is generated for a
-    new backup user; supplying an existing password is not supported.
+    expiry is configured. This module never deletes backup files; they accumulate
+    until deliberately removed. The password is generated for a new backup user;
+    supplying an existing password is not supported.
     service_account_name identifies the dedicated Kubernetes service account in
     montecarlo that can assume the role. With helm.clickhouse.backup.enabled,
     the chart creates this account, copies the stored database password through

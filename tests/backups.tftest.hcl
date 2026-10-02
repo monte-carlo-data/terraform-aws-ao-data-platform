@@ -1057,6 +1057,162 @@ run "scheduled_backups_reject_published_charts_without_backup_support" {
   expect_failures = [helm_release.ao_data_platform]
 }
 
+run "cleanup_is_explicit_and_defaults_to_a_dry_run" {
+  command = plan
+  variables {
+    clickhouse_backup             = { bucket_name = "test-clickhouse-backups" }
+    clickhouse_domain             = "clickhouse.example.com"
+    otel_collector_domain         = "otel.example.com"
+    clickhouse_replica_count      = 2
+    clickhouse_availability_zones = ["us-east-1a", "us-east-1b"]
+    helm = {
+      chart_registry = "oci://registry-1.docker.io/montecarlodata"
+      chart_version  = "5.3.0"
+      clickhouse     = { backup = { enabled = true, image = "altinity/clickhouse-backup:2.8.1@sha256:08016b048f7e6035c048501315c2a788e5a782f15f168e042c7bd48d5a388cc4", cleanup = { enabled = true } } }
+    }
+  }
+  assert {
+    condition = jsonencode(yamldecode(helm_release.ao_data_platform[0].values[0]).clickhouse.backup.cleanup) == jsonencode({
+      enabled = true, dryRun = true, keepLast = 2, keepDays = 0, timeoutSeconds = 1800
+    })
+    error_message = "Cleanup must preview retention without deleting backup files."
+  }
+}
+
+run "cleanup_uses_a_published_development_chart" {
+  command = plan
+  variables {
+    clickhouse_backup             = { bucket_name = "test-clickhouse-backups" }
+    clickhouse_domain             = "clickhouse.example.com"
+    otel_collector_domain         = "otel.example.com"
+    clickhouse_replica_count      = 2
+    clickhouse_availability_zones = ["us-east-1a", "us-east-1b"]
+    helm = {
+      chart_registry = "oci://registry-1.docker.io/montecarlodata"
+      chart_version  = "5.3.0-dev.g0123456789abcdef0123456789abcdef01234567"
+      clickhouse = { backup = { enabled = true, image = "altinity/clickhouse-backup:2.8.1@sha256:08016b048f7e6035c048501315c2a788e5a782f15f168e042c7bd48d5a388cc4", cleanup = {
+        enabled = true, dry_run = true, keep_last = 3, keep_days = 30, timeout_seconds = 600
+      } } }
+    }
+  }
+  assert {
+    condition = (
+      helm_release.ao_data_platform[0].chart == "oci://registry-1.docker.io/montecarlodata/ao-data-platform" &&
+      helm_release.ao_data_platform[0].version == "5.3.0-dev.g0123456789abcdef0123456789abcdef01234567" &&
+      jsonencode(yamldecode(helm_release.ao_data_platform[0].values[0]).clickhouse.backup.cleanup) == jsonencode({
+        enabled = true, dryRun = true, keepLast = 3, keepDays = 30, timeoutSeconds = 600
+      })
+    )
+    error_message = "Non-default cleanup settings must reach the exact published development chart."
+  }
+}
+
+run "cleanup_rejects_published_charts_without_cleanup_support" {
+  command = plan
+  variables {
+    clickhouse_backup             = { bucket_name = "test-clickhouse-backups" }
+    clickhouse_domain             = "clickhouse.example.com"
+    otel_collector_domain         = "otel.example.com"
+    clickhouse_replica_count      = 2
+    clickhouse_availability_zones = ["us-east-1a", "us-east-1b"]
+    helm = {
+      chart_registry = "oci://registry-1.docker.io/montecarlodata"
+      chart_version  = "5.2.0"
+      clickhouse     = { backup = { enabled = true, image = "altinity/clickhouse-backup:2.8.1@sha256:08016b048f7e6035c048501315c2a788e5a782f15f168e042c7bd48d5a388cc4", cleanup = { enabled = true } } }
+    }
+  }
+  expect_failures = [helm_release.ao_data_platform]
+}
+
+run "cleanup_rejects_actual_deletion_even_with_a_pinned_stock_image" {
+  command = plan
+  variables {
+    clickhouse_backup             = { bucket_name = "test-clickhouse-backups" }
+    clickhouse_domain             = "clickhouse.example.com"
+    otel_collector_domain         = "otel.example.com"
+    clickhouse_replica_count      = 2
+    clickhouse_availability_zones = ["us-east-1a", "us-east-1b"]
+    helm = {
+      chart_registry = "oci://registry-1.docker.io/montecarlodata"
+      chart_version  = "5.3.0"
+      clickhouse = { backup = {
+        enabled = true
+        image   = "altinity/clickhouse-backup:2.8.1@sha256:08016b048f7e6035c048501315c2a788e5a782f15f168e042c7bd48d5a388cc4"
+        cleanup = { enabled = true, dry_run = false }
+      } }
+    }
+  }
+  expect_failures = [var.helm]
+}
+
+run "backups_without_cleanup_omit_cleanup_values" {
+  command = plan
+  variables {
+    clickhouse_backup     = { bucket_name = "test-clickhouse-backups" }
+    clickhouse_domain     = "clickhouse.example.com"
+    otel_collector_domain = "otel.example.com"
+    helm = {
+      chart_registry = "oci://registry-1.docker.io/montecarlodata"
+      chart_version  = "5.2.0"
+      clickhouse = { backup = {
+        enabled = true
+        image   = "altinity/clickhouse-backup:2.8.1@sha256:08016b048f7e6035c048501315c2a788e5a782f15f168e042c7bd48d5a388cc4"
+      } }
+    }
+  }
+  assert {
+    condition = (
+      yamldecode(helm_release.ao_data_platform[0].values[0]).clickhouse.backup.sidecar.image == var.helm.clickhouse.backup.image &&
+      !can(yamldecode(helm_release.ao_data_platform[0].values[0]).clickhouse.backup.cleanup)
+    )
+    error_message = "Cleanup is off by default and must not require chart 5.3.0."
+  }
+}
+
+run "cleanup_rejects_one_clickhouse_replica" {
+  command = plan
+  variables {
+    clickhouse_backup     = { bucket_name = "test-clickhouse-backups" }
+    clickhouse_domain     = "clickhouse.example.com"
+    otel_collector_domain = "otel.example.com"
+    helm = {
+      chart_registry = "oci://registry-1.docker.io/montecarlodata"
+      chart_version  = "5.3.0"
+      clickhouse     = { backup = { enabled = true, image = "altinity/clickhouse-backup:2.8.1@sha256:08016b048f7e6035c048501315c2a788e5a782f15f168e042c7bd48d5a388cc4", cleanup = { enabled = true } } }
+    }
+  }
+  expect_failures = [helm_release.ao_data_platform]
+}
+
+run "cleanup_rejects_three_clickhouse_replicas" {
+  command = plan
+  variables {
+    clickhouse_replica_count      = 3
+    clickhouse_availability_zones = ["us-east-1a", "us-east-1b", "us-east-1c"]
+    clickhouse_backup             = { bucket_name = "test-clickhouse-backups" }
+    clickhouse_domain             = "clickhouse.example.com"
+    otel_collector_domain         = "otel.example.com"
+    helm = {
+      chart_registry = "oci://registry-1.docker.io/montecarlodata"
+      chart_version  = "5.3.0"
+      clickhouse     = { backup = { enabled = true, image = "altinity/clickhouse-backup:2.8.1@sha256:08016b048f7e6035c048501315c2a788e5a782f15f168e042c7bd48d5a388cc4", cleanup = { enabled = true } } }
+    }
+  }
+  expect_failures = [helm_release.ao_data_platform]
+}
+
+run "cleanup_rejects_zero_kept_backups" {
+  command = plan
+  variables { helm = { deploy_charts = false, clickhouse = { backup = { cleanup = { keep_last = 0 } } } } }
+  expect_failures = [var.helm]
+}
+
+run "cleanup_rejects_timeouts_below_one_minute" {
+  command = plan
+  variables { helm = { deploy_charts = false, clickhouse = { backup = { cleanup = { timeout_seconds = 59 } } } } }
+  expect_failures = [var.helm]
+}
+
 run "scheduled_backups_accept_next_major_chart_version" {
   command = plan
 
@@ -1266,6 +1422,80 @@ run "published_charts_require_version" {
   }
 
   expect_failures = [var.helm]
+}
+
+run "cleanup_accepts_next_major_chart_version" {
+  command = plan
+  variables {
+    clickhouse_backup             = { bucket_name = "test-clickhouse-backups" }
+    clickhouse_domain             = "clickhouse.example.com"
+    otel_collector_domain         = "otel.example.com"
+    clickhouse_replica_count      = 2
+    clickhouse_availability_zones = ["us-east-1a", "us-east-1b"]
+    helm = {
+      chart_registry = "oci://registry-1.docker.io/montecarlodata"
+      chart_version  = "6.0.0"
+      clickhouse = { backup = { enabled = true, image = "altinity/clickhouse-backup:2.8.1@sha256:08016b048f7e6035c048501315c2a788e5a782f15f168e042c7bd48d5a388cc4", cleanup = {
+        enabled = true, dry_run = true, keep_last = 3, keep_days = 30, timeout_seconds = 600
+      } } }
+    }
+  }
+  assert {
+    condition = (
+      helm_release.ao_data_platform[0].chart == "oci://registry-1.docker.io/montecarlodata/ao-data-platform" &&
+      helm_release.ao_data_platform[0].version == "6.0.0" &&
+      jsonencode(yamldecode(helm_release.ao_data_platform[0].values[0]).clickhouse.backup.cleanup) == jsonencode({
+        enabled = true, dryRun = true, keepLast = 3, keepDays = 30, timeoutSeconds = 600
+      })
+    )
+    error_message = "Non-default cleanup settings must reach the newer published chart."
+  }
+}
+
+run "cleanup_accepts_double_digit_minor_chart_version" {
+  command = plan
+  variables {
+    clickhouse_backup             = { bucket_name = "test-clickhouse-backups" }
+    clickhouse_domain             = "clickhouse.example.com"
+    otel_collector_domain         = "otel.example.com"
+    clickhouse_replica_count      = 2
+    clickhouse_availability_zones = ["us-east-1a", "us-east-1b"]
+    helm = {
+      chart_registry = "oci://registry-1.docker.io/montecarlodata"
+      chart_version  = "5.10.0"
+      clickhouse = { backup = { enabled = true, image = "altinity/clickhouse-backup:2.8.1@sha256:08016b048f7e6035c048501315c2a788e5a782f15f168e042c7bd48d5a388cc4", cleanup = {
+        enabled = true, dry_run = true, keep_last = 3, keep_days = 30, timeout_seconds = 600
+      } } }
+    }
+  }
+  assert {
+    condition = (
+      helm_release.ao_data_platform[0].chart == "oci://registry-1.docker.io/montecarlodata/ao-data-platform" &&
+      helm_release.ao_data_platform[0].version == "5.10.0" &&
+      jsonencode(yamldecode(helm_release.ao_data_platform[0].values[0]).clickhouse.backup.cleanup) == jsonencode({
+        enabled = true, dryRun = true, keepLast = 3, keepDays = 30, timeoutSeconds = 600
+      })
+    )
+    error_message = "Non-default cleanup settings must reach the newer published chart."
+  }
+}
+
+run "cleanup_rejects_older_development_charts" {
+  # The backup version requirement and other prerequisites are satisfied.
+  command = plan
+  variables {
+    clickhouse_backup             = { bucket_name = "test-clickhouse-backups" }
+    clickhouse_domain             = "clickhouse.example.com"
+    otel_collector_domain         = "otel.example.com"
+    clickhouse_replica_count      = 2
+    clickhouse_availability_zones = ["us-east-1a", "us-east-1b"]
+    helm = {
+      chart_registry = "oci://registry-1.docker.io/montecarlodata"
+      chart_version  = "5.2.0-dev.gabcdef1"
+      clickhouse     = { backup = { enabled = true, image = "altinity/clickhouse-backup:2.8.1@sha256:08016b048f7e6035c048501315c2a788e5a782f15f168e042c7bd48d5a388cc4", cleanup = { enabled = true } } }
+    }
+  }
+  expect_failures = [helm_release.ao_data_platform]
 }
 
 run "probe_password_and_revision_are_wired_without_exposing_passwords" {
@@ -1542,5 +1772,57 @@ run "installed_backups_support_a_separately_managed_secrets_operator" {
       output.clickhouse_backup_api_credentials_secret_arn == aws_secretsmanager_secret.clickhouse_backup_api[0].arn
     )
     error_message = "Separately managed External Secrets must receive all three secret references without the module creating its IAM role or policy."
+  }
+}
+
+run "cleanup_rejects_disabled_backups" {
+  command = plan
+  variables { helm = { deploy_charts = false, clickhouse = { backup = { cleanup = { enabled = true } } } } }
+  expect_failures = [var.helm]
+}
+
+run "cleanup_rejects_negative_keep_days" {
+  command = plan
+  variables { helm = { deploy_charts = false, clickhouse = { backup = { cleanup = { keep_days = -1 } } } } }
+  expect_failures = [var.helm]
+}
+
+run "cleanup_rejects_fractional_keep_last" {
+  command = plan
+  variables { helm = { deploy_charts = false, clickhouse = { backup = { cleanup = { keep_last = 1.5 } } } } }
+  expect_failures = [var.helm]
+}
+
+run "cleanup_rejects_fractional_keep_days" {
+  command = plan
+  variables { helm = { deploy_charts = false, clickhouse = { backup = { cleanup = { keep_days = 0.5 } } } } }
+  expect_failures = [var.helm]
+}
+
+run "cleanup_rejects_fractional_timeout" {
+  command = plan
+  variables { helm = { deploy_charts = false, clickhouse = { backup = { cleanup = { timeout_seconds = 60.5 } } } } }
+  expect_failures = [var.helm]
+}
+
+run "cleanup_accepts_retention_and_timeout_minimums" {
+  command = plan
+  variables {
+    clickhouse_backup             = { bucket_name = "test-clickhouse-backups" }
+    clickhouse_domain             = "clickhouse.example.com"
+    otel_collector_domain         = "otel.example.com"
+    clickhouse_replica_count      = 2
+    clickhouse_availability_zones = ["us-east-1a", "us-east-1b"]
+    helm = {
+      chart_registry = "oci://registry-1.docker.io/montecarlodata"
+      chart_version  = "5.3.0"
+      clickhouse     = { backup = { enabled = true, image = "altinity/clickhouse-backup:2.8.1@sha256:08016b048f7e6035c048501315c2a788e5a782f15f168e042c7bd48d5a388cc4", cleanup = { enabled = true, keep_last = 1, keep_days = 0, timeout_seconds = 60 } } }
+    }
+  }
+  assert {
+    condition = jsonencode(yamldecode(helm_release.ao_data_platform[0].values[0]).clickhouse.backup.cleanup) == jsonencode({
+      enabled = true, dryRun = true, keepLast = 1, keepDays = 0, timeoutSeconds = 60
+    })
+    error_message = "Cleanup must accept and pass through keep_last = 1, keep_days = 0, and timeout_seconds = 60."
   }
 }

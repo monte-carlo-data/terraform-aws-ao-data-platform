@@ -336,7 +336,7 @@ The module creates:
   default, and a policy rejecting unencrypted connections. A separate KMS key
   encrypts backup files, with automatic key rotation and S3 Bucket Keys enabled.
   No automatic expiry is configured, and this release does not delete old
-  backups, so backup files accumulate until cleanup ships.
+  backups. Backup files accumulate until deliberately removed.
 - A separate IAM role that can list, read, write, delete, and abort incomplete
   uploads only in that bucket in this AWS account, plus `kms:GenerateDataKey` and `kms:Decrypt` on
   the backup key for uploads and restores. Only the named service account in
@@ -390,13 +390,14 @@ conflicting self-managed resources remain.
 
 **Current limits.** This release uses one fixed schedule every four hours UTC:
 the first successful run each UTC day is full, and later runs save changes from
-an earlier backup. The module does not expose schedule customization. This
-release does not delete old backups and does not yet document a tested restore
-procedure. Storage grows by roughly one full backup per day plus incremental
-backups, so watch the bucket size from the first day. There are no backup alerts
-in this release: failed Jobs are visible in Kubernetes, and a missed run might
-not produce a failed Job at all. Check that scheduled backups complete. Do not
-add S3 expiry on current files independently: incremental backups can still need
+an earlier backup. The module does not expose schedule customization. Cleanup
+is optional and disabled by default; when enabled, it previews deletions only.
+Automatic deletion is not supported by this module. A tested restore
+procedure is not yet documented. Storage grows by roughly one full backup per
+day plus incremental backups, so watch the bucket size from the first day.
+Check backup Job results in Kubernetes; a missed run might not produce a failed
+Job. This module does not create backup alerts. Do not add
+S3 expiry on current files independently: incremental backups can still need
 their older full backup.
 
 **Backup software and passwords.** The chart uses the standard Altinity software
@@ -461,6 +462,68 @@ To rotate the API password:
    sending a real password to the API. Port 7171 accepts network traffic only
    from the chart's backup Jobs.
 
+**Cleanup previews.** A published chart based on 5.3.0 or later can report which
+old backups could be removed after a successful scheduled backup. Cleanup is off
+by default and does not delete files. It requires enabled backups and exactly
+two ClickHouse replicas because it cross-checks both replicas' backup catalogs.
+Do not increase the replica count just to enable the preview: existing tables
+must first use replicated engines. Read `clickhouse_replica_count` and
+[Clustered / HA topology](#clustered--ha-topology) before changing it.
+
+```hcl
+# Inside helm.clickhouse.backup, alongside enabled = true:
+cleanup = {
+  enabled         = true
+  dry_run         = true # Required: preview only.
+  keep_last       = 2    # Protect at least this many newest backups and their dependencies.
+  keep_days       = 0    # Also protect backups within this many days; 0 disables the age rule.
+  timeout_seconds = 1800
+}
+```
+
+`keep_last` must be a whole number of at least 1. `keep_days` must be a whole
+number of at least 0. The preview protects the newest `keep_last` backups, those
+within `keep_days`, and any earlier backups they depend on. Test changes in a
+non-production environment first. No S3 file-expiry rule is created. This module
+never deletes backups; files accumulate until deliberately removed. The standard
+`clickhouse-backup` 2.8.1 image leaves `serialization.json` files behind when
+deleting native backups. Terraform therefore rejects enabled cleanup with
+`dry_run = false`. Do not substitute S3 expiry for cleanup that understands which
+full backups are still needed.
+
+Read the preview in the scheduled backup Job's logs. Find the latest
+`otel-backup` Job, then use its name:
+
+```sh
+kubectl -n montecarlo get jobs --sort-by=.metadata.creationTimestamp
+kubectl -n montecarlo logs job/<latest-otel-backup-job>
+```
+
+The line starts with `Backup cleanup:`. For example (other report fields omitted):
+
+```text
+Backup cleanup: {"delete": ["ao-otel-full-20260101T000000Z-0123abcd"], "keep_days": 0, "keep_last": 2, "kept": ["ao-otel-full-20260102T000000Z-4567abcd", "ao-otel-incremental-20260102T040000Z-89abcdef"]}
+```
+
+`delete` lists candidates only; nothing is removed. Incomplete local entries and
+entries missing from the remote catalog are reported separately as `broken_local`
+and `local_only`. They are left untouched. If a preview cannot finish, the Job
+logs `Backup cleanup preview stopped: ...` after
+`Verified completed ... backup ... in S3.` and still succeeds because the backup
+itself completed. A backup failure still fails the Job. Read both messages when
+checking backup and preview results.
+
+`timeout_seconds` must be a whole number of at least 60. It is added to the
+backup timeout and 60 seconds when setting the Job deadline. With the default
+10800-second backup timeout, cleanup values above 3540 extend the deadline past
+the four-hour schedule. Since overlapping Jobs are forbidden and a missed start
+is retried for only 15 minutes, a slow preview can make the following run be
+skipped. Choose a timeout that leaves room before the next scheduled backup.
+
+Cleanup requires a published chart based on 5.3.0 or later containing these
+preview checks, including development builds. Existing backup installations can
+keep chart 5.2.0 when cleanup is off.
+
 Changing an existing bucket's default encryption affects new uploads only;
 existing files keep their previous encryption. Backup clients can use the bucket
 default by leaving their encryption settings unset. Explicit encryption settings
@@ -469,9 +532,10 @@ must specify both `aws:kms` and this backup key's ARN; other settings are reject
 **Keeping or removing backups.** Keep `clickhouse_backup` enabled while backups
 are needed. To remove the backup software, first apply
 `helm.clickhouse.backup.suspend = true` and wait for running operations to finish.
-Then set `helm.clickhouse.backup.enabled = false`, review the plan, and apply.
-This removes the backup software and API secret and restarts the ClickHouse
-pods; use the same maintenance-window precautions as when enabling backups.
+Then set `helm.clickhouse.backup.cleanup.enabled = false` and
+`helm.clickhouse.backup.enabled = false`. Review the plan and apply. This removes
+the backup software and API secret and restarts the ClickHouse pods; use the
+same maintenance-window precautions as when enabling backups.
 The backup bucket, key, role, and backup and probe database passwords remain
 until you also unset `clickhouse_backup`. Only remove that block after deciding
 how to preserve or discard the existing backups as described below.
@@ -756,6 +820,7 @@ To use a StorageClass you manage outside this module, set `clickhouse_storage_cl
 | `cluster.endpoint_public_access` | `bool` | `true` | Whether the EKS API server keeps its public endpoint. The private endpoint is always enabled. Set `false` for a private-only control plane — every machine running Terraform/kubectl (CI included) must then reach the API over a private path. See "Restricting the EKS API endpoint". Only applies when `cluster.create = true`. |
 | `cluster.endpoint_public_access_cidrs` | `list(string)` | `["0.0.0.0/0"]` | CIDR blocks allowed to reach the public API endpoint. Include the egress CIDRs of every machine that runs Terraform or kubectl against the cluster. See "Restricting the EKS API endpoint". Only applies when `cluster.create = true`. |
 | `cluster.main_node_group_size` | `number` | `null` (resolves to 2) | Optional explicit size (desired + min) for the main EKS managed node group. When `null` (default), resolves to `2` — keeps a 2-node HA floor on the stateless tier even when the dedicated CH NG is active. Set explicitly to `1` to opt into a cost-shrunk single-node main pool. Validated to the range `[1, 10]` when set; `max_size` stays at 10 for autoscaling burst. |
+| `cluster.main_node_group_ami_release_version` | `string` | `null` | Optional EKS machine-image release for the main node group. Set the installed release to prevent unrelated applies from updating these machines. When unset, the main node group keeps its existing behavior of selecting the latest release on each apply. Ignored when `cluster.create = false`. |
 | `clickhouse_node_group` | `object` | `{}` (all defaults) | Configuration for the dedicated single-AZ ClickHouse node group. Shape: `{ availability_zone = optional(string), instance_type = optional(string, "r5.xlarge"), use_latest_ami_release_version = optional(bool, false), ami_release_version = optional(string) }`. The dedicated NG is auto-created when `helm.deploy_charts = true` AND `cluster.create = true`, and managed while `manage_legacy_clickhouse_node_group = true` — see the "Dedicated ClickHouse node group" section. `availability_zone`: when null, defaults to the first AZ from `data.aws_availability_zones.available` (alphabetical) — override when the ClickHouse PV is in a different AZ (EBS volumes are AZ-locked). `instance_type`: EC2 instance type for the dedicated node; defaults to `r5.xlarge`. `use_latest_ami_release_version`: defaults to `false` — the CH NG is no-drift pinned, so its AMI won't change on an unrelated apply (see "Pinned node group AMIs"). `ami_release_version`: optional explicit AMI build to pin to (e.g. `"1.35.5-20260527"`); `null` (default) still prevents drift but records no specific build. Has no effect when `cluster.create = false`. |
 | `clickhouse_availability_zones` | `list(string)` | `[]` | Explicit AZ names for the per-AZ ClickHouse node groups of the clustered/HA topology (one `clickhouse-<az>` node group per entry). Empty (default) keeps the single-instance layout. Element 0 must be the AZ of the existing ClickHouse volume (enforced by a plan-time precondition; see `enforce_clickhouse_volume_az_match`). When `create_vpc = true`, entries must be among the first `length(networking.private_subnet_cidrs)` of the region's available AZs. Requires `cluster.create = true` (no node groups are created for existing clusters). See "Clustered / HA topology". |
 | `keeper_availability_zones` | `list(string)` | `[]` | Explicit AZ names for the per-AZ ClickHouse Keeper node groups (one voter per entry). Must be an **odd** count across distinct AZs for quorum (3 typical, 1 for dev). Empty (default) creates no Keeper node groups. The list length is the single source of truth for both the voter node-group count and the chart's `keeper.replicasCount`. Requires `cluster.create = true` — rejected by a plan-time precondition on existing clusters. See "Clustered / HA topology". |
@@ -781,7 +846,7 @@ To use a StorageClass you manage outside this module, set `clickhouse_storage_cl
 | `storage_class_clickhouse_gp3` | `object` | `{}` (all defaults) | Parameters for the dedicated `clickhouse-gp3` StorageClass this module creates (never modifies the shared `gp3` class). Shape: `{ iops = optional(number, 3000), throughput = optional(number, 125) }`. Defaults to the `gp3` baseline; raise per measured ClickHouse merge load. Validated to `gp3` limits (IOPS 3000–16000, throughput 125–1000 MB/s, throughput ≤ 0.25 × IOPS). Applies only to newly provisioned volumes. |
 | `helm.deploy_charts` | `bool` | `true` | Deploy the `ao-data-platform` chart from Terraform |
 | `helm.chart_registry` | `string` | `null` | OCI registry URL for the `ao-data-platform` chart (e.g. `oci://123456789012.dkr.ecr.us-east-1.amazonaws.com`). Required when `deploy_charts = true`. |
-| `helm.chart_version` | `string` | `null` | Already-published `ao-data-platform` chart version. Required when `deploy_charts = true`. Backups require an exact release or development version with base version >= 5.2.0; ranges and incomplete versions are rejected. See [ClickHouse backups](#clickhouse-backups). |
+| `helm.chart_version` | `string` | `null` | Already-published `ao-data-platform` chart version. Required when `deploy_charts = true`. Backups require an exact release or development version with base version >= 5.2.0; cleanup previews require >= 5.3.0. Ranges and incomplete versions are rejected. See [ClickHouse backups](#clickhouse-backups). |
 | `helm.install_aws_load_balancer_controller` | `bool` | `true` | Skip if LBC is already installed in the cluster |
 | `helm.install_cert_manager` | `bool` | `true` | Skip if cert-manager is already installed |
 | `helm.install_external_secrets_operator` | `bool` | `true` | Skip if ESO is already installed |
@@ -799,6 +864,7 @@ To use a StorageClass you manage outside this module, set `clickhouse_storage_cl
 | `helm.clickhouse.backup.suspend` | `bool` | `false` | Pause new scheduled backup runs while keeping the installation. Running work continues. Persist `true` before maintenance; enabling with the default `false` starts the schedule on the first apply. |
 | `helm.clickhouse.backup.image` | `string` | `null` | Optional image override. Omit to use the chart's tested Altinity image. An override must include a SHA-256 digest; another registry or repository is allowed, and the chart checks that the digest matches its tested image. The module does not build an image. |
 | `helm.clickhouse.backup.api_password_revision` | `string` | `"1"` | Changing this generates a new API password, updates the password and revision together in Secrets Manager, and restarts the ClickHouse pods. Pause backups in a separate apply before changing it. See the rotation steps in [ClickHouse backups](#clickhouse-backups). |
+| `helm.clickhouse.backup.cleanup` | `object` | `{ enabled = false, dry_run = true, keep_last = 2, keep_days = 0, timeout_seconds = 1800 }` | Preview backup removal in the scheduled Job logs. Requires backups enabled, exactly two replicas with replicated tables, and a published chart based on >= 5.3.0. `dry_run` must remain true when enabled; this module never deletes backups. `keep_last` is an integer >= 1; `keep_days` an integer >= 0; `timeout_seconds` an integer >= 60. The timeout adds to the backup Job deadline and can delay the next scheduled run; see [Cleanup previews](#clickhouse-backups). |
 | `clickhouse_passwords` | `object` (sensitive) | `{}` (all auto-generated) | Passwords for the ClickHouse SQL users. Shape: `{ admin = optional(string), otel = optional(string), monte_carlo = optional(string), schema_owner = optional(string), llm_worker = optional(string), readonly_user = optional(string) }`. Any field left null is auto-generated. Marked `sensitive`, so caller-supplied values are redacted in plan/apply output and CI logs — supply via a `.tfvars` file or `TF_VAR_clickhouse_passwords`. Stored in Secrets Manager and synced into the cluster by ESO; never passed through Helm values. Values remain readable in Terraform state — protect state accordingly. |
 | `helm.opentelemetry_collector.resources` | `object` | `null` | Kubernetes resource requests/limits for the OTel Collector pods. Same shape as `helm.clickhouse.resources`. Omit to use chart defaults. |
 | `helm.opentelemetry_collector.replica_count` | `number` | `null` | Optional override for the OTel Collector replica count. `null` (default) lets the chart control it. **`0` is not honored by the chart** — its collector template treats `0` as unset and deploys the default count; to stop ingest for a maintenance window, act upstream (deny consumption on the SQS queues feeding the awss3 receivers, or pause OTLP senders). Non-zero overrides work as expected. |
@@ -807,7 +873,7 @@ To use a StorageClass you manage outside this module, set `clickhouse_storage_cl
 | `helm.llm_worker.resources` | `object` | `null` | Kubernetes resource requests/limits for the LLM-worker pods. Same shape as `helm.clickhouse.resources`. Omit to use chart defaults. |
 | `trace_export_ingest` | `object` | `null` | Optional trace-export ingest leg — see [Trace-export ingest leg](#trace-export-ingest-leg). Shape: `{ producer_execution_role_arn = string, agent_role_arn = optional(string), bucket_name = optional(string), prefix = optional(string, "traces/"), lifecycle_days = optional(number, 3), kms_key_arn = optional(string) }`. `producer_execution_role_arn` is the external role trusted to assume the writer role (exact ARN or role-name wildcard; literal account ID enforced); the trust condition's `sts:ExternalId` value comes from the separate `trace_export_external_id` variable, which is required when this block is set. `agent_role_arn` optionally grants one additional role `s3:PutObject` on the prefix via the bucket policy. `prefix` accepts multi-segment values (`"traces/tenant-a/"`) and is normalized to one trailing `/`. `kms_key_arn` switches the bucket to SSE-KMS (Bucket Keys on) and widens writer/collector policies accordingly. Unset (default), no resources are created and the plan is unchanged from previous releases. |
 | `trace_export_external_id` | `string` (sensitive) | `null` | The `sts:ExternalId` value the external producer supplies when assuming the trace-export writer role (min 8 chars). Required when `trace_export_ingest` is set. Marked `sensitive`, so caller-supplied values are redacted in plan/apply output and CI logs — supply via a `.tfvars` file or `TF_VAR_trace_export_external_id`. Values remain readable in Terraform state — protect state accordingly. |
-| `clickhouse_backup` | `object` | `null` | Optional backup bucket, scoped IAM role, and generated backup and probe database passwords for a fresh backup installation. Requires `bucket_name`; `service_account_name` defaults to `clickhouse-backup` and cannot be `default`, `opentelemetry-collector`, `llm-worker`, `otel-backup-job`, or `clickhouse-backup-monitor`. No automatic expiry is configured, and this release does not delete old backups. Storage alone does not run backups: set `helm.clickhouse.backup.enabled = true` to install the software, service account and database users. See [ClickHouse backups](#clickhouse-backups). |
+| `clickhouse_backup` | `object` | `null` | Optional backup bucket, scoped IAM role, and generated backup and probe database passwords for a fresh backup installation. Requires `bucket_name`; `service_account_name` defaults to `clickhouse-backup` and cannot be `default`, `opentelemetry-collector`, `llm-worker`, `otel-backup-job`, or `clickhouse-backup-monitor`. No automatic expiry is configured; this module never deletes backup files, which accumulate until deliberately removed. Storage alone does not run backups: set `helm.clickhouse.backup.enabled = true` to install the software, service account and database users. See [ClickHouse backups](#clickhouse-backups). |
 
 ## Outputs
 
@@ -915,7 +981,7 @@ unrelated apply.
 
 Every stateful node group pins its AMI — the dedicated ClickHouse node group,
 the per-AZ ClickHouse node groups, and the Keeper node groups — while the main
-node group tracks the latest EKS-optimized AMI. This split is deliberate:
+node group tracks the latest EKS-optimized AMI unless explicitly pinned:
 
 - **Stateful node groups — pinned (`use_latest_ami_release_version = false`,
   the default on `clickhouse_node_group`, `clickhouse_ha_node_group`, and
@@ -928,11 +994,15 @@ node group tracks the latest EKS-optimized AMI. This split is deliberate:
   moment AWS publishes a new AMI; on the clustered topology that could roll
   every Keeper voter or ClickHouse replica from a single unrelated apply.
   Pinning removes that trigger: the AMI changes only when you change it.
-- **Main node group — latest (unpinned).** It hosts only stateless workloads,
-  which reschedule without downtime, so it keeps AWS's free security
-  auto-patching.
+- **Main node group — latest by default.** It hosts the application and cluster
+  controllers. An apply can replace these machines when AWS publishes a new
+  recommended image. Set `cluster.main_node_group_ami_release_version` to the
+  installed release to keep a software-only update from also replacing them.
+  Setting a different release schedules a machine update; setting it back to
+  `null` returns to selecting the latest release. While pinned, update this
+  setting deliberately to receive security fixes.
 
-`ami_release_version` on each of those variables is the explicit build to pin
+For the stateful node groups, `ami_release_version` is the explicit build to pin
 to (e.g. `"1.35.5-20260527"`). Leaving it `null` (the default) still prevents
 drift — nodes keep whatever AMI they already run — but records no specific
 version. Set an explicit build to make the pin auditable and to perform
@@ -984,8 +1054,9 @@ version and its AMI build must share a minor — EKS rejects, for example, a
 `1.35.x` AMI on a `1.36` node group. So when you bump `kubernetes_version`, bump
 **every pinned `ami_release_version` in use** — `clickhouse_node_group`, and on
 the clustered topology also `clickhouse_ha_node_group` and `keeper_node_group` —
-to a matching-minor build **in the same apply**. Leaving any pinned node group
-on the old minor fails the apply. The module does not expose a per-node-group
+to a matching-minor build **in the same apply**. Include
+`cluster.main_node_group_ami_release_version` when it is set. Leaving any pinned
+node group on the old minor fails the apply. The module does not expose a per-node-group
 Kubernetes version, so the control plane and all pinned node groups move
 together; coupling the values in one apply replaces each node once.
 
