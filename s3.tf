@@ -208,9 +208,9 @@ resource "aws_s3_bucket_policy" "clickhouse_backup" {
         ]
         Condition = { Bool = { "aws:SecureTransport" = "false" } }
       },
-      # Omitted encryption headers use the bucket's default key. In a Deny,
-      # StringNotEqualsIfExists also matches omitted headers, so require
-      # their presence before rejecting an explicit override.
+      # Omitted encryption headers use the bucket's default key. Negated
+      # operators (StringNotEquals, with or without IfExists) match absent keys,
+      # so the Null guard limits each Deny to explicit overrides.
       {
         Sid       = "DenyNonKmsEncryption"
         Effect    = "Deny"

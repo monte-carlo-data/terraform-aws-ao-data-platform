@@ -274,8 +274,7 @@ run "backup_bucket_rejects_explicit_encryption_overrides" {
   }
 
   # Check the actual AWS condition structure, without inventing a second policy
-  # evaluator. Header-presence guards matter: StringNotEqualsIfExists in a Deny
-  # would also reject uploads that rely on the bucket's default encryption.
+  # evaluator. See the policy comment in s3.tf for why the Null guards are needed.
   assert {
     condition = jsonencode({
       for statement in jsondecode(aws_s3_bucket_policy.clickhouse_backup[0].policy).Statement :
@@ -539,6 +538,30 @@ run "backup_rejects_uppercase_bucket" {
   expect_failures = [var.clickhouse_backup]
 }
 
+run "backup_rejects_64_character_bucket" {
+  command = plan
+
+  variables {
+    clickhouse_backup = {
+      bucket_name = "backup-${join("", [for _ in range(57) : "a"])}"
+    }
+  }
+
+  expect_failures = [var.clickhouse_backup]
+}
+
+run "backup_rejects_2_character_bucket" {
+  command = plan
+
+  variables {
+    clickhouse_backup = {
+      bucket_name = "ab"
+    }
+  }
+
+  expect_failures = [var.clickhouse_backup]
+}
+
 run "backup_rejects_reserved_bucket_prefix_xn" {
   command = plan
 
@@ -682,6 +705,32 @@ run "backup_rejects_worker_service_account" {
     clickhouse_backup = {
       bucket_name          = "test-clickhouse-backups"
       service_account_name = "llm-worker"
+    }
+  }
+
+  expect_failures = [var.clickhouse_backup]
+}
+
+run "backup_rejects_scheduler_service_account" {
+  command = plan
+
+  variables {
+    clickhouse_backup = {
+      bucket_name          = "test-clickhouse-backups"
+      service_account_name = "otel-backup-job"
+    }
+  }
+
+  expect_failures = [var.clickhouse_backup]
+}
+
+run "backup_rejects_monitor_service_account" {
+  command = plan
+
+  variables {
+    clickhouse_backup = {
+      bucket_name          = "test-clickhouse-backups"
+      service_account_name = "clickhouse-backup-monitor"
     }
   }
 

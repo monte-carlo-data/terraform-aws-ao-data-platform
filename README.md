@@ -292,14 +292,16 @@ The module creates:
 - A dedicated S3 bucket with public access blocked, AWS KMS encryption by
   default, and a policy rejecting unencrypted connections. A separate KMS key
   encrypts backup files, with automatic key rotation and S3 Bucket Keys enabled.
-  There are no automatic file-expiry rules. Files remain until cleanup is
-  configured in the backup software or they are deliberately deleted.
+  No automatic expiry is configured, and this release does not delete old
+  backups, so backup files accumulate until cleanup ships.
 - A separate IAM role that can list, read, write, delete, and abort incomplete
   uploads only in that bucket in this AWS account, plus `kms:GenerateDataKey` and `kms:Decrypt` on
   the backup key for uploads and restores. Only the named service account in
   this cluster's `montecarlo` namespace can assume it. Use a dedicated account;
-  `default`, `opentelemetry-collector`, and `llm-worker` are rejected so existing
-  workloads cannot inherit backup access. Existing workload roles are unchanged.
+  `default`, `opentelemetry-collector`, `llm-worker`, `otel-backup-job`, and
+  `clickhouse-backup-monitor` are rejected so other workloads cannot inherit
+  backup access or share an account with the backup service. Existing workload
+  roles are unchanged.
 - A generated 32-character password at
   `<cluster>/clickhouse/backup-credentials` in Secrets Manager, encrypted with
   the module's existing secrets key. When the module installs External Secrets
@@ -335,7 +337,12 @@ must specify both `aws:kms` and this backup key's ARN; other settings are reject
 are needed. `force_destroy = false` prevents Terraform from deleting a nonempty
 bucket, and Terraform deletes the bucket before scheduling deletion of its key.
 This is not full protection against teardown: Terraform can still remove
-the bucket policy, access settings, and password secret before the bucket fails.
+the bucket policy, public-access and ownership settings, encryption configuration,
+KMS alias, IAM role and policy, and password secret before the bucket fails.
+Removing the encryption configuration resets the bucket default to S3-managed
+encryption (SSE-S3), so new uploads that rely on the default no longer use the
+backup key. After a failed teardown, keep backup jobs stopped until the bucket
+protections and access permissions are restored.
 The secret is deleted immediately; the backup key has a 30-day deletion window.
 Scheduling key deletion makes it unusable immediately, and after deletion its
 encrypted files cannot be recovered.
@@ -356,7 +363,22 @@ operations to finish, delete the files, then review the Terraform removal plan.
 Do not empty the bucket merely to get a failed destroy to finish.
 
 **Recovering a key pending deletion.** Use the deployment's AWS profile and region.
-Find the original key ARN in the KMS console or, while it remains in state, run:
+If Terraform scheduled deletion, it removes the key from state and may already
+have deleted its alias. Find the original key ARN from a backup object that still
+exists, using its bucket name and full object key:
+
+```bash
+aws s3api head-object --bucket '<backup-bucket>' --key '<existing-backup-object>' \
+  --query 'SSEKMSKeyId' --output text
+```
+
+If no suitable object remains, open CloudTrail **Event history** in the key's
+region, filter **Event name** to `ScheduleKeyDeletion`, and inspect the matching
+event's request and response to find the original key. Do not use a replacement
+key that happens to have the same alias.
+
+If deletion was scheduled outside Terraform and the key still remains in state,
+you can instead run:
 
 ```bash
 terraform state show 'module.ao_data_platform.aws_kms_key.clickhouse_backup[0]'
@@ -635,7 +657,7 @@ To use a StorageClass you manage outside this module, set `clickhouse_storage_cl
 | `helm.llm_worker.resources` | `object` | `null` | Kubernetes resource requests/limits for the LLM-worker pods. Same shape as `helm.clickhouse.resources`. Omit to use chart defaults. |
 | `trace_export_ingest` | `object` | `null` | Optional trace-export ingest leg — see [Trace-export ingest leg](#trace-export-ingest-leg). Shape: `{ producer_execution_role_arn = string, agent_role_arn = optional(string), bucket_name = optional(string), prefix = optional(string, "traces/"), lifecycle_days = optional(number, 3), kms_key_arn = optional(string) }`. `producer_execution_role_arn` is the external role trusted to assume the writer role (exact ARN or role-name wildcard; literal account ID enforced); the trust condition's `sts:ExternalId` value comes from the separate `trace_export_external_id` variable, which is required when this block is set. `agent_role_arn` optionally grants one additional role `s3:PutObject` on the prefix via the bucket policy. `prefix` accepts multi-segment values (`"traces/tenant-a/"`) and is normalized to one trailing `/`. `kms_key_arn` switches the bucket to SSE-KMS (Bucket Keys on) and widens writer/collector policies accordingly. Unset (default), no resources are created and the plan is unchanged from previous releases. |
 | `trace_export_external_id` | `string` (sensitive) | `null` | The `sts:ExternalId` value the external producer supplies when assuming the trace-export writer role (min 8 chars). Required when `trace_export_ingest` is set. Marked `sensitive`, so caller-supplied values are redacted in plan/apply output and CI logs — supply via a `.tfvars` file or `TF_VAR_trace_export_external_id`. Values remain readable in Terraform state — protect state accordingly. |
-| `clickhouse_backup` | `object` | `null` | Optional backup bucket, scoped IAM role, and generated password for a fresh backup installation. Requires `bucket_name`; `service_account_name` defaults to `clickhouse-backup` and cannot be `default`, `opentelemetry-collector`, or `llm-worker`. Files do not expire until backup cleanup is configured. See [ClickHouse backup storage](#clickhouse-backup-storage). |
+| `clickhouse_backup` | `object` | `null` | Optional backup bucket, scoped IAM role, and generated password for a fresh backup installation. Requires `bucket_name`; `service_account_name` defaults to `clickhouse-backup` and cannot be `default`, `opentelemetry-collector`, `llm-worker`, `otel-backup-job`, or `clickhouse-backup-monitor`. No automatic expiry is configured, and this release does not delete old backups. See [ClickHouse backup storage](#clickhouse-backup-storage). |
 
 ## Outputs
 
