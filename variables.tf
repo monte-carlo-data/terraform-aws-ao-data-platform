@@ -802,6 +802,54 @@ variable "helm" {
   }
 }
 
+# --- ClickHouse Backup ---
+
+variable "clickhouse_backup" {
+  description = <<-EOT
+    Optional ClickHouse backup storage. Creates a private, encrypted S3 bucket,
+    a bucket-scoped IAM role, and a generated password in Secrets Manager for
+    the future backup SQL user. Null creates none of these resources.
+
+    bucket_name must be a new, globally unique S3 bucket name. No automatic
+    expiry is configured, and this release does not delete old backups, so
+    backup files accumulate until cleanup ships. The password is generated for a
+    new backup user; supplying an existing password is not supported.
+    service_account_name identifies the future Kubernetes service account in
+    the module's montecarlo namespace that can assume the role. Creating and
+    attaching that service account, delivering the password, and creating the
+    ClickHouse user are part of installing the backup software.
+  EOT
+  type = object({
+    bucket_name          = string
+    service_account_name = optional(string, "clickhouse-backup")
+  })
+  default = null
+
+  validation {
+    condition = var.clickhouse_backup == null ? true : (
+      can(regex("^[a-z0-9][a-z0-9-]{1,61}[a-z0-9]$", var.clickhouse_backup.bucket_name)) &&
+      !can(regex("^(xn--|sthree-|amzn-s3-demo-)|(-s3alias|--ol-s3|--x-s3|--table-s3)$", var.clickhouse_backup.bucket_name))
+    )
+    error_message = "clickhouse_backup.bucket_name must use 3-63 lowercase letters, digits, or hyphens, start and end with a letter or digit, and avoid S3 reserved prefixes/suffixes."
+  }
+
+  validation {
+    condition = var.clickhouse_backup == null ? true : (
+      length(var.clickhouse_backup.service_account_name) <= 63 &&
+      can(regex("^[a-z0-9]([-a-z0-9]*[a-z0-9])?$", var.clickhouse_backup.service_account_name))
+    )
+    error_message = "clickhouse_backup.service_account_name must be a lowercase Kubernetes name of at most 63 characters, using letters, digits, and hyphens."
+  }
+
+  validation {
+    condition = var.clickhouse_backup == null ? true : !contains(
+      ["default", "opentelemetry-collector", "llm-worker", "otel-backup-job", "clickhouse-backup-monitor"],
+      var.clickhouse_backup.service_account_name,
+    )
+    error_message = "clickhouse_backup.service_account_name must be a dedicated service account, not \"default\" or another module workload's account."
+  }
+}
+
 # --- Trace Export Ingest ---
 
 variable "trace_export_ingest" {
