@@ -253,6 +253,19 @@ locals {
   # Incomplete versions, ranges, and unparseable strings become [0, 0] and
   # fail the minimum-version check when a gated feature is enabled.
   chart_version_parts = try([for component in regex("^v?([0-9]+)\\.([0-9]+)\\.[0-9]+(?:-[0-9A-Za-z.-]+)?(?:\\+[0-9A-Za-z.-]+)?$", var.helm.chart_version) : tonumber(component)], [0, 0])
+
+  chart_supports_scheduled_backups = local.chart_version_parts[0] > 5 || (local.chart_version_parts[0] == 5 && local.chart_version_parts[1] >= 2)
+  chart_supports_backup_cleanup    = local.chart_version_parts[0] > 5 || (local.chart_version_parts[0] == 5 && local.chart_version_parts[1] >= 3)
+
+  helm_clickhouse_backup_cleanup = var.helm.clickhouse.backup.cleanup.enabled ? {
+    cleanup = {
+      enabled        = true
+      dryRun         = var.helm.clickhouse.backup.cleanup.dry_run
+      keepLast       = var.helm.clickhouse.backup.cleanup.keep_last
+      keepDays       = var.helm.clickhouse.backup.cleanup.keep_days
+      timeoutSeconds = var.helm.clickhouse.backup.cleanup.timeout_seconds
+    }
+  } : {}
   helm_clickhouse_backup_block = local.clickhouse_backup_install_enabled ? {
     backup = merge({
       enabled  = true
@@ -291,7 +304,7 @@ locals {
       schedule = { suspend = var.helm.clickhouse.backup.suspend }
       }, var.helm.clickhouse.backup.image == null ? {} : {
       sidecar = { image = var.helm.clickhouse.backup.image }
-    })
+    }, local.helm_clickhouse_backup_cleanup)
   } : {}
 
   # Singleton maps merged into clickhouse helm values when the dedicated CH

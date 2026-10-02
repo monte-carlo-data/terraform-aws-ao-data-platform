@@ -345,11 +345,19 @@ resource "helm_release" "ao_data_platform" {
     }
 
     precondition {
-      condition = !var.helm.clickhouse.backup.enabled || (
-        local.chart_version_parts[0] > 5 ||
-        (local.chart_version_parts[0] == 5 && local.chart_version_parts[1] >= 2)
-      )
+      condition     = !var.helm.clickhouse.backup.enabled || local.chart_supports_scheduled_backups
       error_message = "Scheduled backups require helm.chart_version based on 5.2.0 or later. Use a published release or development build containing backup support; older charts ignore the backup settings."
+    }
+
+    precondition {
+      condition     = !var.helm.clickhouse.backup.cleanup.enabled || local.chart_supports_backup_cleanup
+      error_message = "Backup cleanup requires helm.chart_version based on 5.3.0 or later. Use a published release or development build containing cleanup support."
+    }
+
+    # The chart template and cleanup script also require exactly two replicas.
+    precondition {
+      condition     = !var.helm.clickhouse.backup.cleanup.enabled || var.clickhouse_replica_count == 2
+      error_message = "Backup cleanup requires a two-replica ClickHouse deployment (clickhouse_replica_count = 2) because the preview cross-checks both replicas' backup catalogs. Raising the replica count requires converting existing tables to replicated engines; read the clickhouse_replica_count description and the README HA section before changing it."
     }
 
     precondition {
