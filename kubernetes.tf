@@ -8,26 +8,6 @@ resource "kubernetes_namespace_v1" "montecarlo" {
   depends_on = [module.eks, data.aws_eks_cluster.existing]
 }
 
-# Create the backup API password before Helm starts the API, without another
-# AWS secret or External Secrets grant. This keeps the existing Secret owner.
-# Both this data field and random_password currently store the value in state;
-# Kubernetes provider 2.38 supports data_wo, so a future state-free design is
-# possible but would also need to change the password source.
-resource "kubernetes_secret_v1" "clickhouse_backup_api" {
-  count = local.clickhouse_backup_install_enabled ? 1 : 0
-
-  metadata {
-    name      = "ao-clickhouse-backup-api"
-    namespace = kubernetes_namespace_v1.montecarlo.metadata[0].name
-  }
-
-  type = "Opaque"
-  data = {
-    password = random_password.clickhouse_backup_api[0].result
-    revision = var.helm.clickhouse.backup.api_password_revision
-  }
-}
-
 # gp3 StorageClass — cluster-wide EBS storage class used by the ao-data-platform chart.
 # EKS clusters ship with gp2 by default; gp3 offers better baseline performance at the same cost.
 

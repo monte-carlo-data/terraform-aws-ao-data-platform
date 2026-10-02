@@ -428,10 +428,11 @@ resource "helm_release" "ao_data_platform" {
     # Install the monitor only after its metrics permission is attached.
     aws_iam_role_policy.clickhouse_backup_monitor,
     aws_iam_role_policy.external_secrets,
-    # Publish both database passwords before the chart asks External Secrets
+    # Publish all backup passwords before the chart asks External Secrets
     # to read them. Referencing a Secret's name alone does not wait for its value.
     aws_secretsmanager_secret_version.clickhouse_backup,
     aws_secretsmanager_secret_version.clickhouse_backup_probe,
+    aws_secretsmanager_secret_version.clickhouse_backup_api,
 
     # Every ClickHouse/Keeper node must exist before the chart schedules those
     # pods. Their PVCs use a WaitForFirstConsumer storage class, so a pod that

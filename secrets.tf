@@ -40,13 +40,34 @@ resource "random_password" "clickhouse_readonly_user" {
   special = false
 }
 
-# Separate from the rotating ClickHouse password: the backup API reads this
-# once at startup. No keepers: ordinary chart upgrades must not rotate this
-# password before the running API can reload it. See the rotation steps in README.
+# The backup API reads its password at startup. A revision change generates a
+# new password and changes the chart annotation that restarts the ClickHouse pods.
+# Ordinary applies and chart upgrades keep it unchanged. Pause backup work before
+# changing the revision; never replace the password without a new revision.
 resource "random_password" "clickhouse_backup_api" {
   count   = local.clickhouse_backup_install_enabled ? 1 : 0
   length  = 32
   special = false
+  keepers = { revision = var.helm.clickhouse.backup.api_password_revision }
+}
+
+resource "aws_secretsmanager_secret" "clickhouse_backup_api" {
+  count                   = local.clickhouse_backup_install_enabled ? 1 : 0
+  name                    = "${local.effective_cluster_name}/clickhouse/backup-api-credentials"
+  kms_key_id              = aws_kms_key.pipeline_secrets.arn
+  recovery_window_in_days = 0
+  tags                    = var.tags
+}
+
+resource "aws_secretsmanager_secret_version" "clickhouse_backup_api" {
+  count     = local.clickhouse_backup_install_enabled ? 1 : 0
+  secret_id = aws_secretsmanager_secret.clickhouse_backup_api[0].id
+  # External Secrets reads one JSON value, so the password and revision always
+  # come from the same stored version.
+  secret_string = jsonencode({
+    password = random_password.clickhouse_backup_api[0].result
+    revision = var.helm.clickhouse.backup.api_password_revision
+  })
 }
 
 # KMS — customer-managed key for all Secrets Manager secrets.
@@ -199,14 +220,15 @@ resource "aws_secretsmanager_secret_version" "clickhouse_backup" {
 
 # The scheduled job checks replication through a separate read-only account.
 # Its credential is independent of the backup user and existing database users.
+# Prepare it with storage so separately installed charts can use it too.
 resource "random_password" "clickhouse_backup_probe" {
-  count   = local.clickhouse_backup_install_enabled ? 1 : 0
+  count   = local.clickhouse_backup_enabled ? 1 : 0
   length  = 32
   special = false
 }
 
 resource "aws_secretsmanager_secret" "clickhouse_backup_probe" {
-  count                   = local.clickhouse_backup_install_enabled ? 1 : 0
+  count                   = local.clickhouse_backup_enabled ? 1 : 0
   name                    = "${local.effective_cluster_name}/clickhouse/backup-probe-credentials"
   kms_key_id              = aws_kms_key.pipeline_secrets.arn
   recovery_window_in_days = 0
@@ -214,7 +236,7 @@ resource "aws_secretsmanager_secret" "clickhouse_backup_probe" {
 }
 
 resource "aws_secretsmanager_secret_version" "clickhouse_backup_probe" {
-  count         = local.clickhouse_backup_install_enabled ? 1 : 0
+  count         = local.clickhouse_backup_enabled ? 1 : 0
   secret_id     = aws_secretsmanager_secret.clickhouse_backup_probe[0].id
   secret_string = random_password.clickhouse_backup_probe[0].result
 }
