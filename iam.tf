@@ -687,6 +687,10 @@ resource "aws_iam_role" "clickhouse_backup" {
     }]
   })
   tags = var.tags
+
+  lifecycle {
+    create_before_destroy = true
+  }
 }
 
 resource "aws_iam_role_policy" "clickhouse_backup" {

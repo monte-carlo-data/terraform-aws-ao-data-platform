@@ -852,9 +852,9 @@ variable "clickhouse_backup" {
     the backup database user. Null creates none of these resources.
 
     bucket_name must be a new, globally unique S3 bucket name. No automatic
-    expiry is configured. Until backup software is configured to delete old
-    backups, files accumulate. The password is generated for a new backup user;
-    supplying an existing password is not supported.
+    expiry is configured, and this release does not delete old backups, so
+    backup files accumulate until cleanup ships. The password is generated for a
+    new backup user; supplying an existing password is not supported.
     service_account_name identifies the dedicated Kubernetes service account in
     montecarlo that can assume the role. With helm.clickhouse.backup.enabled,
     the chart creates this account, copies the stored database password through
@@ -886,7 +886,7 @@ variable "clickhouse_backup" {
 
   validation {
     condition = var.clickhouse_backup == null ? true : !contains(
-      ["default", "opentelemetry-collector", "llm-worker"],
+      ["default", "opentelemetry-collector", "llm-worker", "otel-backup-job", "clickhouse-backup-monitor"],
       var.clickhouse_backup.service_account_name,
     )
     error_message = "clickhouse_backup.service_account_name must be a dedicated service account, not \"default\" or another module workload's account."
