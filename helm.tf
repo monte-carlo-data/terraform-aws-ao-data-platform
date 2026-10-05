@@ -349,7 +349,7 @@ resource "helm_release" "ao_data_platform" {
         local.chart_version_parts[0] > 5 ||
         (local.chart_version_parts[0] == 5 && local.chart_version_parts[1] >= 2)
       )
-      error_message = "Scheduled backups require helm.chart_version based on 5.2.0 or later. Use a published release or development build containing backup support; older charts ignore the backup settings."
+      error_message = "Scheduled backups require a published helm.chart_version containing backup support with a base of 5.2.0 or later. Pre-release versions with a base of 5.2.0 or later are also accepted; older charts ignore the backup settings."
     }
 
     precondition {

@@ -45,7 +45,10 @@ resource "random_password" "clickhouse_readonly_user" {
 # Ordinary applies and chart upgrades keep it unchanged. Pause backup work before
 # changing the revision; never replace the password without a new revision.
 resource "random_password" "clickhouse_backup_api" {
-  count   = local.clickhouse_backup_install_enabled ? 1 : 0
+  count = local.clickhouse_backup_install_enabled ? 1 : 0
+  # Changing length or special replaces the password even without a revision bump.
+  # A release changing either must instruct existing installations to pause backup
+  # work and increase api_password_revision in the same apply so the pods restart.
   length  = 32
   special = false
   keepers = { revision = var.helm.clickhouse.backup.api_password_revision }

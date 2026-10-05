@@ -590,14 +590,14 @@ variable "helm" {
     and hit the original scheduler deadlock. Scheduled backups have a separate
     checked minimum of helm.chart_version >= 5.2.0.
 
-    Development installs also use published charts. Pin chart_version to a
-    published pre-release version with a base of 5.2.0 or later. Pre-release
-    versions must meet the same base-version requirements as releases; 0.0.0
-    development builds fail the backup version check.
+    Set chart_version to an exact, already-published version. Pre-release versions
+    with a base of 5.2.0 or later are also accepted for backups. Versions based on
+    0.0.0 fail the backup version check.
 
     clickhouse.backup: enabled installs scheduled backups using clickhouse_backup
     storage and requires deploy_charts and a published chart based on 5.2.0 or
-    later, including development builds. Both enabled and suspend default to false.
+    later. Pre-release versions with a base of 5.2.0 or later are also accepted.
+    Both enabled and suspend default to false.
     suspend pauses new scheduled jobs; it does not stop active jobs or prevent
     ClickHouse pod restarts when backup software is enabled or disabled.
     image is optional; null uses the chart's verified default. An override must

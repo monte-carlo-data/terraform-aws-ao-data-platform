@@ -301,13 +301,21 @@ are also accepted. Incomplete versions and ranges such as `5.2` or `>=5.2.0`,
 and versions based on `0.0.0`, fail the backup version check.
 
 **Backup access and the ingest password.** The ClickHouse server writes backups
-using the backup IAM role, so it has access to the backup bucket. With the module
-default `helm.clickhouse.otel.restrict_grants = false`, anyone holding the `otel`
-password can also reach the backup disk through database backup and restore
-commands. Set this option to `true` after moving any readers using `otel` to
-`monte_carlo`. The required chart release disables automatic use of the server's
-AWS credentials in ordinary S3 queries while retaining them for the backup disk;
-this does not replace restricting the `otel` user's database permissions.
+using the backup IAM role, so it has access to the backup bucket. Chart releases
+from 5.2.0 disable automatic use of the server's AWS credentials in ordinary S3
+queries while retaining them for the backup disk. Pre-release builds published
+before that release may not include this protection.
+
+Database users allowed to run backup or restore commands or create tables can
+still use the server's backup access. Users with table-creation permission can
+define an S3 disk in a table and write to the backup bucket, even with the
+ordinary S3-query protection above. This includes `otel` with unrestricted
+grants and `schema_owner`, the user that creates tables during database setup.
+
+The module currently defaults to `helm.clickhouse.otel.restrict_grants = false`.
+Set this option to `true` after moving any readers using `otel` to `monte_carlo`.
+This restricts the ingest user's access; it does not remove `schema_owner`'s
+table-creation permissions.
 
 **Enabling or disabling backups restarts the ClickHouse pods, even with
 `suspend = true`.** Plan a maintenance window for a single-copy deployment;
@@ -377,10 +385,12 @@ module installs backups. These outputs never expose passwords. Like the module's
 other generated credentials, the passwords remain in Terraform state; keep that
 state private.
 
-**Storage-only use.** With `helm.deploy_charts = false` or
-`helm.clickhouse.backup.enabled = false` (the default), storage remains usable
-independently and this module does not install backups. A separately managed
-installation must assign the named service account with
+**Storage-only use.** With `clickhouse_backup` configured and
+`helm.clickhouse.backup.enabled = false` (the default), storage exists but the
+module's chart does not run backups. Set `helm.clickhouse.backup.enabled = true`
+to run backups through that chart. With `helm.deploy_charts = false`, a separately
+managed chart installation can use the storage. That installation must assign the named
+service account with
 `eks.amazonaws.com/role-arn`, deliver both database passwords, create the `backup`
 and `backup_probe` users, and supply its own API password and revision. Before
 later enabling the module-managed chart, transfer ownership of any existing
@@ -403,9 +413,7 @@ their older full backup.
 at its tested digest. It waits for nonempty credentials and a matching API
 revision before starting the backup process. That process reads its credentials
 at startup, so later password changes require restarting the ClickHouse pods.
-Backup database password rotation is not yet supported through this module;
-support for keeping an old password valid during rotation is tracked in
-https://github.com/monte-carlo-data/terraform-aws-ao-data-platform/pull/14.
+Backup database password rotation is not yet supported through this module.
 The stock tool can log submitted passwords on failed authentication. Use dummy
 passwords for denied-access checks, never put passwords in URLs, and pause and
 finish running backup work before rotating credentials.
@@ -441,7 +449,9 @@ To rotate the API password:
 1. Set `helm.clickhouse.backup.suspend = true`, review and apply the pause,
    and wait for running backup or restore work to finish. The chart's
    verification guide shows how to inspect Jobs and backup logs:
-   https://github.com/monte-carlo-data/helm-ao-data-platform/blob/main/docs/verify-clickhouse-backups.md.
+   https://github.com/monte-carlo-data/helm-ao-data-platform/blob/a202f2bdce3bdf068864c8cb9fe153f35c863517/docs/verify-clickhouse-backups.md.
+   In that guide, set `KUBE_CONTEXT` to your cluster's context, `NAMESPACE` to
+   `montecarlo`, and `REPLICA_COUNT` to your `clickhouse_replica_count` value.
 2. Increase `helm.clickhouse.backup.api_password_revision` (for example, from
    `"1"` to `"2"`). From the deployment using its existing state, run:
 
@@ -450,16 +460,21 @@ To rotate the API password:
    ```
 
    Include the same saved variable files you normally use. Review the saved
-   plan: it should replace the API password, update its Secrets Manager value
-   and chart settings, and keep the schedule paused. Then apply that saved plan.
+   plan: it should replace the API password and update its Secrets Manager value
+   and chart settings. The new secret version ID is not known until apply, so
+   Terraform shows the chart settings as `(known after apply)`. Confirm
+   `helm.clickhouse.backup.suspend = true` in the configuration and saved variable
+   files; this plan cannot show that setting. Change nothing else in this apply,
+   then apply that saved plan.
 3. Wait for the ClickHouse operator to restart the copies one at a time and for
    all copies to become healthy. A single-copy installation needs a maintenance
    window. Use the verification guide's in-pod check without a password to
    confirm requests are rejected with `401 Unauthorized` on each copy.
 4. Set `suspend = false`, review the plan, and apply to resume. Confirm the next
    scheduled Job succeeds: that proves the new password works without manually
-   sending a real password to the API. Port 7171 accepts network traffic only
-   from the chart's backup Jobs.
+   sending a real password to the API. Port 7171 accepts connections from other
+   pods only from the chart's backup Jobs. This restriction does not block
+   connections from inside the ClickHouse pod itself.
 
 Changing an existing bucket's default encryption affects new uploads only;
 existing files keep their previous encryption. Backup clients can use the bucket
@@ -781,7 +796,7 @@ To use a StorageClass you manage outside this module, set `clickhouse_storage_cl
 | `storage_class_clickhouse_gp3` | `object` | `{}` (all defaults) | Parameters for the dedicated `clickhouse-gp3` StorageClass this module creates (never modifies the shared `gp3` class). Shape: `{ iops = optional(number, 3000), throughput = optional(number, 125) }`. Defaults to the `gp3` baseline; raise per measured ClickHouse merge load. Validated to `gp3` limits (IOPS 3000–16000, throughput 125–1000 MB/s, throughput ≤ 0.25 × IOPS). Applies only to newly provisioned volumes. |
 | `helm.deploy_charts` | `bool` | `true` | Deploy the `ao-data-platform` chart from Terraform |
 | `helm.chart_registry` | `string` | `null` | OCI registry URL for the `ao-data-platform` chart (e.g. `oci://123456789012.dkr.ecr.us-east-1.amazonaws.com`). Required when `deploy_charts = true`. |
-| `helm.chart_version` | `string` | `null` | Already-published `ao-data-platform` chart version. Required when `deploy_charts = true`. Backups require an exact release or development version with base version >= 5.2.0; ranges and incomplete versions are rejected. See [ClickHouse backups](#clickhouse-backups). |
+| `helm.chart_version` | `string` | `null` | Already-published `ao-data-platform` chart version. Required when `deploy_charts = true`. Backups require an exact version with base version >= 5.2.0. Pre-release versions with a base of 5.2.0 or later are also accepted; ranges and incomplete versions are rejected. See [ClickHouse backups](#clickhouse-backups). |
 | `helm.install_aws_load_balancer_controller` | `bool` | `true` | Skip if LBC is already installed in the cluster |
 | `helm.install_cert_manager` | `bool` | `true` | Skip if cert-manager is already installed |
 | `helm.install_external_secrets_operator` | `bool` | `true` | Skip if ESO is already installed |
