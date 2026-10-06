@@ -713,31 +713,38 @@ aws secretsmanager get-secret-value \
 `helm.clickhouse.otel.restrict_grants` now defaults to `true`. If you never set
 it, your next apply after upgrading limits the `otel` ingest user to `INSERT`
 on `otel_traces.otel_traces`. The OTel Collector needs nothing more, so ingest
-is unaffected. Anything else that connects as `otel` to read data loses access.
-The plan shows this only as a change to the Helm release values.
+is unaffected. Anything else that connects as `otel` to read data, or to write
+to any table other than `otel_traces.otel_traces`, loses access. The plan shows
+this only as a change to the Helm release values.
 
-Before upgrading, check whether anything other than the collector reads as
-`otel`. Run this on each ClickHouse replica; any rows besides trivial
-connection checks (for example `SELECT 1`) come from a reader:
+Before upgrading, check whether anything other than the collector uses `otel`.
+Run the query below as the `monte_carlo` user (its credential is the
+`clickhouse_monte_carlo_credentials_secret_arn` output) on each ClickHouse pod,
+for example with `kubectl exec` and `clickhouse-client`. The ClickHouse endpoint
+is load-balanced and each replica keeps its own query log, so one pod's log is
+not enough. Any rows besides trivial connection checks (for example `SELECT 1`)
+come from a reader or writer:
 
 ```sql
-SELECT initial_address, client_name, query_kind, count() AS queries
+SELECT initial_address, client_name, query_kind, tables, count() AS queries
 FROM system.query_log
 WHERE user = 'otel'
   AND type = 'QueryFinish'
-  AND query_kind != 'Insert'
+  AND NOT (query_kind = 'Insert' AND has(tables, 'otel_traces.otel_traces'))
   AND event_date >= today() - 7
 GROUP BY ALL
 ORDER BY queries DESC
 ```
 
-If you find readers, either:
+The query covers the last 7 days, which is the query log's full retention, so a
+client that connects less often than weekly won't appear.
 
-- move them to the `monte_carlo` user (its credential is the
-  `clickhouse_monte_carlo_credentials_secret_arn` output) before upgrading, or
+If you find other clients, either:
+
+- move them to the `monte_carlo` user before upgrading, or
 - keep the previous behavior by setting
   `helm.clickhouse.otel = { restrict_grants = false }` in the same change as the
-  version bump, then migrate the readers and remove the override later.
+  version bump, then migrate the clients and remove the override later.
 
 Charts older than 2.0.0 ignore this flag, so deployments on them see no change.
 

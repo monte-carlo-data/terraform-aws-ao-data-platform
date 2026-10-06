@@ -2855,30 +2855,36 @@ run "trace_export_agent_role_arn_and_cmk_together" {
 
 # --- otel ingest user is restricted unless the caller opts out ---
 #
-# helm.clickhouse.otel.restrict_grants defaults to true so the otel login gets
-# INSERT on otel_traces.otel_traces only. These runs pin the default
-# (omitting the otel block entirely) and the explicit opt-out that restores
-# broad access for callers whose readers still use otel. Disabled-path runs:
-# cluster.create = false keeps module.eks out of the plan.
+# These runs pin the value the Helm chart actually receives (restrictGrants in
+# the rendered release values), for the default and the explicit opt-out.
+# deploy_charts = true so the release is planned, cluster.create = false keeps
+# module.eks out of the plan, and the ARN overrides make the values string
+# known at plan.
 
 run "otel_grants_restricted_by_default" {
   command = plan
-  variables {
-    cluster = {
-      create                = false
-      name                  = "test-cluster"
-      existing_cluster_name = "test-cluster"
-    }
-    helm = { deploy_charts = false }
-  }
-  assert {
-    condition     = var.helm.clickhouse.otel.restrict_grants == true
-    error_message = "helm.clickhouse.otel.restrict_grants must default to true so the otel ingest user is INSERT-only unless the caller opts out."
-  }
-}
 
-run "otel_grants_explicit_opt_out" {
-  command = plan
+  override_resource {
+    target          = aws_acm_certificate.clickhouse[0]
+    override_during = plan
+    values          = { arn = "arn:aws:acm:us-east-1:123456789012:certificate/clickhouse" }
+  }
+  override_resource {
+    target          = aws_acm_certificate.otel_collector[0]
+    override_during = plan
+    values          = { arn = "arn:aws:acm:us-east-1:123456789012:certificate/otel" }
+  }
+  override_resource {
+    target          = aws_iam_role.otel_collector
+    override_during = plan
+    values          = { arn = "arn:aws:iam::123456789012:role/otel-collector" }
+  }
+  override_resource {
+    target          = aws_iam_role.llm_worker
+    override_during = plan
+    values          = { arn = "arn:aws:iam::123456789012:role/llm-worker" }
+  }
+
   variables {
     cluster = {
       create                = false
@@ -2886,12 +2892,56 @@ run "otel_grants_explicit_opt_out" {
       existing_cluster_name = "test-cluster"
     }
     helm = {
-      deploy_charts = false
-      clickhouse    = { otel = { restrict_grants = false } }
+      deploy_charts  = true
+      chart_registry = "oci://123456789012.dkr.ecr.us-east-1.amazonaws.com"
+      chart_version  = "2.3.0"
     }
   }
   assert {
-    condition     = var.helm.clickhouse.otel.restrict_grants == false
-    error_message = "An explicit helm.clickhouse.otel.restrict_grants = false must be honored so callers with readers still on otel can keep broad access."
+    condition     = yamldecode(helm_release.ao_data_platform[0].values[0]).clickhouse.otel.restrictGrants == true
+    error_message = "The rendered Helm values must set clickhouse.otel.restrictGrants = true when the caller says nothing, so the otel ingest user is INSERT-only unless the caller opts out."
+  }
+}
+
+run "otel_grants_explicit_opt_out" {
+  command = plan
+
+  override_resource {
+    target          = aws_acm_certificate.clickhouse[0]
+    override_during = plan
+    values          = { arn = "arn:aws:acm:us-east-1:123456789012:certificate/clickhouse" }
+  }
+  override_resource {
+    target          = aws_acm_certificate.otel_collector[0]
+    override_during = plan
+    values          = { arn = "arn:aws:acm:us-east-1:123456789012:certificate/otel" }
+  }
+  override_resource {
+    target          = aws_iam_role.otel_collector
+    override_during = plan
+    values          = { arn = "arn:aws:iam::123456789012:role/otel-collector" }
+  }
+  override_resource {
+    target          = aws_iam_role.llm_worker
+    override_during = plan
+    values          = { arn = "arn:aws:iam::123456789012:role/llm-worker" }
+  }
+
+  variables {
+    cluster = {
+      create                = false
+      name                  = "test-cluster"
+      existing_cluster_name = "test-cluster"
+    }
+    helm = {
+      deploy_charts  = true
+      chart_registry = "oci://123456789012.dkr.ecr.us-east-1.amazonaws.com"
+      chart_version  = "2.3.0"
+      clickhouse     = { otel = { restrict_grants = false } }
+    }
+  }
+  assert {
+    condition     = yamldecode(helm_release.ao_data_platform[0].values[0]).clickhouse.otel.restrictGrants == false
+    error_message = "An explicit helm.clickhouse.otel.restrict_grants = false must reach the rendered Helm values as restrictGrants = false so callers with readers still on otel can keep broad access."
   }
 }
