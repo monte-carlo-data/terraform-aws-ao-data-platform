@@ -1057,7 +1057,7 @@ run "scheduled_backups_reject_published_charts_without_backup_support" {
   expect_failures = [helm_release.ao_data_platform]
 }
 
-run "cleanup_is_explicit_and_defaults_to_a_dry_run" {
+run "cleanup_with_two_clickhouse_replicas_defaults_to_a_dry_run" {
   command = plan
   variables {
     clickhouse_backup             = { bucket_name = "test-clickhouse-backups" }
@@ -1072,9 +1072,12 @@ run "cleanup_is_explicit_and_defaults_to_a_dry_run" {
     }
   }
   assert {
-    condition = jsonencode(yamldecode(helm_release.ao_data_platform[0].values[0]).clickhouse.backup.cleanup) == jsonencode({
-      enabled = true, dryRun = true, keepLast = 2, keepDays = 0, timeoutSeconds = 1800
-    })
+    condition = (
+      yamldecode(helm_release.ao_data_platform[0].values[0]).clickhouse.replicasCount == 2 &&
+      jsonencode(yamldecode(helm_release.ao_data_platform[0].values[0]).clickhouse.backup.cleanup) == jsonencode({
+        enabled = true, dryRun = true, keepLast = 2, keepDays = 0, timeoutSeconds = 1800
+      })
+    )
     error_message = "Cleanup must preview retention without deleting backup files."
   }
 }
@@ -1169,7 +1172,7 @@ run "backups_without_cleanup_omit_cleanup_values" {
   }
 }
 
-run "cleanup_rejects_one_clickhouse_replica" {
+run "cleanup_accepts_one_clickhouse_replica" {
   command = plan
   variables {
     clickhouse_backup     = { bucket_name = "test-clickhouse-backups" }
@@ -1181,10 +1184,17 @@ run "cleanup_rejects_one_clickhouse_replica" {
       clickhouse     = { backup = { enabled = true, image = "altinity/clickhouse-backup:2.8.1@sha256:08016b048f7e6035c048501315c2a788e5a782f15f168e042c7bd48d5a388cc4", cleanup = { enabled = true } } }
     }
   }
-  expect_failures = [helm_release.ao_data_platform]
+  assert {
+    condition = (
+      yamldecode(helm_release.ao_data_platform[0].values[0]).clickhouse.replicasCount == 1 &&
+      yamldecode(helm_release.ao_data_platform[0].values[0]).clickhouse.backup.cleanup.enabled == true &&
+      yamldecode(helm_release.ao_data_platform[0].values[0]).clickhouse.backup.cleanup.dryRun == true
+    )
+    error_message = "Cleanup must support a single ClickHouse copy without changing the replica count or enabling deletion."
+  }
 }
 
-run "cleanup_rejects_three_clickhouse_replicas" {
+run "cleanup_accepts_three_clickhouse_replicas" {
   command = plan
   variables {
     clickhouse_replica_count      = 3
@@ -1198,7 +1208,14 @@ run "cleanup_rejects_three_clickhouse_replicas" {
       clickhouse     = { backup = { enabled = true, image = "altinity/clickhouse-backup:2.8.1@sha256:08016b048f7e6035c048501315c2a788e5a782f15f168e042c7bd48d5a388cc4", cleanup = { enabled = true } } }
     }
   }
-  expect_failures = [helm_release.ao_data_platform]
+  assert {
+    condition = (
+      yamldecode(helm_release.ao_data_platform[0].values[0]).clickhouse.replicasCount == 3 &&
+      yamldecode(helm_release.ao_data_platform[0].values[0]).clickhouse.backup.cleanup.enabled == true &&
+      yamldecode(helm_release.ao_data_platform[0].values[0]).clickhouse.backup.cleanup.dryRun == true
+    )
+    error_message = "Cleanup must support three configured ClickHouse copies without changing the replica count or enabling deletion."
+  }
 }
 
 run "cleanup_rejects_zero_kept_backups" {

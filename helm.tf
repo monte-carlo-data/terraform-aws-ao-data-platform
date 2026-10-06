@@ -354,12 +354,6 @@ resource "helm_release" "ao_data_platform" {
       error_message = "Backup cleanup requires a published helm.chart_version based on 5.3.0 or later. For pre-release builds, use one containing the preview code released in chart 5.3.0."
     }
 
-    # The chart template and cleanup script also require exactly two replicas.
-    precondition {
-      condition     = !var.helm.clickhouse.backup.cleanup.enabled || var.clickhouse_replica_count == 2
-      error_message = "Backup cleanup requires a two-replica ClickHouse deployment (clickhouse_replica_count = 2) because the preview cross-checks both replicas' backup catalogs. Raising the replica count requires converting existing tables to replicated engines; read the clickhouse_replica_count description and the README HA section before changing it."
-    }
-
     precondition {
       condition     = var.clickhouse_domain != null && var.otel_collector_domain != null
       error_message = "clickhouse_domain and otel_collector_domain are required when helm.deploy_charts = true."

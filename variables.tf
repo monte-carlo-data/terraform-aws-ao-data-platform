@@ -614,10 +614,11 @@ variable "helm" {
     Defaults: enabled = false, dry_run = true (required when enabled), keep_last = 2,
     keep_days = 0, timeout_seconds = 1800. keep_last must be a whole number >= 1,
     keep_days a whole number >= 0, and timeout_seconds a whole number >= 60.
-    Requires enabled backups, exactly two replicas, and a published chart based on
-    5.3.0 or later. Pre-release builds are supported for cleanup only if they contain
+    Requires enabled backups and a published chart based on 5.3.0 or later.
+    Pre-release builds are supported for cleanup only if they contain
     the preview code released in chart 5.3.0; the version check cannot detect this.
-    The preview cross-checks both replicas' backup catalogs; do not
+    The preview checks every configured copy and works with any supported
+    clickhouse_replica_count. The usual replica placement limits still apply; do not
     raise the replica count without the table-conversion prerequisites described
     under clickhouse_replica_count and the README HA section. The preview never
     deletes backup files, and this release has no supported procedure for removing
