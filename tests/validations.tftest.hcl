@@ -156,58 +156,6 @@ run "main_ng_size_eleven_rejected" {
   expect_failures = [var.cluster]
 }
 
-# The real main-node-group input merges these settings. Mock the EKS module
-# itself so these checks do not create resources or depend on AWS data.
-run "main_ng_image_default_keeps_latest_release" {
-  command = plan
-
-  override_module {
-    target = module.eks
-    outputs = {
-      cluster_endpoint                   = "https://test-cluster.eks.us-east-1.amazonaws.com"
-      cluster_certificate_authority_data = "dGVzdC1jYQ=="
-      oidc_provider_arn                  = "arn:aws:iam::123456789012:oidc-provider/oidc.eks.us-east-1.amazonaws.com/id/TESTOIDC"
-      oidc_provider                      = "oidc.eks.us-east-1.amazonaws.com/id/TESTOIDC"
-      cluster_security_group_id          = "sg-0123456789abcdef0"
-      cluster_name                       = "test-cluster"
-    }
-  }
-
-  assert {
-    condition     = local.main_node_group_ami_settings.use_latest_ami_release_version && local.main_node_group_ami_settings.ami_release_version == null
-    error_message = "Without an explicit main-node image release, the module must preserve its latest-release behavior."
-  }
-}
-
-run "main_ng_image_pin_disables_latest_release" {
-  command = plan
-
-  variables {
-    cluster = {
-      create                              = true
-      name                                = "test-cluster"
-      main_node_group_ami_release_version = "1.35.5-20260527"
-    }
-  }
-
-  override_module {
-    target = module.eks
-    outputs = {
-      cluster_endpoint                   = "https://test-cluster.eks.us-east-1.amazonaws.com"
-      cluster_certificate_authority_data = "dGVzdC1jYQ=="
-      oidc_provider_arn                  = "arn:aws:iam::123456789012:oidc-provider/oidc.eks.us-east-1.amazonaws.com/id/TESTOIDC"
-      oidc_provider                      = "oidc.eks.us-east-1.amazonaws.com/id/TESTOIDC"
-      cluster_security_group_id          = "sg-0123456789abcdef0"
-      cluster_name                       = "test-cluster"
-    }
-  }
-
-  assert {
-    condition     = !local.main_node_group_ami_settings.use_latest_ami_release_version && local.main_node_group_ami_settings.ami_release_version == "1.35.5-20260527"
-    error_message = "An explicit main-node image release must reach the node-group settings and disable the latest-release lookup."
-  }
-}
-
 # --- cluster validity guard ---
 #
 # When cluster.create = false, existing_cluster_name must be set.

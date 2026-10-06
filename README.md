@@ -855,7 +855,6 @@ To use a StorageClass you manage outside this module, set `clickhouse_storage_cl
 | `cluster.endpoint_public_access` | `bool` | `true` | Whether the EKS API server keeps its public endpoint. The private endpoint is always enabled. Set `false` for a private-only control plane — every machine running Terraform/kubectl (CI included) must then reach the API over a private path. See "Restricting the EKS API endpoint". Only applies when `cluster.create = true`. |
 | `cluster.endpoint_public_access_cidrs` | `list(string)` | `["0.0.0.0/0"]` | CIDR blocks allowed to reach the public API endpoint. Include the egress CIDRs of every machine that runs Terraform or kubectl against the cluster. See "Restricting the EKS API endpoint". Only applies when `cluster.create = true`. |
 | `cluster.main_node_group_size` | `number` | `null` (resolves to 2) | Optional explicit size (desired + min) for the main EKS managed node group. When `null` (default), resolves to `2` — keeps a 2-node HA floor on the stateless tier even when the dedicated CH NG is active. Set explicitly to `1` to opt into a cost-shrunk single-node main pool. Validated to the range `[1, 10]` when set; `max_size` stays at 10 for autoscaling burst. |
-| `cluster.main_node_group_ami_release_version` | `string` | `null` | Optional EKS machine-image release for the main node group. Set the installed release to prevent unrelated applies from updating these machines. When unset, the main node group keeps its existing behavior of selecting the latest release on each apply. Ignored when `cluster.create = false`. |
 | `clickhouse_node_group` | `object` | `{}` (all defaults) | Configuration for the dedicated single-AZ ClickHouse node group. Shape: `{ availability_zone = optional(string), instance_type = optional(string, "r5.xlarge"), use_latest_ami_release_version = optional(bool, false), ami_release_version = optional(string) }`. The dedicated NG is auto-created when `helm.deploy_charts = true` AND `cluster.create = true`, and managed while `manage_legacy_clickhouse_node_group = true` — see the "Dedicated ClickHouse node group" section. `availability_zone`: when null, defaults to the first AZ from `data.aws_availability_zones.available` (alphabetical) — override when the ClickHouse PV is in a different AZ (EBS volumes are AZ-locked). `instance_type`: EC2 instance type for the dedicated node; defaults to `r5.xlarge`. `use_latest_ami_release_version`: defaults to `false` — the CH NG is no-drift pinned, so its AMI won't change on an unrelated apply (see "Pinned node group AMIs"). `ami_release_version`: optional explicit AMI build to pin to (e.g. `"1.35.5-20260527"`); `null` (default) still prevents drift but records no specific build. Has no effect when `cluster.create = false`. |
 | `clickhouse_availability_zones` | `list(string)` | `[]` | Explicit AZ names for the per-AZ ClickHouse node groups of the clustered/HA topology (one `clickhouse-<az>` node group per entry). Empty (default) keeps the single-instance layout. Element 0 must be the AZ of the existing ClickHouse volume (enforced by a plan-time precondition; see `enforce_clickhouse_volume_az_match`). When `create_vpc = true`, entries must be among the first `length(networking.private_subnet_cidrs)` of the region's available AZs. Requires `cluster.create = true` (no node groups are created for existing clusters). See "Clustered / HA topology". |
 | `keeper_availability_zones` | `list(string)` | `[]` | Explicit AZ names for the per-AZ ClickHouse Keeper node groups (one voter per entry). Must be an **odd** count across distinct AZs for quorum (3 typical, 1 for dev). Empty (default) creates no Keeper node groups. The list length is the single source of truth for both the voter node-group count and the chart's `keeper.replicasCount`. Requires `cluster.create = true` — rejected by a plan-time precondition on existing clusters. See "Clustered / HA topology". |
@@ -1016,7 +1015,7 @@ unrelated apply.
 
 Every stateful node group pins its AMI — the dedicated ClickHouse node group,
 the per-AZ ClickHouse node groups, and the Keeper node groups — while the main
-node group tracks the latest EKS-optimized AMI unless explicitly pinned:
+node group tracks the latest EKS-optimized AMI. This split is deliberate:
 
 - **Stateful node groups — pinned (`use_latest_ami_release_version = false`,
   the default on `clickhouse_node_group`, `clickhouse_ha_node_group`, and
@@ -1029,15 +1028,11 @@ node group tracks the latest EKS-optimized AMI unless explicitly pinned:
   moment AWS publishes a new AMI; on the clustered topology that could roll
   every Keeper voter or ClickHouse replica from a single unrelated apply.
   Pinning removes that trigger: the AMI changes only when you change it.
-- **Main node group — latest by default.** It hosts the application and cluster
-  controllers. An apply can replace these machines when AWS publishes a new
-  recommended image. Set `cluster.main_node_group_ami_release_version` to the
-  installed release to keep a software-only update from also replacing them.
-  Setting a different release schedules a machine update; setting it back to
-  `null` returns to selecting the latest release. While pinned, update this
-  setting deliberately to receive security fixes.
+- **Main node group — latest (unpinned).** It hosts only stateless workloads,
+  which reschedule without downtime, so it keeps AWS's free security
+  auto-patching.
 
-For the stateful node groups, `ami_release_version` is the explicit build to pin
+`ami_release_version` on each of those variables is the explicit build to pin
 to (e.g. `"1.35.5-20260527"`). Leaving it `null` (the default) still prevents
 drift — nodes keep whatever AMI they already run — but records no specific
 version. Set an explicit build to make the pin auditable and to perform
@@ -1089,9 +1084,8 @@ version and its AMI build must share a minor — EKS rejects, for example, a
 `1.35.x` AMI on a `1.36` node group. So when you bump `kubernetes_version`, bump
 **every pinned `ami_release_version` in use** — `clickhouse_node_group`, and on
 the clustered topology also `clickhouse_ha_node_group` and `keeper_node_group` —
-to a matching-minor build **in the same apply**. Include
-`cluster.main_node_group_ami_release_version` when it is set. Leaving any pinned
-node group on the old minor fails the apply. The module does not expose a per-node-group
+to a matching-minor build **in the same apply**. Leaving any pinned node group
+on the old minor fails the apply. The module does not expose a per-node-group
 Kubernetes version, so the control plane and all pinned node groups move
 together; coupling the values in one apply replaces each node once.
 

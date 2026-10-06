@@ -47,11 +47,6 @@ variable "cluster" {
       regardless of whether the dedicated CH NG is active. Set explicitly to 1 to
       opt into a cost-shrunk single-node main pool when HA isn't a requirement.
       max_size remains fixed at 10 to allow autoscaling burst.
-    - main_node_group_ami_release_version: optional EKS machine-image release
-      for the main node group. Set the currently installed release to keep an
-      unrelated apply from updating these machines. When null (default), the
-      main node group continues to select the latest release on each apply.
-      Ignored when create = false.
     - endpoint_public_access: whether the EKS API server keeps its public
       endpoint. Defaults to true. The private endpoint is always enabled, so
       setting this false yields a private-only control plane — every machine
@@ -67,14 +62,13 @@ variable "cluster" {
       endpoint configuration is managed wherever that cluster is managed.
   EOT
   type = object({
-    create                              = optional(bool, true)
-    name                                = optional(string, "monte-carlo")
-    existing_cluster_name               = optional(string, null)
-    node_instance_type                  = optional(string, "t3.large")
-    main_node_group_size                = optional(number, null)
-    main_node_group_ami_release_version = optional(string)
-    endpoint_public_access              = optional(bool, true)
-    endpoint_public_access_cidrs        = optional(list(string), ["0.0.0.0/0"])
+    create                       = optional(bool, true)
+    name                         = optional(string, "monte-carlo")
+    existing_cluster_name        = optional(string, null)
+    node_instance_type           = optional(string, "t3.large")
+    main_node_group_size         = optional(number, null)
+    endpoint_public_access       = optional(bool, true)
+    endpoint_public_access_cidrs = optional(list(string), ["0.0.0.0/0"])
   })
   default = {}
 

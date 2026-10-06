@@ -4,13 +4,6 @@ data "aws_eks_cluster" "existing" {
 }
 
 locals {
-  # An explicit main-node image release keeps unrelated applies from replacing
-  # these machines. Without a pin, preserve the EKS module's latest-image default.
-  main_node_group_ami_settings = {
-    use_latest_ami_release_version = var.cluster.main_node_group_ami_release_version == null
-    ami_release_version            = var.cluster.main_node_group_ami_release_version
-  }
-
   # Dedicated per-AZ ClickHouse Keeper node groups (one voter per AZ), merged
   # into the module's eks_managed_node_groups below. Keyed keeper-<az>; the count
   # is length(keeper_availability_zones) — the same list that drives the chart's
@@ -176,7 +169,7 @@ module "eks" {
 
   eks_managed_node_groups = merge(
     {
-      main = merge(local.main_node_group_ami_settings, {
+      main = {
         instance_types = [var.cluster.node_instance_type]
         min_size       = local.main_node_group_size_resolved
         max_size       = 10
@@ -195,7 +188,7 @@ module "eks" {
           http_tokens                 = "required"
           http_put_response_hop_limit = 2
         }
-      })
+      }
     },
     (local.clickhouse_node_placement_enabled && var.manage_legacy_clickhouse_node_group) ? {
       # Legacy single-AZ node group for ClickHouse. The taint blocks any
@@ -216,8 +209,8 @@ module "eks" {
         desired_size   = 1
         subnet_ids     = local.clickhouse_node_group_subnet_ids
 
-        # Pin the dedicated CH node group's AMI (the main NG above tracks
-        # the latest image unless an explicit release is set). Defaulting
+        # Pin the dedicated CH node group's AMI (asymmetric: the main NG
+        # above keeps the eks module default use_latest = true). Defaulting
         # use_latest = false here stops the per-apply SSM "latest AMI"
         # lookup, so an unrelated apply can no longer drift the AMI and
         # bounce ClickHouse — a single-replica, AZ-locked StatefulSet whose
