@@ -351,7 +351,7 @@ resource "helm_release" "ao_data_platform" {
 
     precondition {
       condition     = !var.helm.clickhouse.backup.cleanup.enabled || local.chart_supports_backup_cleanup
-      error_message = "Backup cleanup requires a published helm.chart_version containing cleanup support with a base of 5.3.0 or later. Pre-release versions with a base of 5.3.0 or later are also accepted."
+      error_message = "Backup cleanup requires a published helm.chart_version based on 5.3.0 or later. For pre-release builds, use one containing the preview code released in chart 5.3.0."
     }
 
     # The chart template and cleanup script also require exactly two replicas.

@@ -1124,7 +1124,7 @@ run "cleanup_rejects_published_charts_without_cleanup_support" {
   expect_failures = [helm_release.ao_data_platform]
 }
 
-run "cleanup_rejects_actual_deletion_even_with_a_pinned_stock_image" {
+run "cleanup_rejects_dry_run_false" {
   command = plan
   variables {
     clickhouse_backup             = { bucket_name = "test-clickhouse-backups" }

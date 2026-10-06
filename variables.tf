@@ -621,13 +621,18 @@ variable "helm" {
     keep_days = 0, timeout_seconds = 1800. keep_last must be a whole number >= 1,
     keep_days a whole number >= 0, and timeout_seconds a whole number >= 60.
     Requires enabled backups, exactly two replicas, and a published chart based on
-    5.3.0 or later. The preview cross-checks both replicas' backup catalogs; do not
+    5.3.0 or later. Pre-release builds are supported for cleanup only if they contain
+    the preview code released in chart 5.3.0; the version check cannot detect this.
+    The preview cross-checks both replicas' backup catalogs; do not
     raise the replica count without the table-conversion prerequisites described
     under clickhouse_replica_count and the README HA section. The preview never
-    deletes backup files. Read its report in the scheduled backup Job's logs.
+    deletes backup files, and this release has no supported procedure for removing
+    individual backups. Backup files and local metadata continue to grow.
+    Read its report in the scheduled backup Job's logs.
     The Job deadline adds timeout_seconds to the backup timeout plus 60 seconds;
-    with the default 10800-second backup timeout, values above 3540 extend it
-    beyond the four-hour schedule and may cause a following run to be skipped.
+    with the chart's 10800-second backup timeout, which this module does not change,
+    values of 3540 or more reach or exceed the next four-hour run and may cause it
+    to be skipped.
 
     The clustered/HA Keeper topology (keeper_availability_zones) requires
     chart_version >= "2.3.0" — the first chart version exposing the keeper.*
@@ -905,9 +910,10 @@ variable "clickhouse_backup" {
     resources.
 
     bucket_name must be a new, globally unique S3 bucket name. No automatic
-    expiry is configured. This module never deletes backup files; they accumulate
-    until deliberately removed. The password is generated for a new backup user;
-    supplying an existing password is not supported.
+    expiry is configured. Backup files and local metadata accumulate; this release
+    has no supported procedure for removing individual backups.
+    The password is generated for a new backup user; supplying an existing
+    password is not supported.
     service_account_name identifies the dedicated Kubernetes service account in
     montecarlo that can assume the role. With helm.clickhouse.backup.enabled,
     the chart creates this account, copies the stored database password through
