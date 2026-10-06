@@ -2852,3 +2852,46 @@ run "trace_export_agent_role_arn_and_cmk_together" {
     error_message = "With agent_role_arn also set, the writer policy must still gain the kms:GenerateDataKey/kms:Encrypt statement on the CMK — the writer's own grant is unaffected by the bucket-policy-only agent_role_arn branch."
   }
 }
+
+# --- otel ingest user is restricted unless the caller opts out ---
+#
+# helm.clickhouse.otel.restrict_grants defaults to true so the otel login gets
+# INSERT on otel_traces.otel_traces only. These runs pin the default
+# (omitting the otel block entirely) and the explicit opt-out that restores
+# broad access for callers whose readers still use otel. Disabled-path runs:
+# cluster.create = false keeps module.eks out of the plan.
+
+run "otel_grants_restricted_by_default" {
+  command = plan
+  variables {
+    cluster = {
+      create                = false
+      name                  = "test-cluster"
+      existing_cluster_name = "test-cluster"
+    }
+    helm = { deploy_charts = false }
+  }
+  assert {
+    condition     = var.helm.clickhouse.otel.restrict_grants == true
+    error_message = "helm.clickhouse.otel.restrict_grants must default to true so the otel ingest user is INSERT-only unless the caller opts out."
+  }
+}
+
+run "otel_grants_explicit_opt_out" {
+  command = plan
+  variables {
+    cluster = {
+      create                = false
+      name                  = "test-cluster"
+      existing_cluster_name = "test-cluster"
+    }
+    helm = {
+      deploy_charts = false
+      clickhouse    = { otel = { restrict_grants = false } }
+    }
+  }
+  assert {
+    condition     = var.helm.clickhouse.otel.restrict_grants == false
+    error_message = "An explicit helm.clickhouse.otel.restrict_grants = false must be honored so callers with readers still on otel can keep broad access."
+  }
+}
