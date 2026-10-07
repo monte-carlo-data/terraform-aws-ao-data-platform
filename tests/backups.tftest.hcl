@@ -1843,3 +1843,78 @@ run "cleanup_accepts_retention_and_timeout_minimums" {
     error_message = "Cleanup must accept and pass through keep_last = 1, keep_days = 0, and timeout_seconds = 60."
   }
 }
+
+run "backups_warn_when_otel_broad_access_is_explicit" {
+  command = plan
+
+  variables {
+    clickhouse_backup     = { bucket_name = "test-clickhouse-backups" }
+    clickhouse_domain     = "clickhouse.example.com"
+    otel_collector_domain = "otel.example.com"
+    helm = {
+      chart_registry = "oci://registry-1.docker.io/montecarlodata"
+      chart_version  = "5.2.0"
+      clickhouse     = { backup = { enabled = true }, otel = { restrict_grants = false } }
+    }
+  }
+
+  expect_failures = [check.backup_otel_grants]
+
+  assert {
+    condition = (
+      yamldecode(helm_release.ao_data_platform[0].values[0]).clickhouse.backup.enabled &&
+      !yamldecode(helm_release.ao_data_platform[0].values[0]).clickhouse.otel.restrictGrants
+    )
+    error_message = "The warning must preserve the explicit broad-access choice and still plan the backup installation."
+  }
+}
+
+run "backups_with_default_restricted_otel_access_do_not_warn" {
+  command = plan
+
+  variables {
+    clickhouse_backup     = { bucket_name = "test-clickhouse-backups" }
+    clickhouse_domain     = "clickhouse.example.com"
+    otel_collector_domain = "otel.example.com"
+    helm = {
+      chart_registry = "oci://registry-1.docker.io/montecarlodata"
+      chart_version  = "5.2.0"
+      clickhouse     = { backup = { enabled = true } }
+    }
+  }
+
+  assert {
+    condition = (
+      yamldecode(helm_release.ao_data_platform[0].values[0]).clickhouse.backup.enabled &&
+      yamldecode(helm_release.ao_data_platform[0].values[0]).clickhouse.otel.restrictGrants
+    )
+    error_message = "Backups must use restricted otel access by default without a grants warning."
+  }
+}
+
+run "broad_otel_access_without_backups_does_not_warn" {
+  command = plan
+
+  variables {
+    helm = { deploy_charts = false, clickhouse = { otel = { restrict_grants = false } } }
+  }
+
+  assert {
+    condition     = length(keys(local.helm_clickhouse_backup_block)) == 0 && output.clickhouse_backup == null
+    error_message = "Broad otel access without backups must not create backup access or emit the backup warning."
+  }
+}
+
+run "backup_storage_alone_with_broad_otel_access_does_not_warn" {
+  command = plan
+
+  variables {
+    clickhouse_backup = { bucket_name = "test-clickhouse-backups" }
+    helm              = { deploy_charts = false, clickhouse = { otel = { restrict_grants = false } } }
+  }
+
+  assert {
+    condition     = length(aws_s3_bucket.clickhouse_backup) == 1 && length(keys(local.helm_clickhouse_backup_block)) == 0
+    error_message = "Storage alone must not install the backup disk or emit the backup warning."
+  }
+}

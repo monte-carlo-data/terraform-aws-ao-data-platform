@@ -441,3 +441,12 @@ locals {
 data "aws_caller_identity" "clickhouse_backup" {
   count = local.clickhouse_backup_enabled ? 1 : 0
 }
+
+# A warning keeps the temporary compatibility option available while making its
+# effect visible when backup access is installed.
+check "backup_otel_grants" {
+  assert {
+    condition     = !var.helm.clickhouse.backup.enabled || var.helm.clickhouse.otel.restrict_grants
+    error_message = "Backups are enabled while the otel user has broad access. Users with CREATE TABLE permission can use the backup disk. Move readers to monte_carlo and set helm.clickhouse.otel.restrict_grants = true."
+  }
+}

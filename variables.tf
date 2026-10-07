@@ -654,11 +654,12 @@ variable "helm" {
     ClusterSecretStore, ExternalSecret) but skip the Helm release itself.
 
     clickhouse.otel.restrict_grants forwards clickhouse.otel.restrictGrants to the
-    chart. When true, the otel ingest user is restricted (via config grants) to
-    INSERT on the telemetry source tables only; when false (default) otel keeps
-    broad access. Requires chart version >= 2.0.0 (the flag is ignored by older
-    charts). Intended to be flipped to true only after external readers have moved
-    to the monte_carlo user.
+    chart. When true (default), the otel ingest user is restricted (via config
+    grants) to INSERT on otel_traces.otel_traces only; when false otel keeps
+    broad access. Set false only while external readers still query as otel
+    rather than the monte_carlo user. Requires chart version >= 2.0.0 (the flag
+    is ignored by older charts). When backups are enabled and restrict_grants is
+    false, Terraform warns during plan and apply without blocking either.
 
     clickhouse.admin optionally provisions the gated break-glass superuser
     (`admin`). When { enabled = true }, the module creates its Secrets Manager
@@ -760,7 +761,7 @@ variable "helm" {
         limits   = optional(map(string), null)
       }), null)
       otel = optional(object({
-        restrict_grants = optional(bool, false)
+        restrict_grants = optional(bool, true)
       }), {})
       admin = optional(object({
         enabled = bool
