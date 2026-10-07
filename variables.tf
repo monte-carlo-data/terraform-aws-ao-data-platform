@@ -586,8 +586,29 @@ variable "helm" {
     Required when deploy_charts = true. This module expects chart_version >= "1.3.0"
     — the chart removed its OTel anti-affinity rule in favor of the dedicated
     ClickHouse node group this module creates (see clickhouse_node_group).
-    Nothing in the module gates this at apply time; a 1.2.x caller will apply
-    cleanly and hit the original scheduler deadlock at runtime.
+    This 1.3.0 minimum is not checked automatically; a 1.2.x caller can apply
+    and hit the original scheduler deadlock. Scheduled backups have a separate
+    checked minimum of helm.chart_version >= 5.2.0.
+
+    Set chart_version to an exact, already-published version. Pre-release versions
+    with a base of 5.2.0 or later are also accepted for backups. Versions based on
+    0.0.0 fail the backup version check.
+
+    clickhouse.backup: enabled installs scheduled backups using clickhouse_backup
+    storage and requires deploy_charts and a published chart based on 5.2.0 or
+    later. Pre-release versions with a base of 5.2.0 or later are also accepted.
+    Both enabled and suspend default to false.
+    suspend pauses new scheduled jobs; it does not stop active jobs or prevent
+    ClickHouse pod restarts when backup software is enabled or disabled.
+    image is optional; null uses the chart's verified default. An override must
+    contain a SHA-256 digest; the chart checks which digest it supports and allows
+    the same image from another registry. The chart waits for credentials before
+    starting the backup API and uses a startup copy of its configuration.
+    api_password_revision defaults to "1"; changing it generates a new API
+    password and restarts the ClickHouse pods. Pause backup work first.
+    The API password and revision are stored together in Secrets Manager and
+    delivered by External Secrets. Helm receives only the secret reference and
+    revision, never the password.
 
     The clustered/HA Keeper topology (keeper_availability_zones) requires
     chart_version >= "2.3.0" — the first chart version exposing the keeper.*
@@ -618,7 +639,8 @@ variable "helm" {
     grants) to INSERT on otel_traces.otel_traces only; when false otel keeps
     broad access. Set false only while external readers still query as otel
     rather than the monte_carlo user. Requires chart version >= 2.0.0 (the flag
-    is ignored by older charts).
+    is ignored by older charts). When backups are enabled and restrict_grants is
+    false, Terraform warns during plan and apply without blocking either.
 
     clickhouse.admin optionally provisions the gated break-glass superuser
     (`admin`). When { enabled = true }, the module creates its Secrets Manager
@@ -728,6 +750,12 @@ variable "helm" {
       readonly_user = optional(object({
         enabled = bool
       }), null)
+      backup = optional(object({
+        enabled               = optional(bool, false)
+        suspend               = optional(bool, false)
+        image                 = optional(string, null)
+        api_password_revision = optional(string, "1")
+      }), {})
     }), {})
 
     opentelemetry_collector = optional(object({
@@ -786,6 +814,24 @@ variable "helm" {
   }
 
   validation {
+    condition     = !var.helm.clickhouse.backup.enabled || var.helm.deploy_charts
+    error_message = "helm.clickhouse.backup.enabled requires helm.deploy_charts = true."
+  }
+
+  validation {
+    condition = var.helm.clickhouse.backup.image == null ? true : can(regex(
+      "^[^[:space:]@]+@sha256:[0-9a-f]{64}$",
+      var.helm.clickhouse.backup.image,
+    ))
+    error_message = "helm.clickhouse.backup.image must be null to use the chart default, or an image reference ending in @sha256: followed by 64 lowercase hexadecimal characters. The chart checks that the digest is supported."
+  }
+
+  validation {
+    condition     = can(regex("^[A-Za-z0-9][A-Za-z0-9._-]{0,62}$", var.helm.clickhouse.backup.api_password_revision))
+    error_message = "helm.clickhouse.backup.api_password_revision must contain 1-63 letters, numbers, dots, underscores, or hyphens and start with a letter or number. Change it whenever the API password changes."
+  }
+
+  validation {
     condition     = alltrue([for name, r in var.helm.opentelemetry_collector.awss3_receivers : can(regex("^[a-zA-Z0-9_-]+$", name))])
     error_message = "helm.opentelemetry_collector.awss3_receivers keys may only contain alphanumeric characters, hyphens, and underscores — each key becomes the OTel component ID \"awss3/<key>\" in the rendered collector config."
   }
@@ -807,17 +853,22 @@ variable "helm" {
 variable "clickhouse_backup" {
   description = <<-EOT
     Optional ClickHouse backup storage. Creates a private, encrypted S3 bucket,
-    a bucket-scoped IAM role, and a generated password in Secrets Manager for
-    the future backup SQL user. Null creates none of these resources.
+    a bucket-scoped IAM role, and generated passwords in Secrets Manager for
+    the backup database user and its read-only probe. Null creates none of these
+    resources.
 
     bucket_name must be a new, globally unique S3 bucket name. No automatic
     expiry is configured, and this release does not delete old backups, so
     backup files accumulate until cleanup ships. The password is generated for a
     new backup user; supplying an existing password is not supported.
-    service_account_name identifies the future Kubernetes service account in
-    the module's montecarlo namespace that can assume the role. Creating and
-    attaching that service account, delivering the password, and creating the
-    ClickHouse user are part of installing the backup software.
+    service_account_name identifies the dedicated Kubernetes service account in
+    montecarlo that can assume the role. With helm.clickhouse.backup.enabled,
+    the chart creates this account, copies the stored database password through
+    External Secrets, and configures the ClickHouse backup user. Do not create
+    the account separately for this installation. Storage alone does not install
+    backups: helm.clickhouse.backup.enabled defaults to false. With chart
+    deployment off, the caller must install and configure the software and API
+    credentials separately, using the generated backup and probe passwords.
   EOT
   type = object({
     bucket_name          = string

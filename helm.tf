@@ -281,7 +281,7 @@ resource "helm_release" "ao_data_platform" {
             "service.beta.kubernetes.io/load-balancer-source-ranges" = join(",", local.clickhouse_nlb_source_ranges)
           } : {})
         }
-      }, local.helm_clickhouse_resources_block, local.helm_clickhouse_admin_block, local.helm_clickhouse_readonly_user_block, local.helm_clickhouse_node_selector_block, local.helm_clickhouse_tolerations_block)
+      }, local.helm_clickhouse_resources_block, local.helm_clickhouse_admin_block, local.helm_clickhouse_readonly_user_block, local.helm_clickhouse_backup_block, local.helm_clickhouse_node_selector_block, local.helm_clickhouse_tolerations_block)
       "opentelemetry-collector" = merge({
         serviceAccount = {
           annotations = {
@@ -340,6 +340,19 @@ resource "helm_release" "ao_data_platform" {
 
   lifecycle {
     precondition {
+      condition     = !var.helm.clickhouse.backup.enabled || local.clickhouse_backup_enabled
+      error_message = "helm.clickhouse.backup.enabled requires clickhouse_backup. Set clickhouse_backup.bucket_name to create the backup storage and credentials, or keep that configuration if they already exist."
+    }
+
+    precondition {
+      condition = !var.helm.clickhouse.backup.enabled || (
+        local.chart_version_parts[0] > 5 ||
+        (local.chart_version_parts[0] == 5 && local.chart_version_parts[1] >= 2)
+      )
+      error_message = "Scheduled backups require a published helm.chart_version containing backup support with a base of 5.2.0 or later. Pre-release versions with a base of 5.2.0 or later are also accepted; older charts ignore the backup settings."
+    }
+
+    precondition {
       condition     = var.clickhouse_domain != null && var.otel_collector_domain != null
       error_message = "clickhouse_domain and otel_collector_domain are required when helm.deploy_charts = true."
     }
@@ -397,6 +410,14 @@ resource "helm_release" "ao_data_platform" {
     helm_release.cert_manager,
     data.kubernetes_namespace_v1.cert_manager,
     null_resource.eso_resources,
+    # Attach backup permissions before the chart selects the role.
+    aws_iam_role_policy.clickhouse_backup,
+    aws_iam_role_policy.external_secrets,
+    # Publish all backup passwords before the chart asks External Secrets
+    # to read them. Referencing a Secret's name alone does not wait for its value.
+    aws_secretsmanager_secret_version.clickhouse_backup,
+    aws_secretsmanager_secret_version.clickhouse_backup_probe,
+    aws_secretsmanager_secret_version.clickhouse_backup_api,
 
     # Every ClickHouse/Keeper node must exist before the chart schedules those
     # pods. Their PVCs use a WaitForFirstConsumer storage class, so a pod that
