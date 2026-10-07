@@ -418,7 +418,7 @@ The module provisions a per-access-path ClickHouse user model (`ao-data-platform
 
 For each provisioned user the module generates a 32-character password (or uses the matching `clickhouse_passwords.*` override), stores it in Secrets Manager KMS-encrypted with the pipeline key, grants the External Secrets Operator read access, and forwards the per-user `externalSecret` config into the chart so ESO syncs the password into Kubernetes. Each user's secret ARN is exposed as a `clickhouse_*_credentials_secret_arn` output. As of v3.0.0, setting `clickhouse_write_only = true` makes generation ephemeral and the write use write-only arguments, so no password is stored in Terraform state or plan files; the override variable is `clickhouse_passwords_wo` on that path. See [Upgrading to v3.0.0](#upgrading-to-v300).
 
-- Set `helm.clickhouse.otel.restrict_grants = true` to tighten the `otel` ingest user to `INSERT`-only on the telemetry source tables. Flip this only after any external readers have moved to the `monte_carlo` user — see [Upgrading to v2.0.0](#upgrading-to-v200).
+- The `otel` ingest user is restricted to `INSERT`-only on `otel_traces.otel_traces` by default (`helm.clickhouse.otel.restrict_grants = true`). Set it to `false` only while external readers still query as `otel` rather than `monte_carlo`; that restores broad read access for the most widely distributed ClickHouse credential — see [Upgrading to v2.6.0](#upgrading-to-v260).
 - Enable the gated break-glass `admin` superuser with `helm.clickhouse.admin = { enabled = true }`. It is reachable only over loopback by default (i.e. via `kubectl exec` into the ClickHouse pod). Disabled by default; when disabled no admin secret is created and `clickhouse_admin_credentials_secret_arn` is `null`.
 
 **Requires `ao-data-platform` chart >= 2.0.0.** Older charts silently ignore the per-user values; the module stays compatible with them via a transitional dual-wiring of the `otel` credential.
@@ -440,10 +440,9 @@ module "ao_data_platform" {
     clickhouse = {
       # Gated break-glass superuser (loopback-only). Off by default.
       admin = { enabled = true }
-      # Set true to tighten otel to INSERT-only, once external readers use
-      # monte_carlo. Defaults to false (broad access) when omitted; uncomment
-      # the line below to opt in.
-      # otel = { restrict_grants = true }
+      # otel is INSERT-only by default. Uncomment the line below only while
+      # external readers still query as otel instead of monte_carlo.
+      # otel = { restrict_grants = false }
     }
   }
 }
@@ -652,7 +651,7 @@ To use a StorageClass you manage outside this module, set `clickhouse_storage_cl
 | `helm.llm_worker.replica_count` | `number` | `null` | Optional override for the llm-worker replica count. `null` (default) lets the chart control it; set to `0` to pause the worker as configuration that survives an apply (used during a maintenance window). |
 | `helm.llm_worker.env` | `map(string)` | `{}` | Arbitrary extra environment variables forwarded to the llm-worker container (e.g. `BEDROCK_INFERENCE_PROFILES`). Rendered as plain (non-secret) env vars, appended after the chart's own entries — Kubernetes resolves duplicate container env names by last-one-wins, so a key matching one the chart already sets (`CH_HOST`, `CH_PORT`, `LLM_PROVIDER`, `AWS_REGION`, etc.) silently overrides it. Avoid those names unless overriding is the intent. **Supported since chart 1.5.0** on the public registry (`oci://registry-1.docker.io/montecarlodata`) this module's examples use — the oldest version it offers, so every deployment on that registry has it. Earlier versions existed only on a private pre-release registry and are out of scope. |
 | `helm.clickhouse.resources` | `object` | `null` | Kubernetes resource requests/limits for the ClickHouse pods. Shape: `{ requests = map(string), limits = map(string) }`. Omit to use chart defaults. |
-| `helm.clickhouse.otel.restrict_grants` | `bool` | `false` | Forwards `clickhouse.otel.restrictGrants` to the chart. When `true`, the `otel` ingest user is restricted to `INSERT` on the telemetry source tables only; `false` keeps it broad. **Requires chart version >= 2.0.0** (ignored by older charts). Flip to `true` only after external readers have moved to the `monte_carlo` user. |
+| `helm.clickhouse.otel.restrict_grants` | `bool` | `true` | Forwards `clickhouse.otel.restrictGrants` to the chart. When `true`, the `otel` ingest user is restricted to `INSERT` on `otel_traces.otel_traces` only; `false` keeps it broad. **Requires chart version >= 2.0.0** (ignored by older charts). Set `false` only while external readers still query as `otel` rather than `monte_carlo`. See [Upgrading to v2.6.0](#upgrading-to-v260). |
 | `helm.clickhouse.admin` | `object` | `null` | Optionally provisions the gated break-glass superuser (`admin`). Shape: `{ enabled = bool }`. When `enabled = true`, a Secrets Manager secret + ExternalSecret pipeline is created and the chart's admin user is enabled (loopback-only by default — reachable only via pod-exec); the password comes from `clickhouse_passwords.admin` — or `clickhouse_passwords_wo.admin` when `clickhouse_write_only = true` — or is auto-generated. When disabled (default), no admin secret is created. **Requires chart version >= 2.0.0.** Omit (or `null`) to disable. |
 | `helm.clickhouse.readonly_user` | `object` | `null` | Optionally provisions a second SELECT-only ClickHouse user (`readonly_user`, profile `readonly`). Shape: `{ enabled = bool }`. When `enabled = true`, a Secrets Manager secret + ExternalSecret pipeline mirroring the otel user is created and the toggle is forwarded to the chart; the password comes from `clickhouse_passwords.readonly_user` — or `clickhouse_passwords_wo.readonly_user` when `clickhouse_write_only = true` — or is auto-generated. **Requires chart version >= 1.2.0.** Omit (or `null`) to disable. |
 | `clickhouse_write_only` | `bool` | `false` | Opts **this deployment** into the write-only ClickHouse password path: passwords are generated by `ephemeral "random_password"` and written through `secret_string_wo`, so none reaches Terraform state or plan files. At the default of `false` the module keeps the legacy path (managed `random_password` + `secret_string`, passwords in state) — so **adopting v3.0.0 changes nothing until you set this**. The flag lives in the module so a fleet sharing one module pin can migrate one deployment at a time. Setting it rewrites every ClickHouse secret on that apply: supply the deployment's current passwords via `clickhouse_passwords_wo` in the **same** apply, or each is silently replaced by a generated value. Once set, leave it set — it is the deployment's steady state. Selects which password variable is used: `false` → `clickhouse_passwords`, `true` → `clickhouse_passwords_wo`. **Deprecated on arrival**: v4.0.0 will make the write-only path unconditional and remove both this flag and `clickhouse_passwords`. Must stay a statically known value (a literal or another variable) — the path-selecting locals rely on the conditional short-circuiting, which Terraform only does for a known predicate. See [Upgrading to v3.0.0](#upgrading-to-v300). |
@@ -962,6 +961,48 @@ Not because such a guard is impossible. The AWS provider ships `ephemeral "aws_s
 - **For four of the six users the comparison carries no signal.** `otel`, `monte_carlo`, `schema_owner` and `llm_worker` are auto-generated when not supplied, so the desired value is a freshly minted random on every plan. An equality check against the live secret would therefore differ on *every* plan, forever: permanent noise that operators would learn to ignore, including on the one plan that mattered.
 
 So documentation is the control at plan time, which is why the two warnings above are load-bearing rather than decorative. The verification that does exist is after the fact: the `version_id` check under [Rotating afterwards](#rotating-afterwards) for a rotation, and `hack/verify-no-plaintext.sh` for the state itself. The per-deployment opt-in is the other half of the answer: a deployment that has not set `clickhouse_write_only` has nothing to guard, because nothing is written.
+
+### Upgrading to v2.6.0
+
+**Behavior change — the `otel` ClickHouse user is now restricted by default.**
+
+`helm.clickhouse.otel.restrict_grants` now defaults to `true`. If you never set
+it, your next apply after upgrading limits the `otel` ingest user to `INSERT`
+on `otel_traces.otel_traces`. The OTel Collector needs nothing more, so ingest
+is unaffected. Anything else that connects as `otel` to read data, or to write
+to any table other than `otel_traces.otel_traces`, loses access. The plan shows
+this only as a change to the Helm release values.
+
+Before upgrading, check whether anything other than the collector uses `otel`.
+Run the query below as the `monte_carlo` user (its credential is the
+`clickhouse_monte_carlo_credentials_secret_arn` output) on each ClickHouse pod,
+for example with `kubectl exec` and `clickhouse-client`. The ClickHouse endpoint
+is load-balanced and each replica keeps its own query log, so one pod's log is
+not enough. Any rows besides trivial connection checks (for example `SELECT 1`)
+come from a reader or writer:
+
+```sql
+SELECT initial_address, client_name, query_kind, tables, count() AS queries
+FROM system.query_log
+WHERE user = 'otel'
+  AND type = 'QueryFinish'
+  AND NOT (query_kind = 'Insert' AND has(tables, 'otel_traces.otel_traces'))
+  AND event_date >= today() - 7
+GROUP BY ALL
+ORDER BY queries DESC
+```
+
+The query covers the last 7 days, which is the query log's full retention, so a
+client that connects less often than weekly won't appear.
+
+If you find other clients, either:
+
+- move them to the `monte_carlo` user before upgrading, or
+- keep the previous behavior by setting
+  `helm.clickhouse.otel = { restrict_grants = false }` in the same change as the
+  version bump, then migrate the clients and remove the override later.
+
+Charts older than 2.0.0 ignore this flag, so deployments on them see no change.
 
 ### Upgrading to v2.0.0
 
