@@ -36,6 +36,12 @@ jobs:
           name: Plaintext detector self-test
           command: make selftest-verify-no-plaintext
       - run:
+          # Same idea for the rotation checker: fixture mode needs no AWS
+          # credentials and no cluster, so its version-diff logic can be gated
+          # here rather than only exercised during a live rotation.
+          name: Rotation checker self-test
+          command: make selftest-rotation-check
+      - run:
           name: Terraform test
           command: make test
 
