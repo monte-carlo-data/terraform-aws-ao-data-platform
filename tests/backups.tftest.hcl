@@ -97,6 +97,36 @@ mock_provider "aws" {
     target = aws_secretsmanager_secret.clickhouse_readonly_user_password[0]
     values = { arn = "arn:aws:secretsmanager:us-east-1:123456789012:secret:test-cluster/clickhouse/readonly-user-credentials-ABCDEF" }
   }
+
+  override_resource {
+    target = aws_secretsmanager_secret.clickhouse_otel_previous_password
+    values = { arn = "arn:aws:secretsmanager:us-east-1:123456789012:secret:test-cluster/clickhouse/otel-previous-credentials-ABCDEF" }
+  }
+
+  override_resource {
+    target = aws_secretsmanager_secret.clickhouse_monte_carlo_previous_password
+    values = { arn = "arn:aws:secretsmanager:us-east-1:123456789012:secret:test-cluster/clickhouse/monte-carlo-previous-credentials-ABCDEF" }
+  }
+
+  override_resource {
+    target = aws_secretsmanager_secret.clickhouse_schema_owner_previous_password
+    values = { arn = "arn:aws:secretsmanager:us-east-1:123456789012:secret:test-cluster/clickhouse/schema-owner-previous-credentials-ABCDEF" }
+  }
+
+  override_resource {
+    target = aws_secretsmanager_secret.clickhouse_llm_worker_previous_password
+    values = { arn = "arn:aws:secretsmanager:us-east-1:123456789012:secret:test-cluster/clickhouse/llm-worker-previous-credentials-ABCDEF" }
+  }
+
+  override_resource {
+    target = aws_secretsmanager_secret.clickhouse_admin_previous_password[0]
+    values = { arn = "arn:aws:secretsmanager:us-east-1:123456789012:secret:test-cluster/clickhouse/admin-previous-credentials-ABCDEF" }
+  }
+
+  override_resource {
+    target = aws_secretsmanager_secret.clickhouse_readonly_user_previous_password[0]
+    values = { arn = "arn:aws:secretsmanager:us-east-1:123456789012:secret:test-cluster/clickhouse/readonly-user-previous-credentials-ABCDEF" }
+  }
 }
 
 mock_provider "tls" {
@@ -166,6 +196,10 @@ run "backup_disabled_by_default" {
           aws_secretsmanager_secret.clickhouse_monte_carlo_password.arn,
           aws_secretsmanager_secret.clickhouse_schema_owner_password.arn,
           aws_secretsmanager_secret.clickhouse_llm_worker_password.arn,
+          aws_secretsmanager_secret.clickhouse_otel_previous_password.arn,
+          aws_secretsmanager_secret.clickhouse_monte_carlo_previous_password.arn,
+          aws_secretsmanager_secret.clickhouse_schema_owner_previous_password.arn,
+          aws_secretsmanager_secret.clickhouse_llm_worker_previous_password.arn,
         ])
       ]) &&
       anytrue([
@@ -481,6 +515,12 @@ run "external_secrets_reads_backup_password_without_expanding_other_access" {
         aws_secretsmanager_secret.clickhouse_llm_worker_password.arn,
         aws_secretsmanager_secret.clickhouse_admin_password[0].arn,
         aws_secretsmanager_secret.clickhouse_readonly_user_password[0].arn,
+        aws_secretsmanager_secret.clickhouse_otel_previous_password.arn,
+        aws_secretsmanager_secret.clickhouse_monte_carlo_previous_password.arn,
+        aws_secretsmanager_secret.clickhouse_schema_owner_previous_password.arn,
+        aws_secretsmanager_secret.clickhouse_llm_worker_previous_password.arn,
+        aws_secretsmanager_secret.clickhouse_admin_previous_password[0].arn,
+        aws_secretsmanager_secret.clickhouse_readonly_user_previous_password[0].arn,
         aws_secretsmanager_secret.clickhouse_backup[0].arn,
       ])
     ])
