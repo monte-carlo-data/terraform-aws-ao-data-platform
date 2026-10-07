@@ -284,8 +284,10 @@ The `clickhouse_write_only` setting covers the existing six ClickHouse users.
 The backup user, replication-check user, and backup API passwords still use
 managed password resources and remain in Terraform state, including when
 `clickhouse_write_only = true`. Protect saved state and plan files accordingly.
-The strict `verify-no-plaintext` check reports these backup passwords; it has
-not been relaxed to hide them.
+The `verify-no-plaintext` check reports these three known backup passwords
+separately as an advisory (exit 4). It still fails if existing user passwords
+are saved in state or any supplied password is found, including inside backup
+resources. An advisory does not mean that the entire state is password-free.
 
 For a module-managed installation, configure `clickhouse_backup` for storage,
 then set `helm.clickhouse.backup.enabled = true`. The chart creates the dedicated
@@ -1050,15 +1052,15 @@ rm -f "$STATE_JSON" "$SENTINELS"
 
 The script ships with the module, so a Registry consumer runs it from where Terraform unpacked it: `.terraform/modules/<module block name>/hack/verify-no-plaintext.sh` (`ao_data_platform` above — substitute your own `module` label, or check `.terraform/modules/modules.json` for the exact directory). It needs `bash` and `jq`, and nothing else, never echoes a sentinel's value, and reports:
 
-- exit **0** — no plaintext, and every ClickHouse secret version shows `has_secret_string_wo = true`, i.e. the write really did go through the write-only path
-- exit **1** — ClickHouse plaintext found: a `secret_string` argument on a ClickHouse secret version, a surviving managed ClickHouse `random_password`, or one of your sentinels present in the state
+- exit **0** — no password found by these checks, and the existing ClickHouse user secret versions show `has_secret_string_wo = true`, confirming that their writes used the write-only path
+- exit **1** — a ClickHouse secret version still stores `secret_string`, or a managed ClickHouse `random_password` remains, outside the three known backup names below. Finding any supplied password anywhere in state also produces exit 1.
 - exit **2** — usage or input problem: bad or unknown arguments (including a mistyped option), a missing state or sentinel file, or malformed or empty JSON — never a silent pass
-- exit **3** — no plaintext, but the write-only path could not be proven. During a migration this means the write did not happen, not that you are safe
-- exit **4** — advisory only: a non-ClickHouse resource carries a plaintext argument, or a managed `random_password` exists outside the ClickHouse set. Not proof of a ClickHouse leak, but not provably clean either — review the named resources. The sentinel file is authoritative for known passwords
+- exit **3** — the write-only path for existing users could not be proven. This takes priority over a backup advisory; do not treat missing proof as a successful migration.
+- exit **4** — advisory only: known backup credentials or non-ClickHouse resources still store passwords in state. The script reports the three known backup resource names (`clickhouse_backup`, `clickhouse_backup_api`, `clickhouse_backup_probe`) separately from other advisory findings. Review the named resources; this is not a claim that the whole state is password-free.
 
 Pass the sentinel file with `--sentinel-file` as above; positional sentinel arguments are deprecated but still accepted, in any order. Unknown options are rejected with exit 2.
 
-Scope: the script is meaningful only for a deployment that has **opted in** to the write-only path — on a legacy deployment, exit 1 or 3 is expected by design. The hard structural gates cover ClickHouse-named resources; the sentinel file is what covers everything else (outputs, helm values, foreign sinks).
+Scope: the script is meaningful only for a deployment that has **opted in** to the write-only path — on a legacy deployment, exit 1 or 3 is expected by design. It verifies the existing `admin`, `otel`, `monte_carlo`, `schema_owner`, `llm_worker`, and `readonly_user` passwords that are enabled for the deployment. Known backup resources cannot satisfy that verification. Unexpected ClickHouse resource names remain subject to the strict checks. Supplied passwords are still searched for throughout the state, including backup resources, outputs, and Helm values; finding one produces exit 1 even when a backup advisory is also present.
 
 On Terraform Cloud, use `terraform state pull > "$STATE_JSON"` instead of `show -json`. From a checkout of this repository, `make verify-no-plaintext STATE="$STATE_JSON" SENTINEL_FILE="$SENTINELS"` is the same check.
 
