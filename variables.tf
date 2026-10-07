@@ -639,7 +639,8 @@ variable "helm" {
     grants) to INSERT on otel_traces.otel_traces only; when false otel keeps
     broad access. Set false only while external readers still query as otel
     rather than the monte_carlo user. Requires chart version >= 2.0.0 (the flag
-    is ignored by older charts).
+    is ignored by older charts). When backups are enabled and restrict_grants is
+    false, Terraform warns during plan and apply without blocking either.
 
     clickhouse.admin optionally provisions the gated break-glass superuser
     (`admin`). When { enabled = true }, the module creates its Secrets Manager

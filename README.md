@@ -11,7 +11,7 @@ Terraform module that deploys the Monte Carlo Agent Observability data platform 
 
 ## Prerequisites
 
-- [Terraform](https://www.terraform.io/downloads.html) >= 1.3
+- [Terraform](https://www.terraform.io/downloads.html): the module declares >= 1.3, but its existing EKS dependency requires >= 1.5.7. CI uses Terraform 1.13.
 - [AWS CLI](https://aws.amazon.com/cli/) configured with appropriate credentials
 - [kubectl](https://kubernetes.io/docs/tasks/tools/) for cluster access
 
@@ -312,10 +312,12 @@ define an S3 disk in a table and write to the backup bucket, even with the
 ordinary S3-query protection above. This includes `otel` with unrestricted
 grants and `schema_owner`, the user that creates tables during database setup.
 
-The module currently defaults to `helm.clickhouse.otel.restrict_grants = false`.
-Set this option to `true` after moving any readers using `otel` to `monte_carlo`.
-This restricts the ingest user's access; it does not remove `schema_owner`'s
-table-creation permissions.
+Since v2.6.0, `helm.clickhouse.otel.restrict_grants` defaults to `true`. If you
+explicitly set it to `false` while enabling backups, Terraform warns during
+plan and apply without blocking either operation. Move any readers using
+`otel` to `monte_carlo`, then remove the override. Restricting the ingest user
+does not remove `schema_owner`'s table-creation permissions. See
+[Upgrading to v2.6.0](#upgrading-to-v260) for checking existing clients.
 
 **Enabling or disabling backups restarts the ClickHouse pods, even with
 `suspend = true`.** Plan a maintenance window for a single-copy deployment;
@@ -1079,7 +1081,7 @@ make sanity-check   # fmt check + validate (CI pipeline)
 make test           # variable-validation tests (requires Terraform >= 1.7)
 ```
 
-`make test` runs `terraform test` against `tests/*.tftest.hcl`. Tests cover the input safety nets (`cluster.main_node_group_size` range, the existing-cluster guard) using `mock_provider` — see the test file's preamble for the explicit scope and known coverage gaps. The module itself stays at `required_version >= 1.3`; the test floor is a dev-tool requirement only.
+`make test` runs `terraform test` against `tests/*.tftest.hcl`. Tests cover the input safety nets (`cluster.main_node_group_size` range, the existing-cluster guard) using `mock_provider` — see the test file's preamble for the explicit scope and known coverage gaps. The tests need Terraform >= 1.7 for mocked providers. The existing EKS dependency already requires >= 1.5.7, even though this module's own `required_version` still says >= 1.3. The backup warning does not add a newer requirement; CI uses Terraform 1.13.
 
 To release a new version, create and push a tag: `git tag v0.1.0 && git push origin v0.1.0`
 
