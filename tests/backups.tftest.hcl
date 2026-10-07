@@ -1,7 +1,7 @@
-# Plan-only tests: every provider is mocked, so these cannot access AWS or a
-# Kubernetes cluster. The mocks supply computed IDs/passwords and data lookups
-# such as account identity, availability zones, and cluster certificates. The
-# policies and resource settings under test come from the real module.
+# Plan-only tests: AWS and cluster providers are mocked, so these cannot access
+# AWS or Kubernetes. Managed backup password generators are overridden locally;
+# ephemeral password generators use the local random provider. Policies and
+# resource settings under test come from the real module.
 
 mock_provider "aws" {
   override_during = plan
@@ -150,18 +150,21 @@ mock_provider "tls" {
 # Override only managed backup generators; the password path also uses
 # ephemeral random resources, which cannot use a mocked random provider.
 override_resource {
-  target = random_password.clickhouse_backup[0]
-  values = { result = "00000000000000000000000000000000" }
+  override_during = plan
+  target          = random_password.clickhouse_backup[0]
+  values          = { result = "00000000000000000000000000000000" }
 }
 
 override_resource {
-  target = random_password.clickhouse_backup_probe[0]
-  values = { result = "22222222222222222222222222222222" }
+  override_during = plan
+  target          = random_password.clickhouse_backup_probe[0]
+  values          = { result = "22222222222222222222222222222222" }
 }
 
 override_resource {
-  target = random_password.clickhouse_backup_api[0]
-  values = { result = "11111111111111111111111111111111" }
+  override_during = plan
+  target          = random_password.clickhouse_backup_api[0]
+  values          = { result = "11111111111111111111111111111111" }
 }
 
 mock_provider "helm" {}
@@ -1546,4 +1549,74 @@ run "installed_backups_support_a_separately_managed_secrets_operator" {
     )
     error_message = "Separately managed External Secrets must receive all three secret references without the module creating its IAM role or policy."
   }
+}
+
+# Combining backup installation and write-only database credentials must leave
+# the existing six user passwords on their selected path.
+run "backups_preserve_write_only_database_passwords" {
+  command = plan
+  variables {
+    clickhouse_write_only = true
+    clickhouse_password_versions = {
+      otel       = 2, monte_carlo = 3, schema_owner = 4,
+      llm_worker = 5, admin = 6, readonly_user = 7
+    }
+    clickhouse_backup     = { bucket_name = "test-clickhouse-backups" }
+    clickhouse_domain     = "clickhouse.example.com"
+    otel_collector_domain = "otel.example.com"
+    helm = {
+      chart_registry = "oci://registry-1.docker.io/montecarlodata"
+      chart_version  = "5.2.0"
+      clickhouse = {
+        backup        = { enabled = true }
+        admin         = { enabled = true }
+        readonly_user = { enabled = true }
+      }
+    }
+  }
+  assert {
+    condition = alltrue([
+      length(random_password.clickhouse_otel) == 0,
+      length(random_password.clickhouse_monte_carlo) == 0,
+      length(random_password.clickhouse_schema_owner) == 0,
+      length(random_password.clickhouse_llm_worker) == 0,
+      length(random_password.clickhouse_admin) == 0,
+      length(random_password.clickhouse_readonly_user) == 0,
+      aws_secretsmanager_secret_version.clickhouse_otel_password.secret_string == null,
+      aws_secretsmanager_secret_version.clickhouse_monte_carlo_password.secret_string == null,
+      aws_secretsmanager_secret_version.clickhouse_schema_owner_password.secret_string == null,
+      aws_secretsmanager_secret_version.clickhouse_llm_worker_password.secret_string == null,
+      aws_secretsmanager_secret_version.clickhouse_admin_password[0].secret_string == null,
+      aws_secretsmanager_secret_version.clickhouse_readonly_user_password[0].secret_string == null,
+      aws_secretsmanager_secret_version.clickhouse_otel_password.secret_string_wo_version == 2,
+      aws_secretsmanager_secret_version.clickhouse_monte_carlo_password.secret_string_wo_version == 3,
+      aws_secretsmanager_secret_version.clickhouse_schema_owner_password.secret_string_wo_version == 4,
+      aws_secretsmanager_secret_version.clickhouse_llm_worker_password.secret_string_wo_version == 5,
+      aws_secretsmanager_secret_version.clickhouse_admin_password[0].secret_string_wo_version == 6,
+      aws_secretsmanager_secret_version.clickhouse_readonly_user_password[0].secret_string_wo_version == 7,
+      length(random_password.clickhouse_backup) == 1,
+      length(random_password.clickhouse_backup_probe) == 1,
+      length(random_password.clickhouse_backup_api) == 1,
+      nonsensitive(aws_secretsmanager_secret_version.clickhouse_backup[0].secret_string) == "00000000000000000000000000000000",
+      nonsensitive(aws_secretsmanager_secret_version.clickhouse_backup_probe[0].secret_string) == "22222222222222222222222222222222",
+      jsondecode(nonsensitive(aws_secretsmanager_secret_version.clickhouse_backup_api[0].secret_string)).password == "11111111111111111111111111111111",
+      yamldecode(helm_release.ao_data_platform[0].values[0]).clickhouse.backup.enabled,
+    ])
+    error_message = "Backups must preserve all six write-only database users and their version counters; only the three separate backup passwords use managed generators."
+  }
+}
+
+run "backup_grants_warning_requires_explicit_broad_access" {
+  command = plan
+  variables {
+    clickhouse_backup     = { bucket_name = "test-clickhouse-backups" }
+    clickhouse_domain     = "clickhouse.example.com"
+    otel_collector_domain = "otel.example.com"
+    helm = {
+      chart_registry = "oci://registry-1.docker.io/montecarlodata"
+      chart_version  = "5.2.0"
+      clickhouse     = { backup = { enabled = true }, otel = { restrict_grants = false } }
+    }
+  }
+  expect_failures = [check.backup_otel_grants]
 }

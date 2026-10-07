@@ -280,6 +280,13 @@ These are IAM identity-policy grants on module-managed, same-account roles, so t
 
 ### ClickHouse backups
 
+The `clickhouse_write_only` setting covers the existing six ClickHouse users.
+The backup user, replication-check user, and backup API passwords still use
+managed password resources and remain in Terraform state, including when
+`clickhouse_write_only = true`. Protect saved state and plan files accordingly.
+The strict `verify-no-plaintext` check reports these backup passwords; it has
+not been relaxed to hide them.
+
 For a module-managed installation, configure `clickhouse_backup` for storage,
 then set `helm.clickhouse.backup.enabled = true`. The chart creates the dedicated
 service account with its AWS role annotation, delivers the passwords through
@@ -315,8 +322,10 @@ define an S3 disk in a table and write to the backup bucket, even with the
 ordinary S3-query protection above. This includes `otel` with unrestricted
 grants and `schema_owner`, the user that creates tables during database setup.
 
-The module currently defaults to `helm.clickhouse.otel.restrict_grants = false`.
-Set this option to `true` after moving any readers using `otel` to `monte_carlo`.
+The module defaults to `helm.clickhouse.otel.restrict_grants = true`.
+An explicit `false` keeps the older access rules and produces a plan-time warning
+when backups are enabled. Move any readers using `otel` to `monte_carlo` before
+removing that override.
 This restricts the ingest user's access; it does not remove `schema_owner`'s
 table-creation permissions.
 
