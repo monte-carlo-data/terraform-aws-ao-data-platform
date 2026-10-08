@@ -345,11 +345,13 @@ resource "helm_release" "ao_data_platform" {
     }
 
     precondition {
-      condition = !var.helm.clickhouse.backup.enabled || (
-        local.chart_version_parts[0] > 5 ||
-        (local.chart_version_parts[0] == 5 && local.chart_version_parts[1] >= 2)
-      )
+      condition     = !var.helm.clickhouse.backup.enabled || local.chart_supports_scheduled_backups
       error_message = "Scheduled backups require a published helm.chart_version containing backup support with a base of 5.2.0 or later. Pre-release versions with a base of 5.2.0 or later are also accepted; older charts ignore the backup settings."
+    }
+
+    precondition {
+      condition     = !var.helm.clickhouse.backup.cleanup.enabled || local.chart_supports_backup_cleanup
+      error_message = "Backup cleanup requires a published helm.chart_version based on 5.3.0 or later. For pre-release builds, use one containing the preview code released in chart 5.3.0."
     }
 
     precondition {

@@ -346,7 +346,8 @@ The module creates:
   default, and a policy rejecting unencrypted connections. A separate KMS key
   encrypts backup files, with automatic key rotation and S3 Bucket Keys enabled.
   No automatic expiry is configured, and this release does not delete old
-  backups, so backup files accumulate until cleanup ships.
+  backups. Files accumulate, and this release has no supported procedure for
+  removing individual backups.
 - A separate IAM role that can list, read, write, delete, and abort incomplete
   uploads only in that bucket in this AWS account, plus `kms:GenerateDataKey` and `kms:Decrypt` on
   the backup key for uploads and restores. Only the named service account in
@@ -402,13 +403,17 @@ conflicting self-managed resources remain.
 
 **Current limits.** This release uses one fixed schedule every four hours UTC:
 the first successful run each UTC day is full, and later runs save changes from
-an earlier backup. The module does not expose schedule customization. This
-release does not delete old backups and does not yet document a tested restore
-procedure. Storage grows by roughly one full backup per day plus incremental
-backups, so watch the bucket size from the first day. There are no backup alerts
-in this release: failed Jobs are visible in Kubernetes, and a missed run might
-not produce a failed Job at all. Check that scheduled backups complete. Do not
-add S3 expiry on current files independently: incremental backups can still need
+an earlier backup. The module does not expose schedule customization. Cleanup
+is optional and disabled by default; when enabled, it previews deletions only.
+This release has no supported procedure for removing individual backups. A
+tested restore procedure is not yet documented. Storage grows by roughly one
+full backup per day plus incremental backups, so watch the bucket size from the
+first day. Each ClickHouse copy also keeps backup metadata on its data volume;
+that metadata grows as backups are created or downloaded, and the preview does
+not limit it.
+Check backup Job results in Kubernetes; a missed run might not produce a failed
+Job. This module does not create backup alerts. Do not add
+S3 expiry on current files independently: incremental backups can still need
 their older full backup.
 
 **Backup software and passwords.** The chart uses the standard Altinity software
@@ -483,12 +488,92 @@ existing files keep their previous encryption. Backup clients can use the bucket
 default by leaving their encryption settings unset. Explicit encryption settings
 must specify both `aws:kms` and this backup key's ARN; other settings are rejected.
 
+**Cleanup previews.** A published chart based on 5.3.0 or later can report which
+old backups could be removed after a successful scheduled backup. Cleanup is off
+by default and does not delete files. It requires enabled backups and checks
+every configured ClickHouse copy. It works with any supported
+`clickhouse_replica_count`; enabling cleanup does not require changing that count.
+The usual replica placement limits still apply, and existing tables must use
+replicated engines before adding copies. Read `clickhouse_replica_count` and
+[Clustered / HA topology](#clustered--ha-topology) before changing it.
+
+```hcl
+# Inside helm.clickhouse.backup, alongside enabled = true:
+cleanup = {
+  enabled         = true
+  dry_run         = true # Required: preview only.
+  keep_last       = 2    # Protect at least this many newest backups and their dependencies.
+  keep_days       = 0    # Days to protect; 0 disables the age rule. For example, use 30 in production.
+  timeout_seconds = 1800
+}
+```
+
+`keep_last` must be a whole number of at least 1. `keep_days` must be a whole
+number of at least 0. The preview protects the newest `keep_last` backups, those
+within `keep_days`, and any earlier backups they depend on. Test changes in a
+non-production environment first. No S3 file-expiry rule is created. This module
+never deletes backups, and this release has no supported procedure for removing
+individual backups, so treat `delete` as informational. Do not remove backup
+files by hand or with S3 expiry: incremental backups can still need older full
+backups, and each ClickHouse copy keeps local backup metadata on its data volume.
+That metadata grows as backups are created or downloaded, and the preview does
+not limit it. Terraform rejects enabled cleanup with `dry_run = false`.
+For the software limitation and requirements for future deletion, see:
+<https://github.com/monte-carlo-data/helm-ao-data-platform/blob/main/docs/backup-cleanup.md#why-deletion-is-unavailable>.
+
+Read the preview in the scheduled backup Job's logs. Find the latest
+`otel-backup` Job, then use its name:
+
+```sh
+kubectl -n montecarlo get jobs --sort-by=.metadata.creationTimestamp
+kubectl -n montecarlo logs job/<latest-otel-backup-job>
+```
+
+A summary line starts with `Backup cleanup:`, followed by one
+`Backup cleanup entry:` line per backup. For example:
+
+```text
+Backup cleanup: {"mode":"dry-run","keep_last":2,"keep_days":0,"kept_count":2,"delete_count":1,"deleted_count":0,"broken_local_count":0,"local_only_count":0}
+Backup cleanup entry: {"list":"kept","name":"ao-otel-full-20260102T000000Z-4567abcd"}
+Backup cleanup entry: {"list":"kept","name":"ao-otel-incremental-20260102T040000Z-89abcdef"}
+Backup cleanup entry: {"list":"delete","name":"ao-otel-full-20260101T000000Z-0123abcd"}
+```
+
+Entries with `list: "delete"` name removal candidates only, ordered with dependent
+backups before their bases; nothing is removed. Incomplete local entries and
+entries missing from the remote catalog use `list: "broken_local"` and
+`list: "local_only"`, with `copy` identifying the ClickHouse copy. They are left
+untouched. When either local count is nonzero, the Job also logs
+`Backup cleanup preview found local files needing attention; ...`.
+Use the chart's cleanup guide to inspect these entries:
+<https://github.com/monte-carlo-data/helm-ao-data-platform/blob/main/docs/backup-cleanup.md#reading-the-result>.
+If a preview cannot finish, the Job logs `Backup cleanup preview stopped: ...` after
+`Verified completed ... backup ... in S3.` and still succeeds because the backup
+itself completed. A backup failure still fails the Job. Read both messages when
+checking backup and preview results.
+
+`timeout_seconds` must be a whole number of at least 60. It is added to the
+backup timeout and 60 seconds when setting the Job deadline. With the chart's
+10800-second backup timeout, which this module does not change, cleanup values
+of 3540 or more reach or exceed the next four-hour run. Since overlapping Jobs
+are forbidden and a missed start is retried for only 15 minutes, a slow preview
+can make the following run be skipped. Choose a timeout that leaves room before
+the next scheduled backup.
+
+Cleanup requires a published chart based on 5.3.0 or later containing these
+preview checks. A pre-release build is supported for cleanup only if it contains
+the preview code released in chart 5.3.0; older 5.3.0 development builds can fail
+the backup Job when the preview fails. The version check alone cannot detect
+that difference. Existing backup installations can keep chart 5.2.0 when cleanup
+is off.
+
 **Keeping or removing backups.** Keep `clickhouse_backup` enabled while backups
 are needed. To remove the backup software, first apply
 `helm.clickhouse.backup.suspend = true` and wait for running operations to finish.
-Then set `helm.clickhouse.backup.enabled = false`, review the plan, and apply.
-This removes the backup software and API secret and restarts the ClickHouse
-pods; use the same maintenance-window precautions as when enabling backups.
+Then set `helm.clickhouse.backup.cleanup.enabled = false` and
+`helm.clickhouse.backup.enabled = false`. Review the plan and apply. This removes
+the backup software and API secret and restarts the ClickHouse pods; use the
+same maintenance-window precautions as when enabling backups.
 The backup bucket, key, role, and backup and probe database passwords remain
 until you also unset `clickhouse_backup`. Only remove that block after deciding
 how to preserve or discard the existing backups as described below.
@@ -797,7 +882,7 @@ To use a StorageClass you manage outside this module, set `clickhouse_storage_cl
 | `storage_class_clickhouse_gp3` | `object` | `{}` (all defaults) | Parameters for the dedicated `clickhouse-gp3` StorageClass this module creates (never modifies the shared `gp3` class). Shape: `{ iops = optional(number, 3000), throughput = optional(number, 125) }`. Defaults to the `gp3` baseline; raise per measured ClickHouse merge load. Validated to `gp3` limits (IOPS 3000–16000, throughput 125–1000 MB/s, throughput ≤ 0.25 × IOPS). Applies only to newly provisioned volumes. |
 | `helm.deploy_charts` | `bool` | `true` | Deploy the `ao-data-platform` chart from Terraform |
 | `helm.chart_registry` | `string` | `null` | OCI registry URL for the `ao-data-platform` chart (e.g. `oci://123456789012.dkr.ecr.us-east-1.amazonaws.com`). Required when `deploy_charts = true`. |
-| `helm.chart_version` | `string` | `null` | Already-published `ao-data-platform` chart version. Required when `deploy_charts = true`. Backups require an exact version with base version >= 5.2.0. Pre-release versions with a base of 5.2.0 or later are also accepted; ranges and incomplete versions are rejected. See [ClickHouse backups](#clickhouse-backups). |
+| `helm.chart_version` | `string` | `null` | Already-published `ao-data-platform` chart version. Required when `deploy_charts = true`. Backups require an exact version with base version >= 5.2.0; cleanup previews require >= 5.3.0. Pre-release versions meeting the same base-version requirements pass the version check, but cleanup supports only builds containing the preview code released in chart 5.3.0. Ranges and incomplete versions are rejected. See [ClickHouse backups](#clickhouse-backups). |
 | `helm.install_aws_load_balancer_controller` | `bool` | `true` | Skip if LBC is already installed in the cluster |
 | `helm.install_cert_manager` | `bool` | `true` | Skip if cert-manager is already installed |
 | `helm.install_external_secrets_operator` | `bool` | `true` | Skip if ESO is already installed |
@@ -815,6 +900,7 @@ To use a StorageClass you manage outside this module, set `clickhouse_storage_cl
 | `helm.clickhouse.backup.suspend` | `bool` | `false` | Pause new scheduled backup runs while keeping the installation. Running work continues. Persist `true` before maintenance; enabling with the default `false` starts the schedule on the first apply. |
 | `helm.clickhouse.backup.image` | `string` | `null` | Optional image override. Omit to use the chart's tested Altinity image. An override must include a SHA-256 digest; another registry or repository is allowed, and the chart checks that the digest matches its tested image. The module does not build an image. |
 | `helm.clickhouse.backup.api_password_revision` | `string` | `"1"` | Changing this generates a new API password, updates the password and revision together in Secrets Manager, and restarts the ClickHouse pods. Pause backups in a separate apply before changing it. See the rotation steps in [ClickHouse backups](#clickhouse-backups). |
+| `helm.clickhouse.backup.cleanup` | `object` | `{ enabled = false, dry_run = true, keep_last = 2, keep_days = 0, timeout_seconds = 1800 }` | Preview backup removal in the scheduled Job logs. Requires backups enabled and a published chart based on >= 5.3.0. Checks every configured ClickHouse copy and supports the same replica counts as the rest of the module. `dry_run` must remain true when enabled; this module never deletes backups. `keep_last` is an integer >= 1; `keep_days` an integer >= 0; `timeout_seconds` an integer >= 60. The timeout adds to the backup Job deadline and can delay the next scheduled run; see [Cleanup previews](#clickhouse-backups). |
 | `clickhouse_passwords` | `object` (sensitive) | `{}` (all auto-generated) | Passwords for the ClickHouse SQL users. Shape: `{ admin = optional(string), otel = optional(string), monte_carlo = optional(string), schema_owner = optional(string), llm_worker = optional(string), readonly_user = optional(string) }`. Any field left null is auto-generated. Marked `sensitive`, so caller-supplied values are redacted in plan/apply output and CI logs — supply via a `.tfvars` file or `TF_VAR_clickhouse_passwords`. Stored in Secrets Manager and synced into the cluster by ESO; never passed through Helm values. Values remain readable in Terraform state — protect state accordingly. |
 | `helm.opentelemetry_collector.resources` | `object` | `null` | Kubernetes resource requests/limits for the OTel Collector pods. Same shape as `helm.clickhouse.resources`. Omit to use chart defaults. |
 | `helm.opentelemetry_collector.replica_count` | `number` | `null` | Optional override for the OTel Collector replica count. `null` (default) lets the chart control it. **`0` is not honored by the chart** — its collector template treats `0` as unset and deploys the default count; to stop ingest for a maintenance window, act upstream (deny consumption on the SQS queues feeding the awss3 receivers, or pause OTLP senders). Non-zero overrides work as expected. |
@@ -823,7 +909,7 @@ To use a StorageClass you manage outside this module, set `clickhouse_storage_cl
 | `helm.llm_worker.resources` | `object` | `null` | Kubernetes resource requests/limits for the LLM-worker pods. Same shape as `helm.clickhouse.resources`. Omit to use chart defaults. |
 | `trace_export_ingest` | `object` | `null` | Optional trace-export ingest leg — see [Trace-export ingest leg](#trace-export-ingest-leg). Shape: `{ producer_execution_role_arn = string, agent_role_arn = optional(string), bucket_name = optional(string), prefix = optional(string, "traces/"), lifecycle_days = optional(number, 3), kms_key_arn = optional(string) }`. `producer_execution_role_arn` is the external role trusted to assume the writer role (exact ARN or role-name wildcard; literal account ID enforced); the trust condition's `sts:ExternalId` value comes from the separate `trace_export_external_id` variable, which is required when this block is set. `agent_role_arn` optionally grants one additional role `s3:PutObject` on the prefix via the bucket policy. `prefix` accepts multi-segment values (`"traces/tenant-a/"`) and is normalized to one trailing `/`. `kms_key_arn` switches the bucket to SSE-KMS (Bucket Keys on) and widens writer/collector policies accordingly. Unset (default), no resources are created and the plan is unchanged from previous releases. |
 | `trace_export_external_id` | `string` (sensitive) | `null` | The `sts:ExternalId` value the external producer supplies when assuming the trace-export writer role (min 8 chars). Required when `trace_export_ingest` is set. Marked `sensitive`, so caller-supplied values are redacted in plan/apply output and CI logs — supply via a `.tfvars` file or `TF_VAR_trace_export_external_id`. Values remain readable in Terraform state — protect state accordingly. |
-| `clickhouse_backup` | `object` | `null` | Optional backup bucket, scoped IAM role, and generated backup and probe database passwords for a fresh backup installation. Requires `bucket_name`; `service_account_name` defaults to `clickhouse-backup` and cannot be `default`, `opentelemetry-collector`, `llm-worker`, `otel-backup-job`, or `clickhouse-backup-monitor`. No automatic expiry is configured, and this release does not delete old backups. Storage alone does not run backups: set `helm.clickhouse.backup.enabled = true` to install the software, service account and database users. See [ClickHouse backups](#clickhouse-backups). |
+| `clickhouse_backup` | `object` | `null` | Optional backup bucket, scoped IAM role, and generated backup and probe database passwords for a fresh backup installation. Requires `bucket_name`; `service_account_name` defaults to `clickhouse-backup` and cannot be `default`, `opentelemetry-collector`, `llm-worker`, `otel-backup-job`, or `clickhouse-backup-monitor`. No automatic expiry is configured. Backup files and local metadata accumulate; this release has no supported procedure for removing individual backups. Storage alone does not run backups: set `helm.clickhouse.backup.enabled = true` to install the software, service account and database users. See [ClickHouse backups](#clickhouse-backups). |
 
 ## Outputs
 
