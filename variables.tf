@@ -908,6 +908,12 @@ variable "clickhouse_backup" {
     bucket_name must be a new, globally unique S3 bucket name. No automatic
     expiry is configured. Backup files and local metadata accumulate; this release
     has no supported procedure for removing individual backups.
+    versioning_enabled keeps previous S3 object versions after an overwrite or
+    ordinary deletion. It defaults to false. Once enabled, keep it true:
+    Terraform prevents removing the versioning resource because that would
+    suspend protection. Previous versions have no automatic expiry and continue
+    to incur storage charges. Pause backup writes before first enabling it and
+    wait 15 minutes after applying before resuming them.
     The password is generated for a new backup user; supplying an existing
     password is not supported.
     service_account_name identifies the dedicated Kubernetes service account in
@@ -922,6 +928,7 @@ variable "clickhouse_backup" {
   type = object({
     bucket_name          = string
     service_account_name = optional(string, "clickhouse-backup")
+    versioning_enabled   = optional(bool, false)
   })
   default = null
 

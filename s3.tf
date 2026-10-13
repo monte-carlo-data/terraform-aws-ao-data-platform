@@ -157,6 +157,21 @@ resource "aws_s3_bucket" "clickhouse_backup" {
   depends_on = [aws_kms_key.clickhouse_backup]
 }
 
+resource "aws_s3_bucket_versioning" "clickhouse_backup" {
+  count = try(var.clickhouse_backup.versioning_enabled, false) ? 1 : 0
+
+  bucket = aws_s3_bucket.clickhouse_backup[0].id
+  versioning_configuration {
+    status = "Enabled"
+  }
+
+  # Removing this resource suspends versioning, even if deletion of the
+  # nonempty bucket then fails. Keep protection until deliberately retired.
+  lifecycle {
+    prevent_destroy = true
+  }
+}
+
 resource "aws_s3_bucket_public_access_block" "clickhouse_backup" {
   count = local.clickhouse_backup_enabled ? 1 : 0
 

@@ -290,6 +290,7 @@ backups, even when the module deploys the rest of the chart.
 clickhouse_backup = {
   bucket_name = "example-clickhouse-backups-123456789012-us-east-1"
   # service_account_name = "clickhouse-backup" # default
+  # versioning_enabled   = true               # optional; see below before enabling
 }
 ```
 
@@ -373,6 +374,38 @@ managed separately, grant its role `secretsmanager:GetSecretValue` and
 `secretsmanager:DescribeSecret` on the backup, probe, and API secret ARNs in use,
 plus `kms:Decrypt` on the module's secrets key. A separately installed chart
 needs the backup and probe secrets and an API secret supplied by its operator.
+
+**Protecting saved backup files.** Set `clickhouse_backup.versioning_enabled = true`
+to preserve older file versions after an overwrite or ordinary deletion. The
+default is `false`, which leaves existing buckets unchanged. This works with the
+current backup software and requires no chart upgrade. It does not enable Object
+Lock or automatic expiry of either current files or older versions.
+
+For an existing installation, pause the backup schedule and wait for running
+backup, restore, or cleanup work to finish before applying this setting. For a new
+installation, keep `helm.clickhouse.backup.suspend = true`. Review the plan: on an
+otherwise unchanged installation, this setting adds one S3 versioning resource;
+it does not replace the bucket, key, passwords, or database pods. After applying,
+verify that the bucket reports versioning `Enabled`, wait 15 minutes for AWS to
+finish enabling it, then resume the schedule in a separate apply. AWS describes
+the initial waiting period here:
+https://docs.aws.amazon.com/AmazonS3/latest/userguide/manage-versioning-examples.html.
+
+Once enabled, keep the setting `true`. Terraform blocks removal of the versioning
+resource, including setting this option to `false`, because removing it would
+suspend protection. Deliberately retiring protected storage requires a separate
+reviewed change to remove that safeguard and account for all retained versions.
+The safeguard only applies while this resource remains in the module code; it
+does not cover removing the module or returning to an older module without it.
+Keep the bucket's encryption key while any saved files are still needed.
+
+Enabling versioning does not copy existing files. Overwrites and deletions retain
+older copies that continue using paid storage; an ordinary delete does not free
+that space. The backup role keeps its existing permissions: it cannot permanently
+delete saved versions or turn off versioning. An authorized operator can recover
+selected files using [the recovery instructions](docs/recover-backup-files.md).
+Normal database recovery jobs should keep their read-only access. Automatic
+removal of old backup sets and their saved versions remains separate work.
 
 The backup password is generated-only by design: this block prepares a fresh
 backup installation, rather than adopting an existing database password. Unlike

@@ -194,6 +194,7 @@ run "backup_disabled_by_default" {
     condition = alltrue([
       length(data.aws_caller_identity.clickhouse_backup) == 0,
       length(aws_s3_bucket.clickhouse_backup) == 0,
+      length(aws_s3_bucket_versioning.clickhouse_backup) == 0,
       length(aws_s3_bucket_public_access_block.clickhouse_backup) == 0,
       length(aws_s3_bucket_ownership_controls.clickhouse_backup) == 0,
       length(aws_s3_bucket_server_side_encryption_configuration.clickhouse_backup) == 0,
@@ -250,6 +251,11 @@ run "backup_storage_is_private_and_not_force_deleted" {
 
   variables {
     clickhouse_backup = { bucket_name = "test-clickhouse-backups" }
+  }
+
+  assert {
+    condition     = length(aws_s3_bucket_versioning.clickhouse_backup) == 0
+    error_message = "Existing backup callers must not change bucket versioning unless they explicitly enable it."
   }
 
   assert {
@@ -430,11 +436,67 @@ run "backup_role_name_preserves_the_full_cluster_and_region" {
   }
 }
 
+run "backup_versioning_can_be_left_off_explicitly" {
+  command = plan
+
+  variables {
+    clickhouse_backup = {
+      bucket_name        = "test-clickhouse-backups"
+      versioning_enabled = false
+    }
+  }
+
+  assert {
+    condition     = length(aws_s3_bucket_versioning.clickhouse_backup) == 0
+    error_message = "An explicit false must leave an unversioned bucket unchanged."
+  }
+}
+
+run "backup_versioning_preserves_encryption_and_access_limits" {
+  command = plan
+
+  variables {
+    clickhouse_backup = {
+      bucket_name        = "test-clickhouse-backups"
+      versioning_enabled = true
+    }
+  }
+
+  assert {
+    condition = (
+      length(aws_s3_bucket_versioning.clickhouse_backup) == 1 &&
+      aws_s3_bucket_versioning.clickhouse_backup[0].bucket == aws_s3_bucket.clickhouse_backup[0].id &&
+      aws_s3_bucket_versioning.clickhouse_backup[0].versioning_configuration[0].status == "Enabled" &&
+      aws_s3_bucket.clickhouse_backup[0].force_destroy == false
+    )
+    error_message = "Opting in must enable versioning on the existing backup bucket without allowing forced deletion."
+  }
+
+  assert {
+    condition = (
+      aws_s3_bucket_public_access_block.clickhouse_backup[0].block_public_acls &&
+      aws_s3_bucket_public_access_block.clickhouse_backup[0].block_public_policy &&
+      aws_s3_bucket_public_access_block.clickhouse_backup[0].ignore_public_acls &&
+      aws_s3_bucket_public_access_block.clickhouse_backup[0].restrict_public_buckets &&
+      alltrue([for rule in aws_s3_bucket_server_side_encryption_configuration.clickhouse_backup[0].rule :
+        rule.bucket_key_enabled && alltrue([for encryption in rule.apply_server_side_encryption_by_default :
+          encryption.sse_algorithm == "aws:kms" && encryption.kms_master_key_id == aws_kms_key.clickhouse_backup[0].arn
+        ])
+      ])
+    )
+    error_message = "Versioning must preserve public-access blocking and encryption using the existing backup key."
+  }
+
+}
+
 run "backup_role_can_only_use_its_backup_bucket_and_key" {
   command = plan
 
   variables {
-    clickhouse_backup = { bucket_name = "test-clickhouse-backups" }
+    clickhouse_backup = {
+      bucket_name        = "test-clickhouse-backups"
+      versioning_enabled = true
+    }
   }
 
   assert {
