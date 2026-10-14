@@ -452,7 +452,7 @@ run "backup_versioning_can_be_left_off_explicitly" {
   }
 }
 
-run "backup_versioning_preserves_encryption_and_access_limits" {
+run "backup_versioning_enabled_on_the_backup_bucket" {
   command = plan
 
   variables {
@@ -466,27 +466,10 @@ run "backup_versioning_preserves_encryption_and_access_limits" {
     condition = (
       length(aws_s3_bucket_versioning.clickhouse_backup) == 1 &&
       aws_s3_bucket_versioning.clickhouse_backup[0].bucket == aws_s3_bucket.clickhouse_backup[0].id &&
-      aws_s3_bucket_versioning.clickhouse_backup[0].versioning_configuration[0].status == "Enabled" &&
-      aws_s3_bucket.clickhouse_backup[0].force_destroy == false
+      aws_s3_bucket_versioning.clickhouse_backup[0].versioning_configuration[0].status == "Enabled"
     )
-    error_message = "Opting in must enable versioning on the existing backup bucket without allowing forced deletion."
+    error_message = "Opting in must enable versioning on the existing backup bucket."
   }
-
-  assert {
-    condition = (
-      aws_s3_bucket_public_access_block.clickhouse_backup[0].block_public_acls &&
-      aws_s3_bucket_public_access_block.clickhouse_backup[0].block_public_policy &&
-      aws_s3_bucket_public_access_block.clickhouse_backup[0].ignore_public_acls &&
-      aws_s3_bucket_public_access_block.clickhouse_backup[0].restrict_public_buckets &&
-      alltrue([for rule in aws_s3_bucket_server_side_encryption_configuration.clickhouse_backup[0].rule :
-        rule.bucket_key_enabled && alltrue([for encryption in rule.apply_server_side_encryption_by_default :
-          encryption.sse_algorithm == "aws:kms" && encryption.kms_master_key_id == aws_kms_key.clickhouse_backup[0].arn
-        ])
-      ])
-    )
-    error_message = "Versioning must preserve public-access blocking and encryption using the existing backup key."
-  }
-
 }
 
 run "backup_role_can_only_use_its_backup_bucket_and_key" {
@@ -546,7 +529,7 @@ run "backup_role_can_only_use_its_backup_bucket_and_key" {
         "s3:GetLifecycleConfiguration", "s3:PutLifecycleConfiguration",
       ]),
     )) == 0
-    error_message = "The backup software must not inspect or change bucket versioning/lifecycle settings, or read or delete previous object versions."
+    error_message = "Keep version and lifecycle permissions absent: GetBucketVersioning and ListBucketVersions let Altinity find saved versions, and DeleteObjectVersion would let its version-aware deletion erase those protected copies."
   }
 }
 

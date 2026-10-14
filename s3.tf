@@ -158,15 +158,16 @@ resource "aws_s3_bucket" "clickhouse_backup" {
 }
 
 resource "aws_s3_bucket_versioning" "clickhouse_backup" {
-  count = try(var.clickhouse_backup.versioning_enabled, false) ? 1 : 0
+  count = local.clickhouse_backup_versioning_enabled ? 1 : 0
 
   bucket = aws_s3_bucket.clickhouse_backup[0].id
   versioning_configuration {
     status = "Enabled"
   }
 
-  # Removing this resource suspends versioning, even if deletion of the
-  # nonempty bucket then fails. Keep protection until deliberately retired.
+  # The provider's delete calls PutBucketVersioning(Suspended) before deleting
+  # the bucket, even when the nonempty bucket's deletion then fails.
+  # Keep protection until deliberately retired using the README's state-rm exit.
   lifecycle {
     prevent_destroy = true
   }

@@ -903,17 +903,20 @@ variable "clickhouse_backup" {
     Optional ClickHouse backup storage. Creates a private, encrypted S3 bucket,
     a bucket-scoped IAM role, and generated passwords in Secrets Manager for
     the backup database user and its read-only probe. Null creates none of these
-    resources.
+    resources on a fresh installation; removing existing protected storage needs
+    the retirement procedure in the README.
 
     bucket_name must be a new, globally unique S3 bucket name. No automatic
     expiry is configured. Backup files and local metadata accumulate; this release
     has no supported procedure for removing individual backups.
     versioning_enabled keeps previous S3 object versions after an overwrite or
-    ordinary deletion. It defaults to false. Once enabled, keep it true:
-    Terraform prevents removing the versioning resource because that would
-    suspend protection. Previous versions have no automatic expiry and continue
-    to incur storage charges. Pause backup writes before first enabling it and
-    wait 15 minutes after applying before resuming them.
+    ordinary deletion. It defaults to false and is one-way through the module's
+    normal inputs. Once enabled, Terraform blocks setting it to false, setting
+    clickhouse_backup to null, changing bucket_name, or destroying the stack.
+    The README's deliberate state-rm exit leaves S3 versioning enabled while
+    removing Terraform's management of that setting. Previous versions have no
+    automatic expiry and continue to incur storage charges. Pause backup writes
+    before first enabling it and wait 15 minutes after applying before resuming.
     The password is generated for a new backup user; supplying an existing
     password is not supported.
     service_account_name identifies the dedicated Kubernetes service account in
