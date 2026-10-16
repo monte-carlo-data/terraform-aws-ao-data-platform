@@ -703,8 +703,12 @@ resource "aws_iam_role_policy" "clickhouse_backup" {
     Version = "2012-10-17"
     Statement = [
       {
-        Sid       = "BackupBucket"
-        Effect    = "Allow"
+        Sid    = "BackupBucket"
+        Effect = "Allow"
+        # Altinity 2.8.1 treats denied GetBucketVersioning as unversioned and
+        # uses ordinary deletes, which preserve older versions. Do not add
+        # GetBucketVersioning, ListBucketVersions, or DeleteObjectVersion:
+        # together they make its deletion code permanently erase every version.
         Action    = ["s3:ListBucket", "s3:GetBucketLocation"]
         Resource  = aws_s3_bucket.clickhouse_backup[0].arn
         Condition = { StringEquals = { "s3:ResourceAccount" = data.aws_caller_identity.clickhouse_backup[0].account_id } }
