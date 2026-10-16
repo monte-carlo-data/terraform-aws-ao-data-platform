@@ -669,6 +669,8 @@ resource "aws_iam_role_policy" "external_secrets" {
             aws_secretsmanager_secret.clickhouse_readonly_user_previous_password[0].arn,
           ] : [],
           local.clickhouse_backup_enabled ? [aws_secretsmanager_secret.clickhouse_backup[0].arn] : [],
+          local.clickhouse_backup_enabled ? [aws_secretsmanager_secret.clickhouse_backup_probe[0].arn] : [],
+          local.clickhouse_backup_install_enabled ? [aws_secretsmanager_secret.clickhouse_backup_api[0].arn] : [],
         )
       },
       {

@@ -37,21 +37,22 @@
 # design, not a defect. Run it after the opt-in apply (README step 6).
 #
 # The negative gates sweep the whole state, not just ClickHouse resources, but
-# split the verdict by resource name: hits on clickhouse*-named resources are
-# a hard FAIL; hits on anything else are reported as an ADVISORY — worth
-# investigating, but not proof of a ClickHouse leak (the sentinel file is
-# authoritative for known passwords).
+# split the verdict by resource name. The three known backup credentials are
+# reported separately as an ADVISORY because they still use saved passwords.
+# Other clickhouse*-named resources remain a hard FAIL. Non-ClickHouse hits
+# are also advisory. Supplied passwords are always checked across the whole
+# state, including backup resources.
 #
 # Exit codes (first applicable wins: 2, then 1, then 3, then 4):
-#   0  clean — no plaintext, and every ClickHouse sink used the write-only path
-#   1  plaintext found (a ClickHouse-named sink still carries secret_string, a
-#      ClickHouse-named managed random_password survives, or a supplied
-#      sentinel appears anywhere in the state)
+#   0  clean — no plaintext found, and existing user writes used the write-only path
+#   1  plaintext found outside the three known backup names: a ClickHouse
+#      secret_string or managed random_password remains. A supplied sentinel
+#      found anywhere in state also produces exit 1.
 #   2  usage / input error (bad or unknown arguments, missing state or
 #      sentinel file, malformed or empty JSON)
-#   3  no plaintext, but the write-only path could not be proven
-#   4  advisory only — non-ClickHouse resources carry a plaintext argument or
-#      an unmanaged random_password
+#   3  the existing users' write-only path could not be proven
+#   4  advisory only — known backup or non-ClickHouse resources carry a
+#      plaintext argument or a managed random_password
 set -euo pipefail
 
 usage() {
@@ -123,7 +124,23 @@ fi
 
 fail=0     # exit 1 — plaintext found
 wofail=0   # exit 3 — write-only path not proven
-advisory=0 # exit 4 — non-ClickHouse plaintext / unmanaged generators
+advisory=0 # exit 4 — known backup or non-ClickHouse plaintext / managed generators
+
+# Match only the three actual backup resource names, not a backup-name prefix.
+# Unexpected ClickHouse resources keep the original strict checks. Only the six
+# existing user secret names can prove that their write-only path was used.
+password_classes='
+  def is_backup: IN("clickhouse_backup", "clickhouse_backup_api", "clickhouse_backup_probe");
+  def is_user_secret: IN(
+    "clickhouse_admin_password", "clickhouse_otel_password",
+    "clickhouse_monte_carlo_password", "clickhouse_schema_owner_password",
+    "clickhouse_llm_worker_password", "clickhouse_readonly_user_password"
+  );
+  def password_class:
+    if is_backup then "B"
+    elif startswith("clickhouse") then "C"
+    else "O" end;
+'
 
 # A jq failure mid-scan must exit 2, never read as "clean". jq's own stderr
 # passes through; this adds the context line and the documented exit code.
@@ -137,9 +154,8 @@ jq_error() {
 # after a secret_string_wo migration (confirmed against real Secrets
 # Manager — type str, length 0, does not hash-match the real value), and jq
 # treats "" as truthy, so a bare presence test would false-FAIL on every
-# correctly-migrated state. Hits are split by resource name: clickhouse*
-# sinks are a hard FAIL, anything else is advisory.
-if ! plaintext_hits="$(jq -r '
+# correctly-migrated state. Known backup names are reported separately.
+if ! plaintext_hits="$(jq -r "$password_classes"'
   def present: if . == null or . == "" then null else . end;
   [ .. | objects
     | select(.type? == "aws_secretsmanager_secret_version")
@@ -148,31 +164,33 @@ if ! plaintext_hits="$(jq -r '
         ((($r.instances // []) | map(.attributes // {})) + [$r.values // {}])
         | any((.secret_string | present) != null))
     | ($r.name? // "<unnamed>")
-    | if startswith("clickhouse") then "C\t" + . else "O\t" + . end
+    | password_class + "\t" + .
   ] | .[]
 ' "$state")"; then
   jq_error "plaintext secret_string scan"
 fi
 
 ch_plain=()
+backup_hits=()
 other_hits=()
 while IFS=$'\t' read -r cls name; do
   case "$cls" in
   C) ch_plain+=("$name") ;;
+  B) backup_hits+=("aws_secretsmanager_secret_version.$name") ;;
   O) other_hits+=("$name") ;;
   esac
 done <<<"$plaintext_hits"
 
-# No managed random_password may remain — its result is plaintext in state.
+# Existing users must not retain managed generators, whose results persist in state.
 # The mode filter matters: this repo now has six `ephemeral "random_password"`
 # blocks with the identical type name. State JSON does not surface ephemeral
 # instances today, so the filter is latent, but it keeps the check matching its
 # own message if Terraform ever does surface them in `show -json`.
-if ! gen_hits="$(jq -r '
+if ! gen_hits="$(jq -r "$password_classes"'
   [ .. | objects
     | select(.type? == "random_password" and .mode? == "managed")
     | (.name? // "<unnamed>")
-    | if startswith("clickhouse") then "C\t" + . else "O\t" + . end
+    | password_class + "\t" + .
   ] | .[]
 ' "$state")"; then
   jq_error "managed random_password scan"
@@ -182,6 +200,7 @@ ch_gen=()
 while IFS=$'\t' read -r cls name; do
   case "$cls" in
   C) ch_gen+=("$name") ;;
+  B) backup_hits+=("random_password.$name") ;;
   O) other_hits+=("$name") ;;
   esac
 done <<<"$gen_hits"
@@ -196,8 +215,13 @@ if [[ ${#ch_gen[@]} -gt 0 ]]; then
   fail=1
 fi
 
+if [[ ${#backup_hits[@]} -gt 0 ]]; then
+  echo "ADVISORY: known backup credentials are still stored in state: ${backup_hits[*]}" >&2
+  advisory=1
+fi
+
 if [[ ${#other_hits[@]} -gt 0 ]]; then
-  echo "ADVISORY: non-ClickHouse resources carry a plaintext argument or an unmanaged random_password: ${other_hits[*]}" >&2
+  echo "ADVISORY: non-ClickHouse resources carry a plaintext argument or a managed random_password: ${other_hits[*]}" >&2
   echo "ADVISORY: this is not proof of a ClickHouse leak — the sentinel file is authoritative for known passwords." >&2
   advisory=1
 fi
@@ -205,11 +229,11 @@ fi
 # Positive gate. `has_secret_string_wo` is a computed, non-secret boolean the AWS
 # provider persists on aws_secretsmanager_secret_version. Absence of plaintext is
 # also true of a secret that was never written, so assert the write happened via
-# the write-only argument.
-if ! ch_total="$(jq '
+# the write-only argument. Backup credentials cannot satisfy this proof.
+if ! ch_total="$(jq "$password_classes"'
   [ .. | objects
     | select(.type? == "aws_secretsmanager_secret_version")
-    | select((.name? // "") | startswith("clickhouse"))
+    | select((.name? // "") | is_user_secret)
     | . as $r
     | (($r.instances // [] | map(.attributes // {})) + [$r.values // {}])
     | .[] | select(. != {})
@@ -218,10 +242,11 @@ if ! ch_total="$(jq '
   jq_error "ClickHouse write-only positive gate"
 fi
 
-if ! ch_no_wo="$(jq '
+# Keep unexpected ClickHouse secret names strict too; exempt only known backups.
+if ! ch_no_wo="$(jq "$password_classes"'
   [ .. | objects
     | select(.type? == "aws_secretsmanager_secret_version")
-    | select((.name? // "") | startswith("clickhouse"))
+    | select((.name? // "") | startswith("clickhouse") and (is_backup | not))
     | . as $r
     | (($r.instances // [] | map(.attributes // {})) + [$r.values // {}])
     | .[] | select(. != {})
@@ -232,10 +257,10 @@ if ! ch_no_wo="$(jq '
 fi
 
 if [[ "$ch_total" -eq 0 ]]; then
-  echo "FAIL: no ClickHouse aws_secretsmanager_secret_version instances found in $state — cannot prove the write-only path was used" >&2
+  echo "FAIL: no existing ClickHouse user secret version instances found in $state — cannot prove the write-only path was used" >&2
   wofail=1
 elif [[ "$ch_no_wo" -gt 0 ]]; then
-  echo "FAIL: $ch_no_wo of $ch_total ClickHouse secret version instances do not show has_secret_string_wo = true — the write did not go through secret_string_wo" >&2
+  echo "FAIL: $ch_no_wo ClickHouse secret version instances, excluding known backup credentials, do not show has_secret_string_wo = true — the write did not go through secret_string_wo" >&2
   wofail=1
 fi
 
@@ -285,9 +310,10 @@ if [[ $wofail -ne 0 ]]; then
   exit 3
 fi
 
+echo "OK: existing ClickHouse user passwords are absent from $state; all $ch_total user secret version instances used secret_string_wo"
+
 if [[ $advisory -ne 0 ]]; then
   exit 4
 fi
 
-echo "OK: no ClickHouse plaintext in $state; all $ch_total ClickHouse secret version instances used secret_string_wo"
 exit 0

@@ -148,10 +148,9 @@ module "eks" {
       addon_version  = "v1.22.1-eksbuild.2"
       before_compute = true
 
-      # Enable the vpc-cni NetworkPolicy enforcement engine. No NetworkPolicy
-      # objects are applied yet, so this is a no-op functionally today; it warms
-      # the engine so workloads can adopt Kubernetes NetworkPolicies later
-      # without an addon reconfigure (and the pod restart that comes with it).
+      # Enforce Kubernetes NetworkPolicies, including the chart's ClickHouse
+      # ingress policy when backups are enabled. That policy restricts the
+      # backup API to backup Jobs while allowing the usual ClickHouse ports.
       configuration_values = jsonencode({
         enableNetworkPolicy = "true"
       })
