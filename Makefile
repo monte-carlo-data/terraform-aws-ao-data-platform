@@ -16,6 +16,8 @@ test:
 	# test file's preamble for the explicit scope and known coverage gaps.
 	terraform init -backend=false
 	terraform test
+	# This guard needs its own check: terraform test cannot expect prevent_destroy errors.
+	python3 tests/verify_backup_versioning_guard.py
 
 verify-no-plaintext:
 	# Verify a Terraform state JSON: no ClickHouse plaintext, and every ClickHouse

@@ -1,5 +1,6 @@
 locals {
-  clickhouse_backup_enabled = var.clickhouse_backup != null
+  clickhouse_backup_enabled            = var.clickhouse_backup != null
+  clickhouse_backup_versioning_enabled = local.clickhouse_backup_enabled ? var.clickhouse_backup.versioning_enabled : false
 
   effective_cluster_name = var.cluster.create ? var.cluster.name : var.cluster.existing_cluster_name
 

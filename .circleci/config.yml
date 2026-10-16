@@ -28,7 +28,7 @@ jobs:
           # bash and jq for hack/verify-no-plaintext.sh — the image is Alpine,
           # which ships neither.
           command: |
-            apk add --update make
+            apk add --update make python3
             apk add --no-cache bash jq
       - run:
           # Fast gate, ahead of the slow terraform test: exercises the

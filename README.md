@@ -293,6 +293,7 @@ backups, even when the module deploys the rest of the chart.
 clickhouse_backup = {
   bucket_name = "example-clickhouse-backups-123456789012-us-east-1"
   # service_account_name = "clickhouse-backup" # default
+  # versioning_enabled   = true               # optional; see below before enabling
 }
 ```
 
@@ -348,6 +349,8 @@ The module creates:
 - A dedicated S3 bucket with public access blocked, AWS KMS encryption by
   default, and a policy rejecting unencrypted connections. A separate KMS key
   encrypts backup files, with automatic key rotation and S3 Bucket Keys enabled.
+  Optional `versioning_enabled` preserves earlier file versions; once enabled,
+  normal input changes cannot turn it off (see the protection steps below).
   No automatic expiry is configured, and this release does not delete old
   backups. Files accumulate, and this release has no supported procedure for
   removing individual backups.
@@ -376,6 +379,72 @@ managed separately, grant its role `secretsmanager:GetSecretValue` and
 `secretsmanager:DescribeSecret` on the backup, probe, and API secret ARNs in use,
 plus `kms:Decrypt` on the module's secrets key. A separately installed chart
 needs the backup and probe secrets and an API secret supplied by its operator.
+
+**Protecting saved backup files.** Set `clickhouse_backup.versioning_enabled = true`
+to preserve older file versions after an overwrite or ordinary deletion. The
+default is `false`, which leaves existing buckets unchanged. This works with the
+current backup software and requires no chart upgrade. It does not enable Object
+Lock or automatic expiry of either current files or older versions.
+
+To enable protection for the first time:
+
+1. For an existing installation, set `helm.clickhouse.backup.suspend = true`,
+   review and apply the pause, then wait for active backup, restore, and cleanup
+   work to finish. Pausing does not stop running work. Check Jobs and backup logs
+   using the chart's verification guide:
+   https://github.com/monte-carlo-data/helm-ao-data-platform/blob/a202f2bdce3bdf068864c8cb9fe153f35c863517/docs/verify-clickhouse-backups.md.
+   Select your cluster's context, namespace, and replica count in that guide.
+   For a new installation, explicitly set `helm.clickhouse.backup.suspend = true`
+   before the first apply; its default is `false`.
+2. Set `clickhouse_backup.versioning_enabled = true`, review the plan, and apply
+   while the schedule stays paused. On an otherwise unchanged existing
+   installation, this adds one S3 versioning resource; it does not replace the
+   bucket, key, passwords, or database pods. A new installation also creates its
+   normal backup resources.
+3. Using the deployment's AWS profile, region, bucket, and account, require the
+   following check to return `Enabled`:
+
+   ```bash
+   aws --profile '<profile>' --region '<region>' s3api get-bucket-versioning \
+     --bucket '<backup-bucket>' --expected-bucket-owner '<account-id>' \
+     --query Status --output text
+   ```
+
+4. Wait at least 15 minutes after enabling versioning, then set
+   `helm.clickhouse.backup.suspend = false`, review and apply the resume, and
+   check the next backup. Existing installations use three separate applies:
+   pause, enable protection, and resume.
+
+With `helm.deploy_charts = false`, this module's `suspend` setting has no effect.
+The operator of the separately installed chart must pause it, wait for running
+work to finish, and resume it only after the same check and waiting period.
+AWS describes the initial waiting period here:
+https://docs.aws.amazon.com/AmazonS3/latest/userguide/manage-versioning-examples.html.
+
+Versioning is **one-way through the module's normal inputs**. Once enabled, keep
+the setting `true`: Terraform blocks setting it to `false`, setting
+`clickhouse_backup` to `null`, changing `bucket_name`, and destroying the stack.
+These actions would remove or replace the versioning resource and suspend
+protection. To deliberately retire storage or replace its bucket, follow
+[Retiring versioned backup storage](#retiring-versioned-backup-storage). That
+procedure leaves S3 versioning enabled while removing Terraform's management of
+the setting.
+The safeguard only applies while this resource remains in the module code; it
+does not cover removing the module or returning to an older module without it.
+Keep the bucket's encryption key while any saved files are still needed.
+
+Enabling versioning does not copy existing files. Overwrites and deletions retain
+older copies that continue using paid storage; an ordinary delete does not free
+that space. Do not widen the backup role with `s3:GetBucketVersioning`,
+`s3:ListBucketVersions`, and `s3:DeleteObjectVersion`: together they let Altinity's
+deletion code permanently erase every saved version. The existing role cannot
+permanently delete versions or turn off versioning. An authorized operator can
+repair selected files using [the recovery instructions](docs/recover-backup-files.md).
+For read-only database recovery, the operator must supply a separate role; this
+module's backup role can read, write, and delete files.
+Automatic removal of old backup sets and saved versions remains separate work.
+How to reclaim the space occupied by saved versions is not decided here; that
+work must preserve the backup role's inability to permanently delete versions.
 
 The backup password is generated-only by design: this block prepares a fresh
 backup installation, rather than adopting an existing database password. Unlike
@@ -587,7 +656,10 @@ how to preserve or discard the existing backups as described below.
 
 `force_destroy = false` prevents Terraform from deleting a nonempty bucket,
 and Terraform deletes the bucket before scheduling deletion of its key.
-This is not full protection against teardown: Terraform can still remove
+When versioning is enabled and its `prevent_destroy` guard remains configured,
+Terraform stops the entire removal plan before changing anything. The following
+partial-removal risk applies to unversioned storage, or after that guard is
+detached or removed: Terraform can still remove
 the bucket policy, public-access and ownership settings, encryption configuration,
 KMS alias, IAM role and policy, and backup and probe password secrets before the
 bucket fails. A full cluster destroy also removes the API secret and the chart's
@@ -603,7 +675,8 @@ encrypted files cannot be recovered.
 To remove the cluster but keep backups, first transfer the existing backup
 resources into a separate Terraform configuration and state. Preserve the bucket
 and its public-access block, ownership controls, encryption configuration and
-policy; the original backup KMS key and alias; and permissions for a restore
+policy; `aws_s3_bucket_versioning.clickhouse_backup` when enabled; the original
+backup KMS key and alias; and permissions for a restore
 operator to read and decrypt the files. If keeping any backup credentials,
 preserve their Secrets Manager secrets and versions, generated password state,
 and the shared `pipeline_secrets` key and alias. That includes the backup and
@@ -614,8 +687,48 @@ plan excludes them before proceeding. Do not just remove the bucket and key from
 state and apply the unchanged module: that attempts to create replacements.
 
 If deliberately discarding all backups, follow the pause and disable steps above,
-delete the files, then unset `clickhouse_backup` and review the Terraform removal
-plan. Do not empty the bucket merely to get a failed destroy to finish.
+then empty the bucket using an authorized operator, never the backup role.
+For a versioned bucket, delete **every object version and delete marker**, using
+`s3:ListBucketVersions` and `s3:DeleteObjectVersion`; ordinary deletion, including
+`aws s3 rm --recursive`, only adds delete markers and does not empty it. Check
+that no versions or delete markers remain, including all pages of the listing.
+Follow the versioning exit below, then unset `clickhouse_backup` and review the
+Terraform removal plan. For an unversioned bucket, delete its files before
+unsetting the input. Do not empty a bucket merely to make a failed destroy finish.
+
+#### Retiring versioned backup storage
+
+For deliberate retirement, bucket replacement, or test-stack removal, detach the
+versioning setting from Terraform instead of deleting it. This also allows a
+deliberate change back to `versioning_enabled = false` **without suspending S3
+versioning**. Registry consumers do not need to edit this module's code.
+
+1. Pause and finish active work as described above. Before removing storage,
+   disable backup installation and decide whether to preserve or discard the
+   files using the preceding procedures. Keep the original encryption key for
+   any files being preserved.
+2. In the deployment's working directory, using its existing Terraform state,
+   save a private state backup and coordinate with other Terraform operators.
+   Replace `module.<name>` below with the actual module address from
+   `terraform state list`, including any parent modules or instance indexes:
+
+   ```bash
+   terraform state rm -dry-run 'module.<name>.aws_s3_bucket_versioning.clickhouse_backup[0]'
+   terraform state rm 'module.<name>.aws_s3_bucket_versioning.clickhouse_backup[0]'
+   ```
+
+   This leaves the bucket's versioning `Enabled` and its saved files unchanged.
+   It removes only Terraform's record of that setting, not the bucket, key, or
+   other resources. If preserving the bucket under another Terraform state,
+   transfer the versioning resource there along with its other settings instead.
+3. Prepare the intended configuration change before the next plan. Leaving
+   `versioning_enabled = true` and applying the unchanged module would add the
+   setting back to Terraform's management. Review a fresh plan and confirm that
+   any retained bucket, key, and access settings are excluded from removal.
+   Detaching versioning does not empty the bucket or bypass other safety checks.
+
+Terraform documents this operation at
+https://developer.hashicorp.com/terraform/cli/commands/state/rm.
 
 **Recovering a key pending deletion.** Use the deployment's AWS profile and region.
 If Terraform scheduled deletion, it removes the key from state and may already
@@ -922,7 +1035,7 @@ To use a StorageClass you manage outside this module, set `clickhouse_storage_cl
 | `helm.llm_worker.resources` | `object` | `null` | Kubernetes resource requests/limits for the LLM-worker pods. Same shape as `helm.clickhouse.resources`. Omit to use chart defaults. |
 | `trace_export_ingest` | `object` | `null` | Optional trace-export ingest leg — see [Trace-export ingest leg](#trace-export-ingest-leg). Shape: `{ producer_execution_role_arn = string, agent_role_arn = optional(string), bucket_name = optional(string), prefix = optional(string, "traces/"), lifecycle_days = optional(number, 3), kms_key_arn = optional(string) }`. `producer_execution_role_arn` is the external role trusted to assume the writer role (exact ARN or role-name wildcard; literal account ID enforced); the trust condition's `sts:ExternalId` value comes from the separate `trace_export_external_id` variable, which is required when this block is set. `agent_role_arn` optionally grants one additional role `s3:PutObject` on the prefix via the bucket policy. `prefix` accepts multi-segment values (`"traces/tenant-a/"`) and is normalized to one trailing `/`. `kms_key_arn` switches the bucket to SSE-KMS (Bucket Keys on) and widens writer/collector policies accordingly. Unset (default), no resources are created and the plan is unchanged from previous releases. |
 | `trace_export_external_id` | `string` (sensitive) | `null` | The `sts:ExternalId` value the external producer supplies when assuming the trace-export writer role (min 8 chars). Required when `trace_export_ingest` is set. Marked `sensitive`, so caller-supplied values are redacted in plan/apply output and CI logs — supply via a `.tfvars` file or `TF_VAR_trace_export_external_id`. Values remain readable in Terraform state — protect state accordingly. |
-| `clickhouse_backup` | `object` | `null` | Optional backup bucket, scoped IAM role, and generated backup and probe database passwords for a fresh backup installation. Requires `bucket_name`; `service_account_name` defaults to `clickhouse-backup` and cannot be `default`, `opentelemetry-collector`, `llm-worker`, `otel-backup-job`, or `clickhouse-backup-monitor`. No automatic expiry is configured. Backup files and local metadata accumulate; this release has no supported procedure for removing individual backups. Storage alone does not run backups: set `helm.clickhouse.backup.enabled = true` to install the software, service account and database users. See [ClickHouse backups](#clickhouse-backups). |
+| `clickhouse_backup` | `object` | `null` | Optional backup bucket, scoped IAM role, and generated backup and probe database passwords for a fresh backup installation. Requires `bucket_name`; `service_account_name` defaults to `clickhouse-backup` and cannot be `default`, `opentelemetry-collector`, `llm-worker`, `otel-backup-job`, or `clickhouse-backup-monitor`. `versioning_enabled` defaults to `false` and preserves previous file versions after overwrites or ordinary deletion. It is one-way through normal inputs: once enabled, Terraform blocks setting it to `false`, setting `clickhouse_backup` to `null`, changing `bucket_name`, or destroying the stack. See [Retiring versioned backup storage](#retiring-versioned-backup-storage) for the deliberate exit that leaves S3 versioning enabled. No automatic expiry is configured; retained versions continue to cost storage. Backup files and local metadata accumulate; this release has no supported procedure for removing individual backups. Storage alone does not run backups: set `helm.clickhouse.backup.enabled = true` to install the software, service account and database users. See [ClickHouse backups](#clickhouse-backups). |
 
 ## Outputs
 

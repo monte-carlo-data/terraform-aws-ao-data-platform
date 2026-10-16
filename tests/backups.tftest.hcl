@@ -195,6 +195,7 @@ run "backup_disabled_by_default" {
     condition = alltrue([
       length(data.aws_caller_identity.clickhouse_backup) == 0,
       length(aws_s3_bucket.clickhouse_backup) == 0,
+      length(aws_s3_bucket_versioning.clickhouse_backup) == 0,
       length(aws_s3_bucket_public_access_block.clickhouse_backup) == 0,
       length(aws_s3_bucket_ownership_controls.clickhouse_backup) == 0,
       length(aws_s3_bucket_server_side_encryption_configuration.clickhouse_backup) == 0,
@@ -251,6 +252,11 @@ run "backup_storage_is_private_and_not_force_deleted" {
 
   variables {
     clickhouse_backup = { bucket_name = "test-clickhouse-backups" }
+  }
+
+  assert {
+    condition     = length(aws_s3_bucket_versioning.clickhouse_backup) == 0
+    error_message = "Existing backup callers must not change bucket versioning unless they explicitly enable it."
   }
 
   assert {
@@ -431,11 +437,50 @@ run "backup_role_name_preserves_the_full_cluster_and_region" {
   }
 }
 
+run "backup_versioning_can_be_left_off_explicitly" {
+  command = plan
+
+  variables {
+    clickhouse_backup = {
+      bucket_name        = "test-clickhouse-backups"
+      versioning_enabled = false
+    }
+  }
+
+  assert {
+    condition     = length(aws_s3_bucket_versioning.clickhouse_backup) == 0
+    error_message = "An explicit false must leave an unversioned bucket unchanged."
+  }
+}
+
+run "backup_versioning_enabled_on_the_backup_bucket" {
+  command = plan
+
+  variables {
+    clickhouse_backup = {
+      bucket_name        = "test-clickhouse-backups"
+      versioning_enabled = true
+    }
+  }
+
+  assert {
+    condition = (
+      length(aws_s3_bucket_versioning.clickhouse_backup) == 1 &&
+      aws_s3_bucket_versioning.clickhouse_backup[0].bucket == aws_s3_bucket.clickhouse_backup[0].id &&
+      aws_s3_bucket_versioning.clickhouse_backup[0].versioning_configuration[0].status == "Enabled"
+    )
+    error_message = "Opting in must enable versioning on the existing backup bucket."
+  }
+}
+
 run "backup_role_can_only_use_its_backup_bucket_and_key" {
   command = plan
 
   variables {
-    clickhouse_backup = { bucket_name = "test-clickhouse-backups" }
+    clickhouse_backup = {
+      bucket_name        = "test-clickhouse-backups"
+      versioning_enabled = true
+    }
   }
 
   assert {
@@ -485,7 +530,7 @@ run "backup_role_can_only_use_its_backup_bucket_and_key" {
         "s3:GetLifecycleConfiguration", "s3:PutLifecycleConfiguration",
       ]),
     )) == 0
-    error_message = "The backup software must not inspect or change bucket versioning/lifecycle settings, or read or delete previous object versions."
+    error_message = "Keep version and lifecycle permissions absent: GetBucketVersioning and ListBucketVersions let Altinity find saved versions, and DeleteObjectVersion would let its version-aware deletion erase those protected copies."
   }
 }
 
