@@ -26,24 +26,34 @@ expect() {
   [ "$status" -eq "$code" ] || fail "$what: expected exit $code, got $status"
 }
 
+# expect_with_sentinel <code> <what> <state> <sentinel>: run with a one-line
+# sentinel file and assert the exact exit code.
+expect_with_sentinel() {
+  local code="$1" what="$2" state="$3" tmp
+  tmp="$(mktemp)"
+  printf '%s\n' "$4" >"$tmp"
+  expect "$code" "$what" "$VERIFY" "$state" --sentinel-file "$tmp"
+  rm -f "$tmp"
+}
+
 case_leaking_state_pull() {
-  expect 1 "leaking fixture (state pull shape)" \
-    "$VERIFY" "$FIXTURES/state-with-plaintext.json" SENTINEL-OTEL-0001
+  expect_with_sentinel 1 "leaking fixture (state pull shape)" \
+    "$FIXTURES/state-with-plaintext.json" SENTINEL-OTEL-0001
 }
 
 case_clean_state_pull() {
-  expect 0 "clean fixture (state pull shape)" \
-    "$VERIFY" "$FIXTURES/state-clean.json" SENTINEL-OTEL-0001
+  expect_with_sentinel 0 "clean fixture (state pull shape)" \
+    "$FIXTURES/state-clean.json" SENTINEL-OTEL-0001
 }
 
 case_leaking_show_json() {
-  expect 1 "leaking fixture (show -json shape)" \
-    "$VERIFY" "$FIXTURES/state-with-plaintext-show.json" SENTINEL-OTEL-0002
+  expect_with_sentinel 1 "leaking fixture (show -json shape)" \
+    "$FIXTURES/state-with-plaintext-show.json" SENTINEL-OTEL-0002
 }
 
 case_clean_show_json() {
-  expect 0 "clean fixture (show -json shape)" \
-    "$VERIFY" "$FIXTURES/state-clean-show.json" SENTINEL-OTEL-0002
+  expect_with_sentinel 0 "clean fixture (show -json shape)" \
+    "$FIXTURES/state-clean-show.json" SENTINEL-OTEL-0002
 }
 
 # Post-migration remnant: the AWS provider leaves secret_string = "" (not
@@ -51,13 +61,13 @@ case_clean_show_json() {
 # the fix that stops the empty string from false-FAILing a genuinely clean,
 # correctly-migrated state. Covers both state shapes.
 case_empty_secret_string_state_pull() {
-  expect 0 "post-migration empty-secret_string fixture (state pull shape)" \
-    "$VERIFY" "$FIXTURES/state-clean-empty-secret-string.json" SENTINEL-OTEL-0001
+  expect_with_sentinel 0 "post-migration empty-secret_string fixture (state pull shape)" \
+    "$FIXTURES/state-clean-empty-secret-string.json" SENTINEL-OTEL-0001
 }
 
 case_empty_secret_string_show_json() {
-  expect 0 "post-migration empty-secret_string fixture (show -json shape)" \
-    "$VERIFY" "$FIXTURES/state-clean-empty-secret-string-show.json" SENTINEL-OTEL-0002
+  expect_with_sentinel 0 "post-migration empty-secret_string fixture (show -json shape)" \
+    "$FIXTURES/state-clean-empty-secret-string-show.json" SENTINEL-OTEL-0002
 }
 
 # Positive gate: no plaintext, but nothing was ever written through
@@ -94,8 +104,7 @@ case_missing_sentinel_file() {
     "$VERIFY" "$FIXTURES/state-clean.json" --sentinel-file "$FIXTURES/definitely-not-a-file.txt"
 }
 
-# A sentinel containing whitespace must still be verified — the argv path
-# cannot carry one, which is why the sentinel-file path exists.
+# A sentinel containing whitespace must still be verified.
 case_whitespace_sentinel_file() {
   local tmp status=0
   tmp="$(mktemp -d)"
@@ -161,8 +170,8 @@ case_non_clickhouse_plaintext_advisory() {
     || fail "non-ClickHouse plaintext/generator: expected advisory exit 4 naming the resources, got status=$status named=$named"
 }
 
-# F3: a mistyped --sentinel-file is an unknown option, not a positional
-# sentinel — it must exit 2, not silently disable the sentinel layer.
+# F3: a mistyped --sentinel-file is an unknown option — it must exit 2, not
+# silently disable the sentinel layer.
 case_unknown_option_typo() {
   local tmp status=0
   tmp="$(mktemp -d)"
@@ -172,26 +181,10 @@ case_unknown_option_typo() {
   [ "$status" -eq 2 ] || fail "mistyped --sentinel-file option: expected exit 2, got $status"
 }
 
-# F3: positional sentinels stay accepted (deprecated) in ANY order — one
-# placed before --sentinel-file must still be applied.
-case_positional_sentinel_before_flag() {
-  local tmp status=0
-  tmp="$(mktemp -d)"
-  printf '\nSENTINEL-ABSENT-0006\n' >"$tmp/sentinels.txt"
-  "$VERIFY" "$FIXTURES/state-whitespace-sentinel.json" "pass word 123" --sentinel-file "$tmp/sentinels.txt" >/dev/null 2>&1 || status=$?
-  rm -rf "$tmp"
-  [ "$status" -eq 1 ] || fail "positional sentinel before --sentinel-file: expected exit 1, got $status"
-}
-
-# F3: an option appearing after a positional sentinel must still be parsed —
-# the sentinel file applies even when a positional precedes the flag.
-case_positional_then_sentinel_file() {
-  local tmp status=0
-  tmp="$(mktemp -d)"
-  printf '\npass word 123\n' >"$tmp/sentinels.txt"
-  "$VERIFY" "$FIXTURES/state-whitespace-sentinel.json" UNRELATED-SENTINEL --sentinel-file "$tmp/sentinels.txt" >/dev/null 2>&1 || status=$?
-  rm -rf "$tmp"
-  [ "$status" -eq 1 ] || fail "sentinel file after a positional sentinel: expected exit 1, got $status"
+# F10: positional sentinels no longer exist — a stray argument must exit 2,
+# not be silently ignored (which would skip the leak check).
+case_positional_argument_rejected() {
+  expect 2 "positional argument" "$VERIFY" "$FIXTURES/state-clean.json" SENTINEL-OTEL-0001
 }
 
 # F8: a corrupt resource shape (instances is a string, not an array) is a jq
@@ -227,21 +220,12 @@ case_partial_migration_child_module_show() {
     || fail "partial migration (child_modules shape): expected exit 3 reporting one unwritten sink, got status=$status counted=$counted"
 }
 
-# Makefile glob defense, run in a scratch directory so the decoy filename never
-# lands in the repo (or the CI workspace) even if interrupted. Asserted on the
-# reported reason rather than the exit code: make maps any failing recipe to
-# its own exit 2, which would hide which check fired.
-case_sentinel_glob_not_expanded() {
-  local tmp status=0 matched=0
-  tmp="$(mktemp -d)"
-  ln -s "$REPO_ROOT/hack" "$tmp/hack"
-  touch "$tmp/P@ssw0rdXYZ123"
-  ( cd "$tmp" && make -f "$REPO_ROOT/Makefile" verify-no-plaintext \
-      STATE="$FIXTURES/state-glob-sentinel.json" SENTINELS="P@ssw0rd*123" ) >"$tmp/out" 2>&1 || status=$?
-  if grep -q "appears in state" "$tmp/out"; then matched=1; fi
-  rm -rf "$tmp"
-  { [ "$status" -ne 0 ] && [ "$matched" -eq 1 ]; } \
-    || fail "a coincidentally-matching filename glob-expanded the sentinel into a false PASS (status=$status, sentinel reported=$matched)"
+# F10: the removed SENTINELS make variable must error, not be silently ignored.
+case_makefile_rejects_sentinels_var() {
+  local status=0
+  make -C "$REPO_ROOT" verify-no-plaintext STATE="$FIXTURES/state-clean.json" \
+    SENTINELS=SENTINEL-OTEL-0001 >/dev/null 2>&1 || status=$?
+  [ "$status" -ne 0 ] || fail "make accepted the removed SENTINELS variable"
 }
 
 # Generate the same mixed state in both supported Terraform formats. All
@@ -449,6 +433,99 @@ case_corrupt_known_backup_state_is_input_error() {
   rm -rf "$tmp"
 }
 
+# Clean six-sink state (pull shape) with one extra decoded string, so only the
+# sentinel layer can catch it.
+clean_state_with_value() {
+  mixed_backup_state pull backup_empty | jq --arg v "$1" '.outputs = {value: $v}'
+}
+
+# run_sentinel_state <state-json-file> <sentinel-file>: sets status and out.
+run_sentinel_state() {
+  status=0
+  "$VERIFY" "$1" --sentinel-file "$2" >"$tmp/out" 2>&1 || status=$?
+}
+
+# F4: bare --help exits 0 with usage on stdout (it used to exit 2).
+case_help_flag() {
+  local flag out status
+  for flag in --help -h; do
+    status=0
+    out="$("$VERIFY" "$flag" 2>/dev/null)" || status=$?
+    [ "$status" -eq 0 ] || fail "$flag: expected exit 0, got $status"
+    case "$out" in usage:*) ;; *) fail "$flag: usage not printed to stdout" ;; esac
+  done
+}
+
+# F6: each unconditional sink missing from an otherwise clean state must exit 3
+# naming it; the count-gated admin/readonly sinks may be absent.
+case_missing_unconditional_sink() {
+  local tmp shape name status
+  tmp="$(mktemp -d)"
+  for shape in pull show; do
+    for name in clickhouse_otel clickhouse_monte_carlo clickhouse_schema_owner clickhouse_llm_worker; do
+      mixed_backup_state "$shape" backup_empty \
+        | jq --arg n "${name}_password" 'del(.. | objects | select(.name? == $n))' >"$tmp/state.json"
+      status=0
+      "$VERIFY" "$tmp/state.json" >"$tmp/out" 2>&1 || status=$?
+      [ "$status" -eq 3 ] || fail "missing ${name}_password ($shape): expected exit 3, got $status"
+      grep -q "${name}_password" "$tmp/out" || fail "missing ${name}_password ($shape): sink not named"
+    done
+    for name in clickhouse_admin clickhouse_readonly_user; do
+      mixed_backup_state "$shape" backup_empty \
+        | jq --arg n "${name}_password" 'del(.. | objects | select(.name? == $n))' >"$tmp/state.json"
+      expect 0 "count-gated ${name}_password absent ($shape)" "$VERIFY" "$tmp/state.json"
+    done
+  done
+  rm -rf "$tmp"
+}
+
+# F12: a CRLF sentinel file (Windows/WSL) must still match.
+case_crlf_sentinel_file() {
+  local tmp status
+  tmp="$(mktemp -d)"
+  clean_state_with_value SENTINEL-OTEL-0009 >"$tmp/state.json"
+  printf 'SENTINEL-OTEL-0009\r\n' >"$tmp/sentinels.txt"
+  run_sentinel_state "$tmp/state.json" "$tmp/sentinels.txt"
+  rm -rf "$tmp"
+  [ "$status" -eq 1 ] || fail "CRLF sentinel file: expected exit 1, got $status"
+}
+
+# F12: a sentinel file with no trailing newline must still apply its last line.
+case_sentinel_file_no_trailing_newline() {
+  local tmp status
+  tmp="$(mktemp -d)"
+  clean_state_with_value SENTINEL-OTEL-0009 >"$tmp/state.json"
+  printf '%s' 'SENTINEL-OTEL-0009' >"$tmp/sentinels.txt"
+  run_sentinel_state "$tmp/state.json" "$tmp/sentinels.txt"
+  rm -rf "$tmp"
+  [ "$status" -eq 1 ] || fail "sentinel file without trailing newline: expected exit 1, got $status"
+}
+
+# F11: a sentinel embedded in a longer string (connection string, JSON blob)
+# must match by substring, not only by equality.
+case_embedded_sentinel_substring() {
+  local tmp status
+  tmp="$(mktemp -d)"
+  clean_state_with_value 'clickhouse://otel:SENTINEL-OTEL-0009@ch:9000/db' >"$tmp/state.json"
+  printf 'SENTINEL-OTEL-0009\n' >"$tmp/sentinels.txt"
+  run_sentinel_state "$tmp/state.json" "$tmp/sentinels.txt"
+  grep -q "appears in state" "$tmp/out" || { rm -rf "$tmp"; fail "embedded sentinel was not reported"; }
+  rm -rf "$tmp"
+  [ "$status" -eq 1 ] || fail "embedded sentinel: expected exit 1, got $status"
+}
+
+# F13: the detector's user-secret list must cover every ClickHouse user secret
+# secrets.tf declares.
+case_user_secret_list_matches_module() {
+  local declared known
+  declared="$(grep -o 'aws_secretsmanager_secret_version" "clickhouse_[a-z_]*_password"' "$REPO_ROOT/secrets.tf" \
+    | grep -o 'clickhouse_[a-z_]*_password' | sort -u)"
+  known="$(sed -n '/def is_user_secret/,/);/p' "$VERIFY" | grep -o 'clickhouse_[a-z_]*_password' | sort -u)"
+  [ -n "$declared" ] || fail "no ClickHouse user secrets found in secrets.tf"
+  [ "$declared" = "$known" ] \
+    || fail "secrets.tf declares a ClickHouse user secret the detector does not verify (or vice versa): $(diff <(echo "$declared") <(echo "$known") | tr '\n' ' ')"
+}
+
 ALL_CASES=(
   leaking_state_pull
   clean_state_pull
@@ -467,13 +544,12 @@ ALL_CASES=(
   json_escaped_sentinel_html_chars
   non_clickhouse_plaintext_advisory
   unknown_option_typo
-  positional_sentinel_before_flag
-  positional_then_sentinel_file
+  positional_argument_rejected
   corrupt_shape_instances_string
   clean_child_module_show
   leaking_child_module_show
   partial_migration_child_module_show
-  sentinel_glob_not_expanded
+  makefile_rejects_sentinels_var
   known_backup_advisory
   all_sql_users_remain_protected
   unknown_clickhouse_resources_remain_strict
@@ -482,6 +558,12 @@ ALL_CASES=(
   known_backups_do_not_hide_sentinels
   known_and_unrelated_advisories_stay_separate
   corrupt_known_backup_state_is_input_error
+  help_flag
+  missing_unconditional_sink
+  crlf_sentinel_file
+  sentinel_file_no_trailing_newline
+  embedded_sentinel_substring
+  user_secret_list_matches_module
 )
 
 main() {

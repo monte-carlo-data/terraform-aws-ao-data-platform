@@ -6,6 +6,24 @@
       "type": "aws_secretsmanager_secret_version",
       "name": "clickhouse_otel_password",
       "instances": [{ "attributes": { "has_secret_string_wo": true, "secret_string_wo_version": 1, "version_id": "11111111-2222-3333-4444-555555555555", "secret_id": "arn:aws:secretsmanager:us-east-1:1:secret:x" } }]
+    },
+    {
+      "mode": "managed",
+      "type": "aws_secretsmanager_secret_version",
+      "name": "clickhouse_monte_carlo_password",
+      "instances": [{ "attributes": { "has_secret_string_wo": true, "secret_string_wo_version": 1, "version_id": "11111111-2222-3333-4444-555555555555", "secret_id": "arn:aws:secretsmanager:us-east-1:1:secret:clickhouse_monte_carlo_password" } }]
+    },
+    {
+      "mode": "managed",
+      "type": "aws_secretsmanager_secret_version",
+      "name": "clickhouse_schema_owner_password",
+      "instances": [{ "attributes": { "has_secret_string_wo": true, "secret_string_wo_version": 1, "version_id": "11111111-2222-3333-4444-555555555555", "secret_id": "arn:aws:secretsmanager:us-east-1:1:secret:clickhouse_schema_owner_password" } }]
+    },
+    {
+      "mode": "managed",
+      "type": "aws_secretsmanager_secret_version",
+      "name": "clickhouse_llm_worker_password",
+      "instances": [{ "attributes": { "has_secret_string_wo": true, "secret_string_wo_version": 1, "version_id": "11111111-2222-3333-4444-555555555555", "secret_id": "arn:aws:secretsmanager:us-east-1:1:secret:clickhouse_llm_worker_password" } }]
     }
   ]
 }

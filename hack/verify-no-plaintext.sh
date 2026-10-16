@@ -8,15 +8,12 @@
 # argument is secret_string. The Azure/GCP sibling modules (YET-2516/2517)
 # ship their own verifiers.
 #
-# Usage: hack/verify-no-plaintext.sh <state.json> [--sentinel-file <file>] [sentinel ...]
+# Usage: hack/verify-no-plaintext.sh <state.json> [--sentinel-file <file>]
+#        hack/verify-no-plaintext.sh --help | -h
 #
-# <state.json> comes first; --sentinel-file and positional sentinels may
-# follow in either order. --sentinel-file takes a file with one sentinel per
-# line (blank lines skipped). Prefer it over positional sentinels: a command
-# line lands in shell history and in `ps` argv, and shell word-splitting
-# cannot carry a sentinel that contains whitespace. Positional sentinels
-# still work but are deprecated and warn. A sentinel cannot contain a
-# newline — the sentinel file is line-oriented.
+# --sentinel-file takes a file with one sentinel per line (blank lines
+# skipped, CRLF tolerated). It is the only sentinel input, so passwords never
+# reach argv. A sentinel cannot contain a newline — the file is line-oriented.
 #
 # Produce <state.json> with `terraform show -json > state.json` (local state) or
 # `terraform state pull > state.json` (Terraform Cloud). Requires `jq`.
@@ -44,23 +41,32 @@
 # state, including backup resources.
 #
 # Exit codes (first applicable wins: 2, then 1, then 3, then 4):
-#   0  clean — no plaintext found, and existing user writes used the write-only path
+#   0  clean — no plaintext found, and existing user writes used the write-only
+#      path. Also --help / -h, which prints usage to stdout.
 #   1  plaintext found outside the three known backup names: a ClickHouse
 #      secret_string or managed random_password remains. A supplied sentinel
 #      found anywhere in state also produces exit 1.
 #   2  usage / input error (bad or unknown arguments, missing state or
 #      sentinel file, malformed or empty JSON)
-#   3  the existing users' write-only path could not be proven
+#   3  the existing users' write-only path could not be proven (including a
+#      missing unconditional user sink: otel, monte_carlo, schema_owner, llm_worker)
 #   4  advisory only — known backup or non-ClickHouse resources carry a
 #      plaintext argument or a managed random_password
 set -euo pipefail
 
 usage() {
-  echo "usage: $0 <state.json> [--sentinel-file <file>] [sentinel ...]" >&2
+  echo "usage: $0 <state.json> [--sentinel-file <file>]"
 }
 
-if [[ $# -lt 1 ]]; then
+case "${1:-}" in
+--help | -h)
   usage
+  exit 0
+  ;;
+esac
+
+if [[ $# -lt 1 ]]; then
+  usage >&2
   exit 2
 fi
 
@@ -68,7 +74,6 @@ state="$1"
 shift
 
 sentinel_file=""
-positionals=()
 while [[ $# -gt 0 ]]; do
   case "$1" in
   --sentinel-file)
@@ -85,22 +90,15 @@ while [[ $# -gt 0 ]]; do
     ;;
   --help | -h)
     usage
-    exit 2
-    ;;
-  --)
-    shift
-    while [[ $# -gt 0 ]]; do
-      positionals+=("$1")
-      shift
-    done
+    exit 0
     ;;
   -*)
     echo "unknown option: $1" >&2
     exit 2
     ;;
   *)
-    positionals+=("$1")
-    shift
+    echo "unexpected argument (sentinels are only accepted via --sentinel-file)" >&2
+    exit 2
     ;;
   esac
 done
@@ -256,12 +254,38 @@ if ! ch_no_wo="$(jq "$password_classes"'
   jq_error "ClickHouse write-only positive gate"
 fi
 
+# The four unconditional user sinks must all be present; an interrupted or
+# -target apply can leave only some. Admin and readonly are count-gated.
+if ! user_sinks="$(jq -r "$password_classes"'
+  [ .. | objects
+    | select(.type? == "aws_secretsmanager_secret_version")
+    | select((.name? // "") | is_user_secret)
+    | . as $r
+    | select((($r.instances // [] | map(.attributes // {})) + [$r.values // {}]) | any(. != {}))
+    | .name
+  ] | unique | .[]
+' "$state")"; then
+  jq_error "ClickHouse user sink presence"
+fi
+
+missing_sinks=()
+for required in clickhouse_otel_password clickhouse_monte_carlo_password \
+  clickhouse_schema_owner_password clickhouse_llm_worker_password; do
+  grep -qxF -- "$required" <<<"$user_sinks" || missing_sinks+=("$required")
+done
+
 if [[ "$ch_total" -eq 0 ]]; then
   echo "FAIL: no existing ClickHouse user secret version instances found in $state — cannot prove the write-only path was used" >&2
   wofail=1
-elif [[ "$ch_no_wo" -gt 0 ]]; then
-  echo "FAIL: $ch_no_wo ClickHouse secret version instances, excluding known backup credentials, do not show has_secret_string_wo = true — the write did not go through secret_string_wo" >&2
-  wofail=1
+else
+  if [[ ${#missing_sinks[@]} -gt 0 ]]; then
+    echo "FAIL: unconditional ClickHouse user secret versions missing from state: ${missing_sinks[*]} — the apply may be incomplete" >&2
+    wofail=1
+  fi
+  if [[ "$ch_no_wo" -gt 0 ]]; then
+    echo "FAIL: $ch_no_wo ClickHouse secret version instances, excluding known backup credentials, do not show has_secret_string_wo = true — the write did not go through secret_string_wo" >&2
+    wofail=1
+  fi
 fi
 
 # Any password supplied for the migration must not appear anywhere in the
@@ -285,21 +309,12 @@ check_sentinel() {
 if [[ -n "$sentinel_file" ]]; then
   i=0
   while IFS= read -r sentinel || [[ -n "$sentinel" ]]; do
+    sentinel="${sentinel%$'\r'}"
     i=$((i + 1))
     # Skip blank lines: an empty sentinel would match anything.
     [[ -n "$sentinel" ]] || continue
     check_sentinel "$sentinel" "sentinel file line #$i"
   done <"$sentinel_file"
-fi
-
-if [[ ${#positionals[@]} -gt 0 ]]; then
-  echo "warning: passing sentinels as arguments is deprecated — they land in shell history and ps argv, and cannot carry whitespace. Use --sentinel-file." >&2
-  i=0
-  for sentinel in "${positionals[@]}"; do
-    i=$((i + 1))
-    [[ -n "$sentinel" ]] || continue
-    check_sentinel "$sentinel" "supplied sentinel #$i"
-  done
 fi
 
 if [[ $fail -ne 0 ]]; then

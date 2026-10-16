@@ -22,14 +22,11 @@ verify-no-plaintext:
 	# secret write went through secret_string_wo. Requires jq.
 	#
 	# STATE is required. Pass the migration passwords via SENTINEL_FILE (one per
-	# line), not SENTINELS — see the script header; make/shell word-splitting
-	# silently drops a whitespace-containing SENTINELS value:
+	# line) — see the script header:
 	#   make verify-no-plaintext STATE=state.json SENTINEL_FILE=sentinels.txt
-	#
-	# `set -f` disables globbing so a sentinel containing shell wildcards is not
-	# expanded against the working directory into a false PASS.
 	@test -n "$(STATE)" || { echo "STATE=<path/to/state.json> is required"; exit 2; }
-	set -f; ./hack/verify-no-plaintext.sh "$(STATE)" $(if $(SENTINEL_FILE),--sentinel-file "$(SENTINEL_FILE)",) $(SENTINELS)
+	@$(if $(SENTINELS),$(error SENTINELS was removed; use SENTINEL_FILE=<file>),:)
+	@./hack/verify-no-plaintext.sh "$(STATE)" $(if $(SENTINEL_FILE),--sentinel-file "$(SENTINEL_FILE)",)
 
 selftest-verify-no-plaintext:
 	# Regression suite for hack/verify-no-plaintext.sh — cases, the exact

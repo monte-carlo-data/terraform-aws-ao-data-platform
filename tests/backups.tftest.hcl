@@ -151,6 +151,26 @@ mock_provider "helm" {}
 mock_provider "kubernetes" {}
 mock_provider "null" {}
 
+# The random provider cannot be mocked (v3.0.0 declares ephemeral resources), but
+# a bare plan-time override pins the managed generators.
+override_resource {
+  target          = random_password.clickhouse_backup[0]
+  override_during = plan
+  values          = { result = "00000000000000000000000000000000" }
+}
+
+override_resource {
+  target          = random_password.clickhouse_backup_api[0]
+  override_during = plan
+  values          = { result = "11111111111111111111111111111111" }
+}
+
+override_resource {
+  target          = random_password.clickhouse_backup_probe[0]
+  override_during = plan
+  values          = { result = "22222222222222222222222222222222" }
+}
+
 variables {
   region = "us-east-1"
 
@@ -469,12 +489,6 @@ run "backup_role_can_only_use_its_backup_bucket_and_key" {
   }
 }
 
-# The generated value itself is no longer asserted: v3.0.0 adds
-# `ephemeral "random_password"` generators, and provider mocking does not support
-# ephemeral resource types, so the random provider cannot be mocked in this file.
-# Its `result` is therefore unknown at plan. The wiring that matters is still
-# pinned below (length, key, recovery window, and version -> secret linkage); the
-# dropped check only confirmed the mock returned the value it was given.
 run "backup_password_is_generated_and_stored_in_the_existing_key" {
   command = plan
 
@@ -839,12 +853,6 @@ run "scheduled_backups_use_existing_storage_and_a_separate_api_password" {
     }
   }
 
-  # The stored JSON is no longer decoded here: the random provider cannot be
-  # mocked in this file (v3.0.0 adds `ephemeral "random_password"`, which provider
-  # mocking rejects), so `result` -- and therefore the whole `jsonencode` -- is
-  # unknown at plan. The revision wiring is still pinned by the `keepers` check
-  # below and by the chart's `passwordRevision` assertion further down; only the
-  # "revision also sits inside the stored JSON" link is now unasserted.
   assert {
     condition = (
       length(random_password.clickhouse_backup_api) == 1 &&
@@ -861,6 +869,15 @@ run "scheduled_backups_use_existing_storage_and_a_separate_api_password" {
       output.clickhouse_backup.probe_username == "backup_probe"
     )
     error_message = "Installing backups must create a separate encrypted 32-character API password, tied to its revision, stored in its own secret version with only references exposed in outputs."
+  }
+
+  assert {
+    condition = (
+      keys(jsondecode(nonsensitive(aws_secretsmanager_secret_version.clickhouse_backup_api[0].secret_string))) == ["password", "revision"] &&
+      jsondecode(nonsensitive(aws_secretsmanager_secret_version.clickhouse_backup_api[0].secret_string)).revision == "1" &&
+      length(jsondecode(nonsensitive(aws_secretsmanager_secret_version.clickhouse_backup_api[0].secret_string)).password) == 32
+    )
+    error_message = "The stored API secret must be a JSON object with exactly the password and revision keys, as the chart consumes it whole."
   }
 
   assert {
@@ -907,11 +924,9 @@ run "scheduled_backups_use_existing_storage_and_a_separate_api_password" {
     error_message = "The chart must use the existing bucket, role, stored database password and trusted service account; API delivery must use External Secrets with the chart-default target name."
   }
 
-  # The three fixed-password `strcontains` checks are gone with the random mock:
-  # the passwords are unknown at plan, so matching them against literals proved
-  # nothing. What keeps a password out of the release values is the exact
-  # `clickhouse.backup` comparison above, which enumerates every key the chart
-  # receives -- all External Secrets references, no password fields.
+  # The backup passwords are known at plan (overridden), so unknown-propagation no
+  # longer guards them: the exact `clickhouse.backup` comparison above and this
+  # load-bearing `!issensitive` check keep them out of the release values.
   assert {
     condition = (
       !issensitive(helm_release.ao_data_platform[0].values[0])
@@ -1523,15 +1538,13 @@ run "probe_password_and_revision_are_wired_without_exposing_passwords" {
     }
   }
 
-  # Generated values are unknown at plan here -- the random provider cannot be
-  # mocked alongside v3.0.0's `ephemeral "random_password"` -- so this pins the
-  # version -> secret linkage instead of the probe password text. Revision
-  # agreement is still proven end to end by `keepers` and the chart value below.
   assert {
     condition = (
       aws_secretsmanager_secret.clickhouse_backup_probe[0].name == "test-cluster/clickhouse/backup-probe-credentials" &&
       aws_secretsmanager_secret.clickhouse_backup_probe[0].kms_key_id == aws_kms_key.pipeline_secrets.arn &&
       aws_secretsmanager_secret_version.clickhouse_backup_probe[0].secret_id == aws_secretsmanager_secret.clickhouse_backup_probe[0].id &&
+      nonsensitive(aws_secretsmanager_secret_version.clickhouse_backup_probe[0].secret_string) == "22222222222222222222222222222222" &&
+      jsondecode(nonsensitive(aws_secretsmanager_secret_version.clickhouse_backup_api[0].secret_string)).revision == "rotation-2" &&
       random_password.clickhouse_backup_probe[0].length == 32 &&
       random_password.clickhouse_backup_probe[0].special == false &&
       random_password.clickhouse_backup_api[0].keepers == tomap({ revision = "rotation-2" }) &&
