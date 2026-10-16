@@ -1,0 +1,63 @@
+{
+  "format_version": "1.0",
+  "values": {
+    "root_module": {
+      "resources": [],
+      "child_modules": [
+        {
+          "address": "module.ao_data_platform",
+          "resources": [
+            {
+              "address": "module.ao_data_platform.aws_secretsmanager_secret_version.clickhouse_otel_password",
+              "mode": "managed",
+              "type": "aws_secretsmanager_secret_version",
+              "name": "clickhouse_otel_password",
+              "values": {
+                "has_secret_string_wo": true,
+                "secret_string_wo_version": 1,
+                "version_id": "11111111-2222-3333-4444-555555555555",
+                "secret_id": "arn:aws:secretsmanager:us-east-1:1:secret:otel"
+              }
+            },
+            {
+              "address": "module.ao_data_platform.aws_secretsmanager_secret_version.clickhouse_monte_carlo_password",
+              "mode": "managed",
+              "type": "aws_secretsmanager_secret_version",
+              "name": "clickhouse_monte_carlo_password",
+              "values": {
+                "has_secret_string_wo": true,
+                "secret_string_wo_version": 1,
+                "version_id": "11111111-2222-3333-4444-555555555556",
+                "secret_id": "arn:aws:secretsmanager:us-east-1:1:secret:mc"
+              }
+            },
+            {
+              "address": "module.ao_data_platform.aws_secretsmanager_secret_version.clickhouse_schema_owner_password",
+              "mode": "managed",
+              "type": "aws_secretsmanager_secret_version",
+              "name": "clickhouse_schema_owner_password",
+              "values": {
+                "has_secret_string_wo": true,
+                "secret_string_wo_version": 1,
+                "version_id": "11111111-2222-3333-4444-555555555557",
+                "secret_id": "arn:aws:secretsmanager:us-east-1:1:secret:so"
+              }
+            },
+            {
+              "address": "module.ao_data_platform.aws_secretsmanager_secret_version.clickhouse_llm_worker_password",
+              "mode": "managed",
+              "type": "aws_secretsmanager_secret_version",
+              "name": "clickhouse_llm_worker_password",
+              "values": {
+                "has_secret_string_wo": true,
+                "secret_string_wo_version": 1,
+                "version_id": "11111111-2222-3333-4444-555555555558",
+                "secret_id": "arn:aws:secretsmanager:us-east-1:1:secret:lw"
+              }
+            }
+          ]
+        }
+      ]
+    }
+  }
+}

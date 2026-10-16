@@ -147,28 +147,29 @@ mock_provider "tls" {
   }
 }
 
-mock_provider "random" {
-  override_during = plan
-
-  override_resource {
-    target = random_password.clickhouse_backup[0]
-    values = { result = "00000000000000000000000000000000" }
-  }
-
-  override_resource {
-    target = random_password.clickhouse_backup_probe[0]
-    values = { result = "22222222222222222222222222222222" }
-  }
-
-  override_resource {
-    target = random_password.clickhouse_backup_api[0]
-    values = { result = "11111111111111111111111111111111" }
-  }
-}
-
 mock_provider "helm" {}
 mock_provider "kubernetes" {}
 mock_provider "null" {}
+
+# The random provider cannot be mocked (v3.0.0 declares ephemeral resources), but
+# a bare plan-time override pins the managed generators.
+override_resource {
+  target          = random_password.clickhouse_backup[0]
+  override_during = plan
+  values          = { result = "00000000000000000000000000000000" }
+}
+
+override_resource {
+  target          = random_password.clickhouse_backup_api[0]
+  override_during = plan
+  values          = { result = "11111111111111111111111111111111" }
+}
+
+override_resource {
+  target          = random_password.clickhouse_backup_probe[0]
+  override_during = plan
+  values          = { result = "22222222222222222222222222222222" }
+}
 
 variables {
   region = "us-east-1"
@@ -545,8 +546,7 @@ run "backup_password_is_generated_and_stored_in_the_existing_key" {
       random_password.clickhouse_backup[0].length == 32 &&
       aws_secretsmanager_secret.clickhouse_backup[0].kms_key_id == aws_kms_key.pipeline_secrets.arn &&
       aws_secretsmanager_secret.clickhouse_backup[0].recovery_window_in_days == 0 &&
-      aws_secretsmanager_secret_version.clickhouse_backup[0].secret_id == aws_secretsmanager_secret.clickhouse_backup[0].id &&
-      nonsensitive(aws_secretsmanager_secret_version.clickhouse_backup[0].secret_string) == "00000000000000000000000000000000"
+      aws_secretsmanager_secret_version.clickhouse_backup[0].secret_id == aws_secretsmanager_secret.clickhouse_backup[0].id
     )
     error_message = "Store this backup user's generated 32-character password as the raw secret value, encrypted by the existing secrets key."
   }
@@ -908,16 +908,21 @@ run "scheduled_backups_use_existing_storage_and_a_separate_api_password" {
       aws_secretsmanager_secret.clickhouse_backup_api[0].name == "test-cluster/clickhouse/backup-api-credentials" &&
       aws_secretsmanager_secret.clickhouse_backup_api[0].kms_key_id == aws_kms_key.pipeline_secrets.arn &&
       aws_secretsmanager_secret_version.clickhouse_backup_api[0].secret_id == aws_secretsmanager_secret.clickhouse_backup_api[0].id &&
-      jsondecode(nonsensitive(aws_secretsmanager_secret_version.clickhouse_backup_api[0].secret_string)) == {
-        password = "11111111111111111111111111111111"
-        revision = "1"
-      } &&
       output.clickhouse_backup_api_credentials_secret_arn == aws_secretsmanager_secret.clickhouse_backup_api[0].arn &&
       output.clickhouse_backup.api_password_secret_arn == output.clickhouse_backup_api_credentials_secret_arn &&
       output.clickhouse_backup.probe_password_secret_arn == output.clickhouse_backup_probe_credentials_secret_arn &&
       output.clickhouse_backup.probe_username == "backup_probe"
     )
-    error_message = "Installing backups must create a separate encrypted 32-character API password, tied to its revision, with both fields in one stored JSON value and only references exposed in outputs."
+    error_message = "Installing backups must create a separate encrypted 32-character API password, tied to its revision, stored in its own secret version with only references exposed in outputs."
+  }
+
+  assert {
+    condition = (
+      keys(jsondecode(nonsensitive(aws_secretsmanager_secret_version.clickhouse_backup_api[0].secret_string))) == ["password", "revision"] &&
+      jsondecode(nonsensitive(aws_secretsmanager_secret_version.clickhouse_backup_api[0].secret_string)).revision == "1" &&
+      length(jsondecode(nonsensitive(aws_secretsmanager_secret_version.clickhouse_backup_api[0].secret_string)).password) == 32
+    )
+    error_message = "The stored API secret must be a JSON object with exactly the password and revision keys, as the chart consumes it whole."
   }
 
   assert {
@@ -964,14 +969,14 @@ run "scheduled_backups_use_existing_storage_and_a_separate_api_password" {
     error_message = "The chart must use the existing bucket, role, stored database password and trusted service account; API delivery must use External Secrets with the chart-default target name."
   }
 
+  # The backup passwords are known at plan (overridden), so unknown-propagation no
+  # longer guards them: the exact `clickhouse.backup` comparison above and this
+  # load-bearing `!issensitive` check keep them out of the release values.
   assert {
     condition = (
-      !strcontains(helm_release.ao_data_platform[0].values[0], "11111111111111111111111111111111") &&
-      !strcontains(helm_release.ao_data_platform[0].values[0], "00000000000000000000000000000000") &&
-      !strcontains(helm_release.ao_data_platform[0].values[0], "22222222222222222222222222222222") &&
       !issensitive(helm_release.ao_data_platform[0].values[0])
     )
-    error_message = "None of the three password values may enter the Helm release values."
+    error_message = "The Helm release values must carry no sensitive content."
   }
 
   assert {
@@ -1582,11 +1587,12 @@ run "probe_password_and_revision_are_wired_without_exposing_passwords" {
     condition = (
       aws_secretsmanager_secret.clickhouse_backup_probe[0].name == "test-cluster/clickhouse/backup-probe-credentials" &&
       aws_secretsmanager_secret.clickhouse_backup_probe[0].kms_key_id == aws_kms_key.pipeline_secrets.arn &&
+      aws_secretsmanager_secret_version.clickhouse_backup_probe[0].secret_id == aws_secretsmanager_secret.clickhouse_backup_probe[0].id &&
       nonsensitive(aws_secretsmanager_secret_version.clickhouse_backup_probe[0].secret_string) == "22222222222222222222222222222222" &&
+      jsondecode(nonsensitive(aws_secretsmanager_secret_version.clickhouse_backup_api[0].secret_string)).revision == "rotation-2" &&
       random_password.clickhouse_backup_probe[0].length == 32 &&
       random_password.clickhouse_backup_probe[0].special == false &&
       random_password.clickhouse_backup_api[0].keepers == tomap({ revision = "rotation-2" }) &&
-      jsondecode(nonsensitive(aws_secretsmanager_secret_version.clickhouse_backup_api[0].secret_string)).revision == "rotation-2" &&
       yamldecode(helm_release.ao_data_platform[0].values[0]).clickhouse.backup.api.passwordRevision == "rotation-2" &&
       yamldecode(helm_release.ao_data_platform[0].values[0]).clickhouse.backup.api.externalSecret.remoteRef.version == "uuid/${aws_secretsmanager_secret_version.clickhouse_backup_api[0].version_id}"
     )

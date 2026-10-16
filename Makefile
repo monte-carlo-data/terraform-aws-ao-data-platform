@@ -1,4 +1,4 @@
-.PHONY: default sanity-check test
+.PHONY: default sanity-check test verify-no-plaintext selftest-verify-no-plaintext
 
 default:
 	@echo "Read the readme"
@@ -10,7 +10,7 @@ sanity-check:
 	terraform validate
 
 test:
-	# Run variable-validation tests. Requires Terraform >= 1.7 for mock_provider.
+	# Run variable-validation tests. Requires Terraform >= 1.12 (the module floor).
 	# tests/*.tftest.hcl exercise the input safety nets (range checks on
 	# cluster.main_node_group_size, the existing-cluster guard) — see the
 	# test file's preamble for the explicit scope and known coverage gaps.
@@ -18,3 +18,20 @@ test:
 	terraform test
 	# This guard needs its own check: terraform test cannot expect prevent_destroy errors.
 	python3 tests/verify_backup_versioning_guard.py
+
+verify-no-plaintext:
+	# Verify a Terraform state JSON: no ClickHouse plaintext, and every ClickHouse
+	# secret write went through secret_string_wo. Requires jq.
+	#
+	# STATE is required. Pass the migration passwords via SENTINEL_FILE (one per
+	# line) — see the script header:
+	#   make verify-no-plaintext STATE=state.json SENTINEL_FILE=sentinels.txt
+	@test -n "$(STATE)" || { echo "STATE=<path/to/state.json> is required"; exit 2; }
+	@$(if $(SENTINELS),$(error SENTINELS was removed; use SENTINEL_FILE=<file>),:)
+	@./hack/verify-no-plaintext.sh "$(STATE)" $(if $(SENTINEL_FILE),--sentinel-file "$(SENTINEL_FILE)",)
+
+selftest-verify-no-plaintext:
+	# Regression suite for hack/verify-no-plaintext.sh — cases, the exact
+	# exit-code discipline, and single-case invocation live in the script
+	# (see its header).
+	@./hack/verify-no-plaintext.test.sh
