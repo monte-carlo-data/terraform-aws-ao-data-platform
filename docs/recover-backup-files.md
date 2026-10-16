@@ -6,7 +6,7 @@ Enabling versioning does not duplicate existing files. Extra copies created by l
 
 The Terraform safeguard only applies while the versioning resource remains in the module code. Removing the module or returning to an older module without that resource can suspend versioning. For a deliberate exit, follow [Retiring versioned backup storage](../README.md#retiring-versioned-backup-storage). That procedure uses `terraform state rm` to stop managing the versioning resource while leaving S3 versioning `Enabled`; it does not delete the bucket, its files, or its encryption key. Keep the protected bucket and its encryption key until its saved files are no longer needed.
 
-This repair uses S3 directly and does not require a new release of the backup software. Automatic expiry of old backup versions is separate work and is not implemented here. Do not grant `s3:DeleteObjectVersion` to the backup role for future cleanup; use a separately reviewed cleanup policy.
+This repair uses S3 directly and does not require a new release of the backup software. How saved versions are eventually removed is separate, undecided work. Do not grant `s3:DeleteObjectVersion` to the backup role for future cleanup; use a separately reviewed cleanup policy.
 
 ## Before repairing files
 
