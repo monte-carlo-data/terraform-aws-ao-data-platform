@@ -581,12 +581,14 @@ cleanup = {
 number of at least 0. The preview protects the newest `keep_last` backups, those
 within `keep_days`, and any earlier backups they depend on. Test changes in a
 non-production environment first. No S3 file-expiry rule is created. This module
-never deletes backups, and this release has no supported procedure for removing
-individual backups, so treat `delete` as informational. Do not remove backup
+never deletes backups from S3, and this release has no supported procedure for
+removing individual S3 backups, so treat `delete` as informational. Do not remove backup
 files by hand or with S3 expiry: incremental backups can still need older full
 backups, and each ClickHouse copy keeps local backup metadata on its data volume.
 That metadata grows as backups are created or downloaded, and the preview does
-not limit it. Terraform rejects enabled cleanup with `dry_run = false`.
+not limit it. The separate database-disk cleanup option below can remove older
+local records while preserving S3 backups. Terraform still rejects enabled
+S3 cleanup with `dry_run = false`.
 For the software limitation and requirements for future deletion, see:
 <https://github.com/monte-carlo-data/helm-ao-data-platform/blob/main/docs/backup-cleanup.md#why-deletion-is-unavailable>.
 
@@ -636,10 +638,49 @@ the backup Job when the preview fails. The version check alone cannot detect
 that difference. Existing backup installations can keep chart 5.2.0 when cleanup
 is off.
 
+**Database-disk backup record cleanup.** `local_cleanup` manages the backup
+records stored on each ClickHouse database disk separately from the backups
+stored in S3. It is off by default and does not change S3 retention. When enabled,
+it protects all full and incremental records from the newest distinct UTC dates
+with successful full backups. Older records are considered for removal only
+after checking that their backups exist in S3. The default keeps two successful
+backup days, not a fixed 48-hour window: missed days do not reduce the protected
+history, and extra full backups on one date do not count as extra days.
+
+```hcl
+# Inside helm.clickhouse.backup, alongside enabled = true:
+local_cleanup = {
+  enabled               = true
+  dry_run               = true # Preview first; false permits deleting database-disk records.
+  keep_full_backup_days = 2
+  timeout_seconds       = 1800
+}
+```
+
+`keep_full_backup_days` must be a whole number of at least 2, and `timeout_seconds`
+must be a whole number of at least 60. Start with a preview, review the scheduled
+Job logs, and verify cleanup and recovery in a non-production installation before
+setting `dry_run = false`. The separate `cleanup` option remains preview-only;
+enabling local cleanup never enables S3 deletion.
+
+This feature requires a published chart containing `localCleanup`, planned for
+chart 5.7.0. Publish that chart before releasing this module with these settings
+or enabling them in a deployment. The version check accepts exact chart versions
+based on 5.7.0 or later, including pre-releases, but cannot verify that a
+pre-release contains the implementation. Existing installations do not need to
+upgrade their chart while `local_cleanup.enabled = false`.
+
+When both cleanup options are enabled, both timeouts add to the backup Job's
+deadline. With the chart's 10800-second backup timeout, the two default
+1800-second cleanup timeouts plus the 60-second allowance exceed the next
+four-hour run. Choose shorter cleanup timeouts if using both options so a slow
+run does not cause the following backup to be skipped.
+
 **Keeping or removing backups.** Keep `clickhouse_backup` enabled while backups
 are needed. To remove the backup software, first apply
 `helm.clickhouse.backup.suspend = true` and wait for running operations to finish.
-Then set `helm.clickhouse.backup.cleanup.enabled = false` and
+Then set `helm.clickhouse.backup.cleanup.enabled = false`,
+`helm.clickhouse.backup.local_cleanup.enabled = false`, and
 `helm.clickhouse.backup.enabled = false`. Review the plan and apply. This removes
 the backup software and API secret and restarts the ClickHouse pods; use the
 same maintenance-window precautions as when enabling backups.
@@ -995,7 +1036,7 @@ To use a StorageClass you manage outside this module, set `clickhouse_storage_cl
 | `storage_class_clickhouse_gp3` | `object` | `{}` (all defaults) | Parameters for the dedicated `clickhouse-gp3` StorageClass this module creates (never modifies the shared `gp3` class). Shape: `{ iops = optional(number, 3000), throughput = optional(number, 125) }`. Defaults to the `gp3` baseline; raise per measured ClickHouse merge load. Validated to `gp3` limits (IOPS 3000–16000, throughput 125–1000 MB/s, throughput ≤ 0.25 × IOPS). Applies only to newly provisioned volumes. |
 | `helm.deploy_charts` | `bool` | `true` | Deploy the `ao-data-platform` chart from Terraform |
 | `helm.chart_registry` | `string` | `null` | OCI registry URL for the `ao-data-platform` chart (e.g. `oci://123456789012.dkr.ecr.us-east-1.amazonaws.com`). Required when `deploy_charts = true`. |
-| `helm.chart_version` | `string` | `null` | Already-published `ao-data-platform` chart version. Required when `deploy_charts = true`. Backups require an exact version with base version >= 5.2.0; cleanup previews require >= 5.3.0. Pre-release versions meeting the same base-version requirements pass the version check, but cleanup supports only builds containing the preview code released in chart 5.3.0. Ranges and incomplete versions are rejected. See [ClickHouse backups](#clickhouse-backups). |
+| `helm.chart_version` | `string` | `null` | Already-published `ao-data-platform` chart version. Required when `deploy_charts = true`. Backups require an exact version with base version >= 5.2.0; S3 cleanup previews require >= 5.3.0, and database-disk record cleanup requires >= 5.7.0. Pre-release versions meeting the same base-version requirements pass the version check, but must contain the relevant feature's code; the check cannot verify their contents. Ranges and incomplete versions are rejected. See [ClickHouse backups](#clickhouse-backups). |
 | `helm.install_aws_load_balancer_controller` | `bool` | `true` | Skip if LBC is already installed in the cluster |
 | `helm.install_cert_manager` | `bool` | `true` | Skip if cert-manager is already installed |
 | `helm.install_external_secrets_operator` | `bool` | `true` | Skip if ESO is already installed |
@@ -1013,7 +1054,8 @@ To use a StorageClass you manage outside this module, set `clickhouse_storage_cl
 | `helm.clickhouse.backup.suspend` | `bool` | `false` | Pause new scheduled backup runs while keeping the installation. Running work continues. Persist `true` before maintenance; enabling with the default `false` starts the schedule on the first apply. |
 | `helm.clickhouse.backup.image` | `string` | `null` | Optional image override. Omit to use the chart's tested Altinity image. An override must include a SHA-256 digest; another registry or repository is allowed, and the chart checks that the digest matches its tested image. The module does not build an image. |
 | `helm.clickhouse.backup.api_password_revision` | `string` | `"1"` | Changing this generates a new API password, updates the password and revision together in Secrets Manager, and restarts the ClickHouse pods. Pause backups in a separate apply before changing it. See the rotation steps in [ClickHouse backups](#clickhouse-backups). |
-| `helm.clickhouse.backup.cleanup` | `object` | `{ enabled = false, dry_run = true, keep_last = 2, keep_days = 0, timeout_seconds = 1800 }` | Preview backup removal in the scheduled Job logs. Requires backups enabled and a published chart based on >= 5.3.0. Checks every configured ClickHouse copy and supports the same replica counts as the rest of the module. `dry_run` must remain true when enabled; this module never deletes backups. `keep_last` is an integer >= 1; `keep_days` an integer >= 0; `timeout_seconds` an integer >= 60. The timeout adds to the backup Job deadline and can delay the next scheduled run; see [Cleanup previews](#clickhouse-backups). |
+| `helm.clickhouse.backup.cleanup` | `object` | `{ enabled = false, dry_run = true, keep_last = 2, keep_days = 0, timeout_seconds = 1800 }` | Preview backup removal in the scheduled Job logs. Requires backups enabled and a published chart based on >= 5.3.0. Checks every configured ClickHouse copy and supports the same replica counts as the rest of the module. `dry_run` must remain true when enabled; this option never deletes S3 backups. `keep_last` is an integer >= 1; `keep_days` an integer >= 0; `timeout_seconds` an integer >= 60. The timeout adds to the backup Job deadline and can delay the next scheduled run; see [Cleanup previews](#clickhouse-backups). |
+| `helm.clickhouse.backup.local_cleanup` | `object` | `{ enabled = false, dry_run = true, keep_full_backup_days = 2, timeout_seconds = 1800 }` | Clean up older backup records on each database disk while preserving completed backups in S3. Requires backups enabled and a published chart containing `localCleanup` with base version >= 5.7.0. `keep_full_backup_days` is a whole number >= 2; `timeout_seconds` is a whole number >= 60. Start in preview mode; `dry_run = false` permits local record deletion independently of S3 cleanup. See [Database-disk backup record cleanup](#clickhouse-backups). |
 | `clickhouse_passwords` | `object` (sensitive) | `{}` (all auto-generated) | Passwords for the ClickHouse SQL users. Shape: `{ admin = optional(string), otel = optional(string), monte_carlo = optional(string), schema_owner = optional(string), llm_worker = optional(string), readonly_user = optional(string) }`. Any field left null is auto-generated. Marked `sensitive`, so caller-supplied values are redacted in plan/apply output and CI logs — supply via a `.tfvars` file or `TF_VAR_clickhouse_passwords`. Stored in Secrets Manager and synced into the cluster by ESO; never passed through Helm values. Values remain readable in Terraform state — protect state accordingly. |
 | `helm.opentelemetry_collector.resources` | `object` | `null` | Kubernetes resource requests/limits for the OTel Collector pods. Same shape as `helm.clickhouse.resources`. Omit to use chart defaults. |
 | `helm.opentelemetry_collector.replica_count` | `number` | `null` | Optional override for the OTel Collector replica count. `null` (default) lets the chart control it. **`0` is not honored by the chart** — its collector template treats `0` as unset and deploys the default count; to stop ingest for a maintenance window, act upstream (deny consumption on the SQS queues feeding the awss3 receivers, or pause OTLP senders). Non-zero overrides work as expected. |
