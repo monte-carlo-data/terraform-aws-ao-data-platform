@@ -625,10 +625,12 @@ variable "helm" {
     individual S3 backups. Database-disk records continue to grow unless the
     separate local_cleanup option below is enabled with dry_run = false.
     Read its report in the scheduled backup Job's logs.
-    The Job deadline adds timeout_seconds to the backup timeout plus 60 seconds;
-    with the chart's 10800-second backup timeout, which this module does not change,
-    values of 3540 or more reach or exceed the next four-hour run and may cause it
-    to be skipped.
+    The Job deadline adds each enabled cleanup timeout to the backup timeout plus
+    60 seconds. With the chart's 10800-second backup timeout, which this module
+    does not change, a combined cleanup allowance of 3540 seconds reaches the
+    next four-hour run. Overlapping Jobs are forbidden, but the next run can
+    start after the previous Job finishes, up to 15 minutes after its scheduled
+    time; after that allowance, the missed run is skipped.
 
     clickhouse.backup.local_cleanup: optional cleanup of older backup records on
     the database disks, keeping completed backups in S3. Defaults: enabled = false,
@@ -644,6 +646,11 @@ variable "helm" {
     dry_run = false permits removing eligible database-disk records, not S3 files.
     This option is independent of cleanup; S3 cleanup remains preview-only.
     Both cleanup timeouts add to the scheduled Job deadline when enabled.
+    Cleanup errors log "Backup local cleanup stopped:" without failing an already
+    completed backup Job. Check the cleanup logs, not just Job status. Do not run
+    manual backup, restore, or S3-deletion commands while scheduled cleanup runs.
+    See the chart's docs/backup-local-cleanup.md for operating restrictions and
+    recovery checks.
 
     The clustered/HA Keeper topology (keeper_availability_zones) requires
     chart_version >= "2.3.0" — the first chart version exposing the keeper.*
@@ -945,8 +952,9 @@ variable "clickhouse_backup" {
     resources.
 
     bucket_name must be a new, globally unique S3 bucket name. No automatic
-    expiry is configured. Backup files and local metadata accumulate; this release
-    has no supported procedure for removing individual backups.
+    expiry is configured. S3 backup files accumulate; this release has no supported
+    procedure for removing individual S3 backups. Older database-disk records can
+    be removed separately with helm.clickhouse.backup.local_cleanup.
     The password is generated for a new backup user; supplying an existing
     password is not supported.
     service_account_name identifies the dedicated Kubernetes service account in

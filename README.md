@@ -358,8 +358,8 @@ The module creates:
   default, and a policy rejecting unencrypted connections. A separate KMS key
   encrypts backup files, with automatic key rotation and S3 Bucket Keys enabled.
   No automatic expiry is configured, and this release does not delete old
-  backups. Files accumulate, and this release has no supported procedure for
-  removing individual backups.
+  S3 backups. S3 files accumulate, and this release has no supported procedure
+  for removing individual S3 backups.
 - A separate IAM role that can list, read, write, delete, and abort incomplete
   uploads only in that bucket in this AWS account, plus `kms:GenerateDataKey` and `kms:Decrypt` on
   the backup key for uploads and restores. Only the named service account in
@@ -415,14 +415,15 @@ conflicting self-managed resources remain.
 
 **Current limits.** This release uses one fixed schedule every four hours UTC:
 the first successful run each UTC day is full, and later runs save changes from
-an earlier backup. The module does not expose schedule customization. Cleanup
+an earlier backup. The module does not expose schedule customization. S3 cleanup
 is optional and disabled by default; when enabled, it previews deletions only.
-This release has no supported procedure for removing individual backups. A
+This release has no supported procedure for removing individual S3 backups. A
 tested restore procedure is not yet documented. Storage grows by roughly one
 full backup per day plus incremental backups, so watch the bucket size from the
 first day. Each ClickHouse copy also keeps backup metadata on its data volume;
-that metadata grows as backups are created or downloaded, and the preview does
-not limit it.
+that metadata grows as backups are created or downloaded. The separate
+`helm.clickhouse.backup.local_cleanup` option can remove older database-disk
+records when enabled with `dry_run = false`, while preserving the S3 backups.
 Check backup Job results in Kubernetes; a missed run might not produce a failed
 Job. This module does not create backup alerts. Do not add
 S3 expiry on current files independently: incremental backups can still need
@@ -566,13 +567,14 @@ If a preview cannot finish, the Job logs `Backup cleanup preview stopped: ...` a
 itself completed. A backup failure still fails the Job. Read both messages when
 checking backup and preview results.
 
-`timeout_seconds` must be a whole number of at least 60. It is added to the
-backup timeout and 60 seconds when setting the Job deadline. With the chart's
-10800-second backup timeout, which this module does not change, cleanup values
-of 3540 or more reach or exceed the next four-hour run. Since overlapping Jobs
-are forbidden and a missed start is retried for only 15 minutes, a slow preview
-can make the following run be skipped. Choose a timeout that leaves room before
-the next scheduled backup.
+`timeout_seconds` must be a whole number of at least 60. Each enabled cleanup
+timeout is added to the backup timeout and 60 seconds when setting the Job
+deadline. With the chart's 10800-second backup timeout, which this module does
+not change, a combined cleanup allowance of 3540 seconds reaches the next
+four-hour run. Overlapping Jobs are forbidden. If a previous Job is still
+running, the next run can start after it finishes, up to 15 minutes after its
+scheduled time; after that allowance, the missed run is skipped. Choose
+timeouts that leave room before the next scheduled backup.
 
 Cleanup requires a published chart based on 5.3.0 or later containing these
 preview checks. A pre-release build is supported for cleanup only if it contains
@@ -606,18 +608,31 @@ Job logs, and verify cleanup and recovery in a non-production installation befor
 setting `dry_run = false`. The separate `cleanup` option remains preview-only;
 enabling local cleanup never enables S3 deletion.
 
-This feature requires a published chart containing `localCleanup`, planned for
-chart 5.7.0. Publish that chart before releasing this module with these settings
-or enabling them in a deployment. The version check accepts exact chart versions
+If local cleanup stops, it logs `Backup local cleanup stopped: ...`; the Job
+still succeeds because the backup already completed. Check the cleanup logs,
+not just Job status. A failed or cancelled deletion in the backup service's
+action history also stops later cleanup runs. Inspect that operation and the
+current backup lists before resuming cleanup; do not assume a successful backup
+Job means older database-disk records were removed.
+
+Do not run manual backup, restore, or S3-deletion commands while scheduled
+cleanup runs. Altinity's local-deletion command can remove native S3 data if
+the matching S3 backup is absent. The chart's guide explains these restrictions,
+log messages, and recovery checks:
+<https://github.com/monte-carlo-data/helm-ao-data-platform/blob/main/docs/backup-local-cleanup.md>.
+
+This feature requires chart 5.7.0 or later containing `localCleanup`.
+The version check accepts exact chart versions
 based on 5.7.0 or later, including pre-releases, but cannot verify that a
 pre-release contains the implementation. Existing installations do not need to
 upgrade their chart while `local_cleanup.enabled = false`.
 
 When both cleanup options are enabled, both timeouts add to the backup Job's
 deadline. With the chart's 10800-second backup timeout, the two default
-1800-second cleanup timeouts plus the 60-second allowance exceed the next
-four-hour run. Choose shorter cleanup timeouts if using both options so a slow
-run does not cause the following backup to be skipped.
+1800-second cleanup timeouts plus the 60-second allowance total 14460 seconds,
+or four hours and one minute. That can delay the next run; it does not by itself
+mean the run is skipped. The default schedule permits a start up to 15 minutes
+late. Choose shorter cleanup timeouts to leave room before the next backup.
 
 **Keeping or removing backups.** Keep `clickhouse_backup` enabled while backups
 are needed. To remove the backup software, first apply
@@ -969,7 +984,7 @@ To use a StorageClass you manage outside this module, set `clickhouse_storage_cl
 | `helm.llm_worker.resources` | `object` | `null` | Kubernetes resource requests/limits for the LLM-worker pods. Same shape as `helm.clickhouse.resources`. Omit to use chart defaults. |
 | `trace_export_ingest` | `object` | `null` | Optional trace-export ingest leg — see [Trace-export ingest leg](#trace-export-ingest-leg). Shape: `{ producer_execution_role_arn = string, agent_role_arn = optional(string), bucket_name = optional(string), prefix = optional(string, "traces/"), lifecycle_days = optional(number, 3), kms_key_arn = optional(string) }`. `producer_execution_role_arn` is the external role trusted to assume the writer role (exact ARN or role-name wildcard; literal account ID enforced); the trust condition's `sts:ExternalId` value comes from the separate `trace_export_external_id` variable, which is required when this block is set. `agent_role_arn` optionally grants one additional role `s3:PutObject` on the prefix via the bucket policy. `prefix` accepts multi-segment values (`"traces/tenant-a/"`) and is normalized to one trailing `/`. `kms_key_arn` switches the bucket to SSE-KMS (Bucket Keys on) and widens writer/collector policies accordingly. Unset (default), no resources are created and the plan is unchanged from previous releases. |
 | `trace_export_external_id` | `string` (sensitive) | `null` | The `sts:ExternalId` value the external producer supplies when assuming the trace-export writer role (min 8 chars). Required when `trace_export_ingest` is set. Marked `sensitive`, so caller-supplied values are redacted in plan/apply output and CI logs — supply via a `.tfvars` file or `TF_VAR_trace_export_external_id`. Values remain readable in Terraform state — protect state accordingly. |
-| `clickhouse_backup` | `object` | `null` | Optional backup bucket, scoped IAM role, and generated backup and probe database passwords for a fresh backup installation. Requires `bucket_name`; `service_account_name` defaults to `clickhouse-backup` and cannot be `default`, `opentelemetry-collector`, `llm-worker`, `otel-backup-job`, or `clickhouse-backup-monitor`. No automatic expiry is configured. Backup files and local metadata accumulate; this release has no supported procedure for removing individual backups. Storage alone does not run backups: set `helm.clickhouse.backup.enabled = true` to install the software, service account and database users. See [ClickHouse backups](#clickhouse-backups). |
+| `clickhouse_backup` | `object` | `null` | Optional backup bucket, scoped IAM role, and generated backup and probe database passwords for a fresh backup installation. Requires `bucket_name`; `service_account_name` defaults to `clickhouse-backup` and cannot be `default`, `opentelemetry-collector`, `llm-worker`, `otel-backup-job`, or `clickhouse-backup-monitor`. No automatic expiry is configured. S3 backup files accumulate; this release has no supported procedure for removing individual S3 backups. Older database-disk records can be removed separately with `helm.clickhouse.backup.local_cleanup`. Storage alone does not run backups: set `helm.clickhouse.backup.enabled = true` to install the software, service account and database users. See [ClickHouse backups](#clickhouse-backups). |
 
 ## Outputs
 
