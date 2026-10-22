@@ -2284,3 +2284,60 @@ run "local_cleanup_rejects_fractional_timeout" {
   variables { helm = { deploy_charts = false, clickhouse = { backup = { local_cleanup = { timeout_seconds = 60.5 } } } } }
   expect_failures = [var.helm]
 }
+
+# Preview must leave the existing password path and all six version counters unchanged.
+run "local_cleanup_preview_preserves_write_only_database_passwords" {
+  command = plan
+  variables {
+    clickhouse_write_only = true
+    clickhouse_password_versions = {
+      otel       = 2, monte_carlo = 3, schema_owner = 4,
+      llm_worker = 5, admin = 6, readonly_user = 7
+    }
+    clickhouse_backup     = { bucket_name = "test-clickhouse-backups" }
+    clickhouse_domain     = "clickhouse.example.com"
+    otel_collector_domain = "otel.example.com"
+    helm = {
+      chart_registry = "oci://registry-1.docker.io/montecarlodata"
+      chart_version  = "5.7.0"
+      clickhouse = {
+        backup        = { enabled = true, local_cleanup = { enabled = true, dry_run = true } }
+        admin         = { enabled = true }
+        readonly_user = { enabled = true }
+      }
+    }
+  }
+  assert {
+    condition = alltrue([
+      length(random_password.clickhouse_otel) == 0,
+      length(random_password.clickhouse_monte_carlo) == 0,
+      length(random_password.clickhouse_schema_owner) == 0,
+      length(random_password.clickhouse_llm_worker) == 0,
+      length(random_password.clickhouse_admin) == 0,
+      length(random_password.clickhouse_readonly_user) == 0,
+      aws_secretsmanager_secret_version.clickhouse_otel_password.secret_string == null,
+      aws_secretsmanager_secret_version.clickhouse_monte_carlo_password.secret_string == null,
+      aws_secretsmanager_secret_version.clickhouse_schema_owner_password.secret_string == null,
+      aws_secretsmanager_secret_version.clickhouse_llm_worker_password.secret_string == null,
+      aws_secretsmanager_secret_version.clickhouse_admin_password[0].secret_string == null,
+      aws_secretsmanager_secret_version.clickhouse_readonly_user_password[0].secret_string == null,
+      aws_secretsmanager_secret_version.clickhouse_otel_password.secret_string_wo_version == 2,
+      aws_secretsmanager_secret_version.clickhouse_monte_carlo_password.secret_string_wo_version == 3,
+      aws_secretsmanager_secret_version.clickhouse_schema_owner_password.secret_string_wo_version == 4,
+      aws_secretsmanager_secret_version.clickhouse_llm_worker_password.secret_string_wo_version == 5,
+      aws_secretsmanager_secret_version.clickhouse_admin_password[0].secret_string_wo_version == 6,
+      aws_secretsmanager_secret_version.clickhouse_readonly_user_password[0].secret_string_wo_version == 7,
+      length(random_password.clickhouse_backup) == 1,
+      length(random_password.clickhouse_backup_probe) == 1,
+      length(random_password.clickhouse_backup_api) == 1,
+      nonsensitive(aws_secretsmanager_secret_version.clickhouse_backup[0].secret_string) == "00000000000000000000000000000000",
+      nonsensitive(aws_secretsmanager_secret_version.clickhouse_backup_probe[0].secret_string) == "22222222222222222222222222222222",
+      jsondecode(nonsensitive(aws_secretsmanager_secret_version.clickhouse_backup_api[0].secret_string)).password == "11111111111111111111111111111111",
+      yamldecode(helm_release.ao_data_platform[0].values[0]).clickhouse.backup.enabled,
+      yamldecode(helm_release.ao_data_platform[0].values[0]).clickhouse.backup.localCleanup.enabled,
+      yamldecode(helm_release.ao_data_platform[0].values[0]).clickhouse.backup.localCleanup.dryRun,
+      !can(yamldecode(helm_release.ao_data_platform[0].values[0]).clickhouse.backup.cleanup),
+    ])
+    error_message = "Local cleanup preview must preserve all six write-only database users and their version counters; only the three separate backup passwords use managed generators."
+  }
+}
