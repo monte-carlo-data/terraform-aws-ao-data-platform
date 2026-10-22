@@ -2002,6 +2002,35 @@ run "local_cleanup_keeps_old_chart_when_disabled" {
   }
 }
 
+run "s3_cleanup_does_not_enable_local_cleanup" {
+  command = plan
+  variables {
+    clickhouse_backup     = { bucket_name = "test-clickhouse-backups" }
+    clickhouse_domain     = "clickhouse.example.com"
+    otel_collector_domain = "otel.example.com"
+    helm = {
+      chart_registry = "oci://registry-1.docker.io/montecarlodata"
+      chart_version  = "5.7.0"
+      clickhouse = { backup = {
+        enabled       = true
+        cleanup       = { enabled = true, dry_run = true }
+        local_cleanup = { enabled = false, dry_run = false }
+      } }
+    }
+  }
+  assert {
+    condition     = !can(yamldecode(helm_release.ao_data_platform[0].values[0]).clickhouse.backup.localCleanup)
+    error_message = "S3 cleanup must not enable database-disk deletion when local cleanup is disabled."
+  }
+  assert {
+    condition = (
+      yamldecode(helm_release.ao_data_platform[0].values[0]).clickhouse.backup.cleanup.enabled == true &&
+      yamldecode(helm_release.ao_data_platform[0].values[0]).clickhouse.backup.cleanup.dryRun == true
+    )
+    error_message = "S3 cleanup must remain an enabled preview without local cleanup."
+  }
+}
+
 run "local_cleanup_defaults_to_preview" {
   command = plan
   variables {
@@ -2146,6 +2175,8 @@ run "local_cleanup_rejects_old_prerelease" {
   expect_failures = [helm_release.ao_data_platform]
 }
 
+# These two cases cover the shared version parser; scheduled backups also reject
+# these strings, so they do not independently test the local-cleanup version gate.
 run "local_cleanup_rejects_incomplete_chart" {
   command = plan
   variables {
