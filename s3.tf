@@ -143,8 +143,8 @@ resource "aws_s3_bucket_notification" "trace_export_ingest" {
   depends_on = [aws_sqs_queue_policy.trace_export_ingest]
 }
 
-# Backup storage has no automatic expiry: cleanup must preserve the full
-# backups needed by retained incremental backups.
+# Current backup files have no age-based expiry. The backup software selects
+# complete backup sets, preserving the full backups needed by incrementals.
 resource "aws_s3_bucket" "clickhouse_backup" {
   count = local.clickhouse_backup_enabled ? 1 : 0
 
@@ -171,6 +171,37 @@ resource "aws_s3_bucket_versioning" "clickhouse_backup" {
   lifecycle {
     prevent_destroy = true
   }
+}
+
+# Ordinary deletes preserve versions. After an explicitly chosen recovery
+# period, S3 removes those older versions without granting the backup role any
+# version-deletion permissions. Current backup files are never expired here.
+resource "aws_s3_bucket_lifecycle_configuration" "clickhouse_backup" {
+  count = var.clickhouse_backup == null ? 0 : (var.clickhouse_backup.noncurrent_version_expiration_days == null ? 0 : 1)
+
+  bucket = aws_s3_bucket.clickhouse_backup[0].id
+
+  rule {
+    id     = "expire-older-backup-file-versions"
+    status = "Enabled"
+    filter {}
+
+    noncurrent_version_expiration {
+      noncurrent_days = var.clickhouse_backup.noncurrent_version_expiration_days
+    }
+  }
+
+  rule {
+    id     = "remove-empty-backup-delete-markers"
+    status = "Enabled"
+    filter {}
+
+    expiration {
+      expired_object_delete_marker = true
+    }
+  }
+
+  depends_on = [aws_s3_bucket_versioning.clickhouse_backup]
 }
 
 resource "aws_s3_bucket_public_access_block" "clickhouse_backup" {

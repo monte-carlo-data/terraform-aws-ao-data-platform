@@ -258,15 +258,23 @@ locals {
   chart_supports_scheduled_backups    = local.chart_version_parts[0] > 5 || (local.chart_version_parts[0] == 5 && local.chart_version_parts[1] >= 2)
   chart_supports_backup_cleanup       = local.chart_version_parts[0] > 5 || (local.chart_version_parts[0] == 5 && local.chart_version_parts[1] >= 3)
   chart_supports_local_backup_cleanup = local.chart_version_parts[0] > 5 || (local.chart_version_parts[0] == 5 && local.chart_version_parts[1] >= 7)
+  chart_supports_backup_set_retention = local.chart_version_parts[0] > 5 || (local.chart_version_parts[0] == 5 && local.chart_version_parts[1] >= 8)
 
   helm_clickhouse_backup_cleanup = var.helm.clickhouse.backup.cleanup.enabled ? {
-    cleanup = {
+    # Omit new fields for legacy previews. Keep numeric fields in their own
+    # conditional map so Terraform does not convert their values to strings.
+    cleanup = merge({
       enabled        = true
       dryRun         = var.helm.clickhouse.backup.cleanup.dry_run
       keepLast       = var.helm.clickhouse.backup.cleanup.keep_last
       keepDays       = var.helm.clickhouse.backup.cleanup.keep_days
       timeoutSeconds = var.helm.clickhouse.backup.cleanup.timeout_seconds
-    }
+      }, var.helm.clickhouse.backup.cleanup.retention_policy == "daily-weekly" ? {
+      retentionPolicy = "daily-weekly"
+      } : {}, var.helm.clickhouse.backup.cleanup.retention_policy == "daily-weekly" ? {
+      dailyDays   = var.helm.clickhouse.backup.cleanup.daily_days
+      historyDays = var.helm.clickhouse.backup.cleanup.history_days
+    } : {})
   } : {}
   helm_clickhouse_backup_local_cleanup = var.helm.clickhouse.backup.local_cleanup.enabled ? {
     localCleanup = {
