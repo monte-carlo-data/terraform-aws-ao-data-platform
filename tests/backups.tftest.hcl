@@ -1920,3 +1920,336 @@ run "cleanup_accepts_retention_and_timeout_minimums" {
   }
 }
 
+# Database-disk record cleanup is separate from S3 retention. These plans use
+# the same mocked providers as the backup tests above; nothing is deployed.
+run "local_cleanup_disabled_by_default" {
+  command = plan
+  assert {
+    condition = (
+      var.helm.clickhouse.backup.local_cleanup.enabled == false &&
+      var.helm.clickhouse.backup.local_cleanup.dry_run == true &&
+      var.helm.clickhouse.backup.local_cleanup.keep_full_backup_days == 2 &&
+      var.helm.clickhouse.backup.local_cleanup.timeout_seconds == 1800 &&
+      length(keys(local.helm_clickhouse_backup_local_cleanup)) == 0
+    )
+    error_message = "Existing callers must not acquire database-disk cleanup settings."
+  }
+}
+
+run "local_cleanup_keeps_old_chart_when_disabled" {
+  command = plan
+  variables {
+    clickhouse_backup     = { bucket_name = "test-clickhouse-backups" }
+    clickhouse_domain     = "clickhouse.example.com"
+    otel_collector_domain = "otel.example.com"
+    helm = {
+      chart_registry = "oci://registry-1.docker.io/montecarlodata"
+      chart_version  = "5.2.0"
+      clickhouse = { backup = {
+        enabled       = true
+        local_cleanup = { enabled = false, dry_run = false }
+
+      } }
+    }
+  }
+  assert {
+    condition     = !can(yamldecode(helm_release.ao_data_platform[0].values[0]).clickhouse.backup.localCleanup)
+    error_message = "Disabled database-disk cleanup must remain omitted on an older chart."
+  }
+}
+
+run "local_cleanup_defaults_to_preview" {
+  command = plan
+  variables {
+    clickhouse_backup     = { bucket_name = "test-clickhouse-backups" }
+    clickhouse_domain     = "clickhouse.example.com"
+    otel_collector_domain = "otel.example.com"
+    helm = {
+      chart_registry = "oci://registry-1.docker.io/montecarlodata"
+      chart_version  = "5.7.0"
+      clickhouse = { backup = {
+        enabled       = true
+        local_cleanup = { enabled = true }
+
+      } }
+    }
+  }
+  assert {
+    condition = jsonencode(yamldecode(helm_release.ao_data_platform[0].values[0]).clickhouse.backup.localCleanup) == jsonencode({
+      enabled = true, dryRun = true, keepFullBackupDays = 2, timeoutSeconds = 1800
+    })
+    error_message = "Database-disk cleanup settings must reach the chart without changing S3 retention."
+  }
+  assert {
+    condition     = !can(yamldecode(helm_release.ao_data_platform[0].values[0]).clickhouse.backup.cleanup)
+    error_message = "Database-disk cleanup must not require or enable S3 cleanup."
+  }
+}
+
+run "local_cleanup_custom_deletion_settings" {
+  command = plan
+  variables {
+    clickhouse_backup     = { bucket_name = "test-clickhouse-backups" }
+    clickhouse_domain     = "clickhouse.example.com"
+    otel_collector_domain = "otel.example.com"
+    helm = {
+      chart_registry = "oci://registry-1.docker.io/montecarlodata"
+      chart_version  = "5.7.0"
+      clickhouse = { backup = {
+        enabled       = true
+        local_cleanup = { enabled = true, dry_run = false, keep_full_backup_days = 3, timeout_seconds = 600 }
+
+      } }
+    }
+  }
+  assert {
+    condition = jsonencode(yamldecode(helm_release.ao_data_platform[0].values[0]).clickhouse.backup.localCleanup) == jsonencode({
+      enabled = true, dryRun = false, keepFullBackupDays = 3, timeoutSeconds = 600
+    })
+    error_message = "Database-disk cleanup settings must reach the chart without changing S3 retention."
+  }
+  assert {
+    condition     = !can(yamldecode(helm_release.ao_data_platform[0].values[0]).clickhouse.backup.cleanup)
+    error_message = "Database-disk cleanup must not require or enable S3 cleanup."
+  }
+}
+
+run "local_cleanup_deletion_with_s3_preview" {
+  command = plan
+  variables {
+    clickhouse_backup     = { bucket_name = "test-clickhouse-backups" }
+    clickhouse_domain     = "clickhouse.example.com"
+    otel_collector_domain = "otel.example.com"
+    helm = {
+      chart_registry = "oci://registry-1.docker.io/montecarlodata"
+      chart_version  = "5.7.0"
+      clickhouse = { backup = {
+        enabled       = true
+        local_cleanup = { enabled = true, dry_run = false, timeout_seconds = 60 }
+        cleanup       = { enabled = true, dry_run = true, timeout_seconds = 60 }
+      } }
+    }
+  }
+  assert {
+    condition = jsonencode(yamldecode(helm_release.ao_data_platform[0].values[0]).clickhouse.backup.localCleanup) == jsonencode({
+      enabled = true, dryRun = false, keepFullBackupDays = 2, timeoutSeconds = 60
+    })
+    error_message = "Database-disk cleanup settings must reach the chart without changing S3 retention."
+  }
+  assert {
+    condition = (
+      yamldecode(helm_release.ao_data_platform[0].values[0]).clickhouse.backup.cleanup.enabled == true &&
+      yamldecode(helm_release.ao_data_platform[0].values[0]).clickhouse.backup.cleanup.dryRun == true
+    )
+    error_message = "Allowing database-disk deletion must not allow S3 deletion."
+  }
+}
+
+run "local_cleanup_still_rejects_s3_deletion" {
+  command = plan
+  variables {
+    clickhouse_backup     = { bucket_name = "test-clickhouse-backups" }
+    clickhouse_domain     = "clickhouse.example.com"
+    otel_collector_domain = "otel.example.com"
+    helm = {
+      chart_registry = "oci://registry-1.docker.io/montecarlodata"
+      chart_version  = "5.7.0"
+      clickhouse = { backup = {
+        enabled       = true
+        local_cleanup = { enabled = true, dry_run = false }
+        cleanup       = { enabled = true, dry_run = false }
+      } }
+    }
+  }
+  expect_failures = [var.helm]
+}
+
+run "local_cleanup_rejects_old_chart" {
+  command = plan
+  variables {
+    clickhouse_backup     = { bucket_name = "test-clickhouse-backups" }
+    clickhouse_domain     = "clickhouse.example.com"
+    otel_collector_domain = "otel.example.com"
+    helm = {
+      chart_registry = "oci://registry-1.docker.io/montecarlodata"
+      chart_version  = "5.6.0"
+      clickhouse = { backup = {
+        enabled       = true
+        local_cleanup = { enabled = true }
+
+      } }
+    }
+  }
+  expect_failures = [helm_release.ao_data_platform]
+}
+
+run "local_cleanup_rejects_old_prerelease" {
+  command = plan
+  variables {
+    clickhouse_backup     = { bucket_name = "test-clickhouse-backups" }
+    clickhouse_domain     = "clickhouse.example.com"
+    otel_collector_domain = "otel.example.com"
+    helm = {
+      chart_registry = "oci://registry-1.docker.io/montecarlodata"
+      chart_version  = "5.6.0-dev.gabcdef1"
+      clickhouse = { backup = {
+        enabled       = true
+        local_cleanup = { enabled = true }
+
+      } }
+    }
+  }
+  expect_failures = [helm_release.ao_data_platform]
+}
+
+run "local_cleanup_rejects_incomplete_chart" {
+  command = plan
+  variables {
+    clickhouse_backup     = { bucket_name = "test-clickhouse-backups" }
+    clickhouse_domain     = "clickhouse.example.com"
+    otel_collector_domain = "otel.example.com"
+    helm = {
+      chart_registry = "oci://registry-1.docker.io/montecarlodata"
+      chart_version  = "5.7"
+      clickhouse = { backup = {
+        enabled       = true
+        local_cleanup = { enabled = true }
+
+      } }
+    }
+  }
+  expect_failures = [helm_release.ao_data_platform]
+}
+
+run "local_cleanup_rejects_chart_range" {
+  command = plan
+  variables {
+    clickhouse_backup     = { bucket_name = "test-clickhouse-backups" }
+    clickhouse_domain     = "clickhouse.example.com"
+    otel_collector_domain = "otel.example.com"
+    helm = {
+      chart_registry = "oci://registry-1.docker.io/montecarlodata"
+      chart_version  = ">=5.7.0"
+      clickhouse = { backup = {
+        enabled       = true
+        local_cleanup = { enabled = true }
+
+      } }
+    }
+  }
+  expect_failures = [helm_release.ao_data_platform]
+}
+
+run "local_cleanup_accepts_prerelease" {
+  command = plan
+  variables {
+    clickhouse_backup     = { bucket_name = "test-clickhouse-backups" }
+    clickhouse_domain     = "clickhouse.example.com"
+    otel_collector_domain = "otel.example.com"
+    helm = {
+      chart_registry = "oci://registry-1.docker.io/montecarlodata"
+      chart_version  = "5.7.0-dev.gabcdef1"
+      clickhouse = { backup = {
+        enabled       = true
+        local_cleanup = { enabled = true }
+
+      } }
+    }
+  }
+  assert {
+    condition = jsonencode(yamldecode(helm_release.ao_data_platform[0].values[0]).clickhouse.backup.localCleanup) == jsonencode({
+      enabled = true, dryRun = true, keepFullBackupDays = 2, timeoutSeconds = 1800
+    })
+    error_message = "Database-disk cleanup settings must reach the chart without changing S3 retention."
+  }
+  assert {
+    condition     = !can(yamldecode(helm_release.ao_data_platform[0].values[0]).clickhouse.backup.cleanup)
+    error_message = "Database-disk cleanup must not require or enable S3 cleanup."
+  }
+}
+
+run "local_cleanup_accepts_next_major" {
+  command = plan
+  variables {
+    clickhouse_backup     = { bucket_name = "test-clickhouse-backups" }
+    clickhouse_domain     = "clickhouse.example.com"
+    otel_collector_domain = "otel.example.com"
+    helm = {
+      chart_registry = "oci://registry-1.docker.io/montecarlodata"
+      chart_version  = "6.0.0"
+      clickhouse = { backup = {
+        enabled       = true
+        local_cleanup = { enabled = true }
+
+      } }
+    }
+  }
+  assert {
+    condition = jsonencode(yamldecode(helm_release.ao_data_platform[0].values[0]).clickhouse.backup.localCleanup) == jsonencode({
+      enabled = true, dryRun = true, keepFullBackupDays = 2, timeoutSeconds = 1800
+    })
+    error_message = "Database-disk cleanup settings must reach the chart without changing S3 retention."
+  }
+  assert {
+    condition     = !can(yamldecode(helm_release.ao_data_platform[0].values[0]).clickhouse.backup.cleanup)
+    error_message = "Database-disk cleanup must not require or enable S3 cleanup."
+  }
+}
+
+run "local_cleanup_accepts_double_digit_minor" {
+  command = plan
+  variables {
+    clickhouse_backup     = { bucket_name = "test-clickhouse-backups" }
+    clickhouse_domain     = "clickhouse.example.com"
+    otel_collector_domain = "otel.example.com"
+    helm = {
+      chart_registry = "oci://registry-1.docker.io/montecarlodata"
+      chart_version  = "5.10.0"
+      clickhouse = { backup = {
+        enabled       = true
+        local_cleanup = { enabled = true }
+
+      } }
+    }
+  }
+  assert {
+    condition = jsonencode(yamldecode(helm_release.ao_data_platform[0].values[0]).clickhouse.backup.localCleanup) == jsonencode({
+      enabled = true, dryRun = true, keepFullBackupDays = 2, timeoutSeconds = 1800
+    })
+    error_message = "Database-disk cleanup settings must reach the chart without changing S3 retention."
+  }
+  assert {
+    condition     = !can(yamldecode(helm_release.ao_data_platform[0].values[0]).clickhouse.backup.cleanup)
+    error_message = "Database-disk cleanup must not require or enable S3 cleanup."
+  }
+}
+
+run "local_cleanup_rejects_disabled_backups" {
+  command = plan
+  variables { helm = { deploy_charts = false, clickhouse = { backup = { local_cleanup = { enabled = true } } } } }
+  expect_failures = [var.helm]
+}
+
+run "local_cleanup_rejects_one_full_backup_day" {
+  command = plan
+  variables { helm = { deploy_charts = false, clickhouse = { backup = { local_cleanup = { keep_full_backup_days = 1 } } } } }
+  expect_failures = [var.helm]
+}
+
+run "local_cleanup_rejects_fractional_full_backup_day_count" {
+  command = plan
+  variables { helm = { deploy_charts = false, clickhouse = { backup = { local_cleanup = { keep_full_backup_days = 2.5 } } } } }
+  expect_failures = [var.helm]
+}
+
+run "local_cleanup_rejects_short_timeout" {
+  command = plan
+  variables { helm = { deploy_charts = false, clickhouse = { backup = { local_cleanup = { timeout_seconds = 59 } } } } }
+  expect_failures = [var.helm]
+}
+
+run "local_cleanup_rejects_fractional_timeout" {
+  command = plan
+  variables { helm = { deploy_charts = false, clickhouse = { backup = { local_cleanup = { timeout_seconds = 60.5 } } } } }
+  expect_failures = [var.helm]
+}

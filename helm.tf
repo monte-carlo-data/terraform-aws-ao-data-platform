@@ -355,6 +355,11 @@ resource "helm_release" "ao_data_platform" {
     }
 
     precondition {
+      condition     = !var.helm.clickhouse.backup.local_cleanup.enabled || local.chart_supports_local_backup_cleanup
+      error_message = "Database-disk backup record cleanup requires a published helm.chart_version based on 5.7.0 or later containing localCleanup support. Pre-release versions with that base are accepted, but the version check cannot verify their contents."
+    }
+
+    precondition {
       condition     = var.clickhouse_domain != null && var.otel_collector_domain != null
       error_message = "clickhouse_domain and otel_collector_domain are required when helm.deploy_charts = true."
     }
