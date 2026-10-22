@@ -29,6 +29,11 @@ jobs:
       - run:
           name: Terraform test
           command: make test
+      - run:
+          # A separate Terraform root with its own init, so `make test` does
+          # not reach it.
+          name: Credential rotation model
+          command: make test-rotation-model
 
 workflows:
   validate:

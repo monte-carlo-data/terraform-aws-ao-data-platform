@@ -1,4 +1,4 @@
-.PHONY: default sanity-check test
+.PHONY: default sanity-check test test-rotation-model
 
 default:
 	@echo "Read the readme"
@@ -18,3 +18,10 @@ test:
 	terraform test
 	# This guard needs its own check: terraform test cannot expect prevent_destroy errors.
 	python3 tests/verify_backup_versioning_guard.py
+
+test-rotation-model:
+	# Run the credential rotation model in spec/credential-rotation. It is a
+	# separate Terraform root, so it needs its own init and the `test` target
+	# above does not reach it. See that directory's README for scope and limits.
+	terraform -chdir=spec/credential-rotation init -backend=false
+	terraform -chdir=spec/credential-rotation test
