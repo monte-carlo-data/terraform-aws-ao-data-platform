@@ -588,7 +588,8 @@ variable "helm" {
     ClickHouse node group this module creates (see clickhouse_node_group).
     This 1.3.0 minimum is not checked automatically; a 1.2.x caller can apply
     and hit the original scheduler deadlock. Scheduled backups have a separate
-    checked minimum of helm.chart_version >= 5.2.0; cleanup previews require >= 5.3.0.
+    checked minimum of helm.chart_version >= 5.2.0; S3 cleanup previews require
+    >= 5.3.0, and database-disk backup record cleanup requires >= 5.7.0.
 
     Set chart_version to an exact, already-published version. Pre-release versions
     with a base of 5.2.0 or later are also accepted for backups. Versions based on
@@ -621,13 +622,36 @@ variable "helm" {
     clickhouse_replica_count. The usual replica placement limits still apply; do not
     raise the replica count without the table-conversion prerequisites described
     under clickhouse_replica_count and the README HA section. The preview never
-    deletes backup files, and this release has no supported procedure for removing
-    individual backups. Backup files and local metadata continue to grow.
+    deletes backup files in S3. This release has no supported procedure for removing
+    individual S3 backups. Database-disk records continue to grow unless the
+    separate local_cleanup option below is enabled with dry_run = false.
     Read its report in the scheduled backup Job's logs.
-    The Job deadline adds timeout_seconds to the backup timeout plus 60 seconds;
-    with the chart's 10800-second backup timeout, which this module does not change,
-    values of 3540 or more reach or exceed the next four-hour run and may cause it
-    to be skipped.
+    The Job deadline adds each enabled cleanup timeout to the backup timeout plus
+    60 seconds. With the chart's 10800-second backup timeout, which this module
+    does not change, a combined cleanup allowance of 3540 seconds reaches the
+    next four-hour run. Overlapping Jobs are forbidden, but the next run can
+    start after the previous Job finishes, up to 15 minutes after its scheduled
+    time; after that allowance, the missed run is skipped.
+
+    clickhouse.backup.local_cleanup: optional cleanup of older backup records on
+    the database disks, keeping completed backups in S3. Defaults: enabled = false,
+    dry_run = true, keep_full_backup_days = 2, timeout_seconds = 1800. It protects the
+    full and incremental records from the newest keep_full_backup_days distinct
+    UTC dates with successful full backups. This is a count of successful backup
+    days, not an age cutoff; missed days do not reduce the protected history.
+    keep_full_backup_days must be a whole number >= 2 and timeout_seconds a whole
+    number >= 60. Requires enabled backups and
+    a published chart based on 5.7.0 or later containing localCleanup support.
+    Pre-release builds with the same base pass the check, but their contents
+    must be verified separately. Start with dry_run = true and review the logs;
+    dry_run = false permits removing eligible database-disk records, not S3 files.
+    This option is independent of cleanup; S3 cleanup remains preview-only.
+    Both cleanup timeouts add to the scheduled Job deadline when enabled.
+    Cleanup errors log "Backup local cleanup stopped:" without failing an already
+    completed backup Job. Check the cleanup logs, not just Job status. Do not run
+    manual backup, restore, or S3-deletion commands while scheduled cleanup runs.
+    See the chart's docs/backup-local-cleanup.md for operating restrictions and
+    recovery checks.
 
     The clustered/HA Keeper topology (keeper_availability_zones) requires
     chart_version >= "2.3.0" — the first chart version exposing the keeper.*
@@ -781,6 +805,12 @@ variable "helm" {
           keep_days       = optional(number, 0)
           timeout_seconds = optional(number, 1800)
         }), {})
+        local_cleanup = optional(object({
+          enabled               = optional(bool, false)
+          dry_run               = optional(bool, true)
+          keep_full_backup_days = optional(number, 2)
+          timeout_seconds       = optional(number, 1800)
+        }), {})
       }), {})
     }), {})
 
@@ -850,8 +880,23 @@ variable "helm" {
   }
 
   validation {
+    condition     = !var.helm.clickhouse.backup.local_cleanup.enabled || var.helm.clickhouse.backup.enabled
+    error_message = "Database-disk backup record cleanup requires helm.clickhouse.backup.enabled = true."
+  }
+
+  validation {
+    condition = (
+      var.helm.clickhouse.backup.local_cleanup.keep_full_backup_days >= 2 &&
+      floor(var.helm.clickhouse.backup.local_cleanup.keep_full_backup_days) == var.helm.clickhouse.backup.local_cleanup.keep_full_backup_days &&
+      var.helm.clickhouse.backup.local_cleanup.timeout_seconds >= 60 &&
+      floor(var.helm.clickhouse.backup.local_cleanup.timeout_seconds) == var.helm.clickhouse.backup.local_cleanup.timeout_seconds
+    )
+    error_message = "helm.clickhouse.backup.local_cleanup.keep_full_backup_days must be a whole number of at least 2, and timeout_seconds a whole number of at least 60."
+  }
+
+  validation {
     condition     = !var.helm.clickhouse.backup.cleanup.enabled || var.helm.clickhouse.backup.cleanup.dry_run
-    error_message = "helm.clickhouse.backup.cleanup.dry_run must be true: this module version does not support automatic backup deletion (clickhouse-backup 2.8.1 leaves serialization.json files behind when deleting native backups). With dry_run = true, cleanup reports which backups it would delete without deleting them."
+    error_message = "helm.clickhouse.backup.cleanup.dry_run must be true: this module version does not support automatic S3 backup deletion (clickhouse-backup 2.8.1 leaves serialization.json files behind when deleting native backups). With dry_run = true, cleanup reports which backups it would delete without deleting them."
   }
 
   validation {
@@ -907,8 +952,9 @@ variable "clickhouse_backup" {
     the retirement procedure in the README.
 
     bucket_name must be a new, globally unique S3 bucket name. No automatic
-    expiry is configured. Backup files and local metadata accumulate; this release
-    has no supported procedure for removing individual backups.
+    expiry is configured. S3 backup files accumulate; this release has no supported
+    procedure for removing individual S3 backups. Older database-disk records can
+    be removed separately with helm.clickhouse.backup.local_cleanup.
     versioning_enabled keeps previous S3 object versions after an overwrite or
     ordinary deletion. It defaults to false and is one-way through the module's
     normal inputs. Once enabled, Terraform blocks setting it to false, setting
