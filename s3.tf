@@ -143,7 +143,7 @@ resource "aws_s3_bucket_notification" "trace_export_ingest" {
   depends_on = [aws_sqs_queue_policy.trace_export_ingest]
 }
 
-# Current backup files have no age-based expiry. The backup software selects
+# No S3 lifecycle rule expires current backup files. The backup software selects
 # complete backup sets, preserving the full backups needed by incrementals.
 resource "aws_s3_bucket" "clickhouse_backup" {
   count = local.clickhouse_backup_enabled ? 1 : 0

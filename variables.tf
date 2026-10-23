@@ -621,13 +621,14 @@ variable "helm" {
     required bases. keep_last must be a positive whole number and keep_days a
     nonnegative whole number.
     The daily-weekly policy keeps complete full-plus-incremental sets from the
-    latest daily_days, then one daily set per UTC week through history_days.
+    latest daily_days UTC dates, then the most recent available backup day of
+    each Monday-Sunday UTC week through history_days. Both windows include today.
     It ignores keep_last and keep_days. daily_days must be a positive whole
     number; history_days must be a whole number at least as large as daily_days.
     This policy, including its preview, requires a chart containing backup-set
     retention based on 5.8.0 or later. Start with dry_run = true; dry_run = false
-    permits deletion only with daily-weekly. Publish the supporting chart before
-    using this setting. Pre-release version checks cannot verify chart contents.
+    permits deletion only with daily-weekly. Use a published chart containing
+    that feature; version checks cannot verify chart contents.
     Cleanup checks every configured copy. Do not change replica counts without
     the table-conversion prerequisites described under clickhouse_replica_count.
     Read the result in the scheduled backup Job's logs. S3 cleanup first removes
@@ -635,7 +636,9 @@ variable "helm" {
     option removes local records while retaining their S3 backups. On versioned buckets, ordinary
     deletion preserves older file versions until an optional storage expiry
     rule removes them; the backup role cannot permanently delete versions.
-    timeout_seconds must be a whole number of at least 60.
+    timeout_seconds must be a whole number of at least 60 for previews. Deletion
+    needs more than 300 + (5 * copies + 1) * 30 seconds remaining before each
+    request, plus time for earlier checks; start with the 1800-second default.
     The Job deadline adds each enabled cleanup timeout to the backup timeout plus
     60 seconds. With the chart's 10800-second backup timeout, which this module
     does not change, a combined cleanup allowance of 3540 seconds reaches the
@@ -982,8 +985,8 @@ variable "clickhouse_backup" {
     resources on a fresh installation; removing existing protected storage needs
     the retirement procedure in the README.
 
-    bucket_name must be a new, globally unique S3 bucket name. Current backup
-    files have no age-based expiry: helm.clickhouse.backup.cleanup selects full
+    bucket_name must be a new, globally unique S3 bucket name. No S3 lifecycle
+    rule expires current backup files: helm.clickhouse.backup.cleanup selects full
     backup sets for removal. Older database-disk records are managed separately
     with helm.clickhouse.backup.local_cleanup.
     versioning_enabled keeps previous S3 object versions after an overwrite or
