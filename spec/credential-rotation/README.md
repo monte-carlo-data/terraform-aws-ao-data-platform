@@ -9,6 +9,11 @@ Run it with:
 
     make test-rotation-model
 
+Two companion documents cover what the model deliberately leaves out:
+[`operational-constraints.md`](operational-constraints.md) for the server- and
+client-side behaviour it cannot express, and [`scope.md`](scope.md) for what the scheme
+does and does not cover.
+
 ## The scheme
 
 Every ClickHouse user has two permanent secrets — slot A (`<user>-credentials`) and
@@ -75,7 +80,8 @@ express, because a step delta is only visible by comparing against prior state.
 - **Mocked AWS provider, real `random` provider.** No AWS calls, so this runs anywhere.
 - It models the *arithmetic*. It cannot prove the operational half of the scheme — the
   server reload, the client restart, and the checks that clients actually moved before
-  an old password is retired.
+  an old password is retired. What was measured about that half, rather than assumed, is
+  in [`operational-constraints.md`](operational-constraints.md).
 
 ## Changing the formulas
 
