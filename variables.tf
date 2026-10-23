@@ -638,7 +638,8 @@ variable "helm" {
     rule removes them; the backup role cannot permanently delete versions.
     timeout_seconds must be a whole number of at least 60 for previews. Deletion
     needs more than 300 + (5 * copies + 1) * 30 seconds remaining before each
-    request, plus time for earlier checks; start with the 1800-second default.
+    request, plus time for password revision checks: more than 850 seconds with
+    two copies. Earlier checks also consume time; start with the 1800-second default.
     The Job deadline adds each enabled cleanup timeout to the backup timeout plus
     60 seconds. With the chart's 10800-second backup timeout, which this module
     does not change, a combined cleanup allowance of 3540 seconds reaches the

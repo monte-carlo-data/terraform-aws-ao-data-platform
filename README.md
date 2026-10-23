@@ -712,8 +712,9 @@ fails the Job. Check cleanup messages and the report separately from Job status.
 `timeout_seconds` must be a whole number of at least 60; that minimum is useful
 for previews. Before sending each deletion, the chart requires more than
 `300 + (5 * copies + 1) * 30` seconds remaining for the deletion and follow-up
-checks: more than 630 seconds with two copies. Earlier checks also consume time,
-so use the default 1800 seconds as a starting point for deletion. A short budget
+checks, plus time for password revision checks. With two copies, more than 850
+seconds must remain. Earlier checks also consume time, so use the default 1800
+seconds as a starting point for deletion. A short budget
 can pause cleanup without deleting anything. Each enabled cleanup
 timeout is added to the backup timeout and 60 seconds when setting the Job
 deadline. With the chart's 10800-second backup timeout, which this module does
