@@ -360,6 +360,15 @@ resource "helm_release" "ao_data_platform" {
     }
 
     precondition {
+      condition = (
+        !var.helm.clickhouse.backup.cleanup.enabled ||
+        (var.helm.clickhouse.backup.cleanup.retention_policy == "count-and-age" && var.helm.clickhouse.backup.cleanup.dry_run) ||
+        local.chart_supports_backup_set_retention
+      )
+      error_message = "Daily/weekly backup retention or S3 backup deletion requires a published helm.chart_version based on 5.8.0 or later containing those features. Pre-release versions with that base are accepted, but their contents must be verified separately."
+    }
+
+    precondition {
       condition     = var.clickhouse_domain != null && var.otel_collector_domain != null
       error_message = "clickhouse_domain and otel_collector_domain are required when helm.deploy_charts = true."
     }
