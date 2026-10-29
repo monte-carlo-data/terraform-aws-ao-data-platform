@@ -627,15 +627,20 @@ variable "helm" {
     number; history_days must be a whole number at least as large as daily_days.
     This policy, including its preview, requires a chart containing backup-set
     retention based on 5.8.0 or later. Start with dry_run = true; dry_run = false
-    permits deletion only with daily-weekly. Use a published chart containing
-    that feature; version checks cannot verify chart contents.
+    permits deletion only with daily-weekly and clickhouse_backup.versioning_enabled = true.
+    Review a daily-weekly preview before changing only dry_run to false. The module
+    retains count-and-age as its default for existing callers using older charts,
+    even though chart 5.8.0 defaults to daily-weekly when installed directly.
+    Use a published chart containing that feature; version checks cannot verify
+    chart contents.
     Cleanup checks every configured copy. Do not change replica counts without
     the table-conversion prerequisites described under clickhouse_replica_count.
     Read the result in the scheduled backup Job's logs. S3 cleanup first removes
     remaining local records for the sets it retires. The separate local_cleanup
     option removes local records while retaining their S3 backups. On versioned buckets, ordinary
-    deletion preserves older file versions until an optional storage expiry
-    rule removes them; the backup role cannot permanently delete versions.
+    deletion preserves older file versions until the optional
+    clickhouse_backup.noncurrent_version_expiration_days setting expires them;
+    the backup role cannot permanently delete versions.
     timeout_seconds must be a whole number of at least 60 for previews. Deletion
     needs more than 300 + (5 * copies + 1) * 30 seconds remaining before each
     request, plus time for password revision checks: more than 850 seconds with
@@ -921,7 +926,7 @@ variable "helm" {
       !var.helm.clickhouse.backup.cleanup.enabled || var.helm.clickhouse.backup.cleanup.dry_run ||
       var.helm.clickhouse.backup.cleanup.retention_policy == "daily-weekly"
     )
-    error_message = "S3 backup deletion requires helm.clickhouse.backup.cleanup.retention_policy = daily-weekly; count-and-age remains preview-only."
+    error_message = "helm.clickhouse.backup.cleanup.dry_run = false (S3 backup deletion) requires retention_policy = daily-weekly. count-and-age is preview-only: set dry_run = true, or switch to daily-weekly."
   }
 
   validation {
@@ -987,9 +992,11 @@ variable "clickhouse_backup" {
     the retirement procedure in the README.
 
     bucket_name must be a new, globally unique S3 bucket name. No S3 lifecycle
-    rule expires current backup files: helm.clickhouse.backup.cleanup selects full
-    backup sets for removal. Older database-disk records are managed separately
-    with helm.clickhouse.backup.local_cleanup.
+    rule expires current backup files; they accumulate unless
+    helm.clickhouse.backup.cleanup is enabled with retention_policy = "daily-weekly"
+    and dry_run = false, which removes complete full-plus-incremental sets and
+    requires versioning_enabled = true. Older database-disk records are managed
+    separately with helm.clickhouse.backup.local_cleanup.
     versioning_enabled keeps previous S3 object versions after an overwrite or
     ordinary deletion. It defaults to false and is one-way through the module's
     normal inputs. Once enabled, Terraform blocks setting it to false, setting

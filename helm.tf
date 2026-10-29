@@ -369,6 +369,15 @@ resource "helm_release" "ao_data_platform" {
     }
 
     precondition {
+      condition = (
+        !var.helm.clickhouse.backup.cleanup.enabled ||
+        var.helm.clickhouse.backup.cleanup.dry_run ||
+        local.clickhouse_backup_versioning_enabled
+      )
+      error_message = "S3 backup deletion requires clickhouse_backup.versioning_enabled = true so removed backup sets stay recoverable."
+    }
+
+    precondition {
       condition     = var.clickhouse_domain != null && var.otel_collector_domain != null
       error_message = "clickhouse_domain and otel_collector_domain are required when helm.deploy_charts = true."
     }

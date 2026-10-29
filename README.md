@@ -441,6 +441,7 @@ permanently delete versions or turn off versioning. An authorized operator can
 repair selected files using [the recovery instructions](docs/recover-backup-files.md).
 For read-only database recovery, the operator must supply a separate role; this
 module's backup role can read, write, and delete files.
+
 **Expiring older file versions.** `noncurrent_version_expiration_days` is optional
 and defaults to `null`, keeping previous versions indefinitely. We recommend
 14 days to allow time to notice a mistake after a long weekend and spend several
@@ -450,8 +451,8 @@ Choose the period explicitly in the storage settings:
 
 ```hcl
 clickhouse_backup = {
-  bucket_name                       = "example-clickhouse-backups-123456789012-us-east-1"
-  versioning_enabled                = true
+  bucket_name                        = "example-clickhouse-backups-123456789012-us-east-1"
+  versioning_enabled                 = true
   noncurrent_version_expiration_days = 14 # Recommended recovery period; default remains null.
 }
 ```
@@ -511,8 +512,10 @@ the first successful run each UTC day is full, and later runs save changes from
 an earlier backup. The module does not expose schedule customization. S3 cleanup
 is optional and disabled by default; when enabled, it starts in preview mode.
 The daily/weekly policy can remove complete sets after testing and explicit
-opt-in. Without cleanup, storage grows by roughly one full backup per day plus
-incremental backups, so watch the bucket size from the first day. Each ClickHouse copy also keeps backup metadata on its data volume;
+opt-in. A tested restore procedure is not yet documented. Without cleanup,
+storage grows by roughly one full backup per day plus incremental backups, so
+watch the bucket size from the first day. Each ClickHouse copy also keeps backup
+metadata on its data volume;
 that metadata grows as backups are created or downloaded. The separate
 `helm.clickhouse.backup.local_cleanup` option can remove older database-disk
 records when enabled with `dry_run = false`, while preserving the S3 backups.
@@ -639,7 +642,11 @@ require a published chart containing backup-set retention, with a base version
 of **5.8.0** or later.
 The numeric version check also accepts pre-release builds with that base, but
 cannot verify their contents. Existing preview and local-cleanup settings keep
-their existing chart requirements.
+their existing chart requirements. The module keeps `count-and-age` as its
+cleanup default so existing callers on older charts continue to work. A direct
+installation of chart 5.8.0 defaults to `daily-weekly` instead. When using this
+module, explicitly select `retention_policy = "daily-weekly"` with `dry_run = true`
+and review that preview before allowing deletion.
 
 Upgrading to chart 5.8.0 changes the default backup image to Altinity 2.8.2.
 With backups enabled and `image = null`, this restarts the ClickHouse pods;
@@ -650,13 +657,16 @@ Start in a non-production installation. Before permitting deletion, enable
 `clickhouse_backup.noncurrent_version_expiration_days`, and apply these storage
 settings using the versioning procedure above. Review which sets would be kept
 and removed, test deletion and recovery from a kept backup there, and update log
-alerts to cover both preview and deletion messages listed below. Only then set
-`dry_run = false` for daily-weekly cleanup. The count-and-age policy continues
-to reject actual deletion. Use the chart's tested upstream image; an old 2.8.1
-image override cannot perform this cleanup.
+alerts to cover both preview and deletion messages listed below. Only then change
+`dry_run` to `false`, leaving the reviewed daily-weekly policy and its day counts
+unchanged. The count-and-age policy continues to reject actual deletion. Use the
+chart's tested upstream image; an old 2.8.1 image override cannot perform this cleanup.
 
-On an unversioned bucket, deletion permanently removes the selected files. On a
-versioned bucket, ordinary deletion hides them while retaining older versions.
+This module rejects S3 cleanup deletion unless
+`clickhouse_backup.versioning_enabled = true`; previews still work without
+versioning. On a versioned bucket, ordinary deletion hides files while retaining
+older versions. Deletion outside this module on an unversioned bucket permanently
+removes the selected files.
 Use the separate `noncurrent_version_expiration_days` storage setting to bound
 how long those versions remain recoverable and billed. No S3 lifecycle rule
 expires current backup files. To retire an S3 set, the cleaner first removes any
@@ -673,7 +683,7 @@ kubectl -n montecarlo logs job/<latest-otel-backup-job>
 ```
 
 A summary line starts with `Backup cleanup:`, followed by one
-`Backup cleanup entry:` line per backup. For example:
+`Backup cleanup entry:` line per backup. This example is a count-and-age preview:
 
 ```text
 Backup cleanup: {"mode":"dry-run","keep_last":2,"keep_days":0,"kept_count":2,"delete_count":1,"deleted_count":0,"broken_local_count":0,"local_only_count":0}
@@ -1176,7 +1186,7 @@ To use a StorageClass you manage outside this module, set `clickhouse_storage_cl
 | `helm.clickhouse.backup.suspend` | `bool` | `false` | Pause new scheduled backup runs while keeping the installation. Running work continues. Persist `true` before maintenance; enabling with the default `false` starts the schedule on the first apply. |
 | `helm.clickhouse.backup.image` | `string` | `null` | Optional image override. Omit to use the chart's tested Altinity image. An override must include a SHA-256 digest; another registry or repository is allowed, and the chart checks that the digest matches its tested image. The module does not build an image. |
 | `helm.clickhouse.backup.api_password_revision` | `string` | `"1"` | Changing this generates a new API password, updates the password and revision together in Secrets Manager, and restarts the ClickHouse pods. Pause backups in a separate apply before changing it. See the rotation steps in [ClickHouse backups](#clickhouse-backups). |
-| `helm.clickhouse.backup.cleanup` | `object` | `{ enabled = false, dry_run = true, retention_policy = "count-and-age", daily_days = 7, history_days = 30, keep_last = 2, keep_days = 0, timeout_seconds = 1800 }` | Optional S3 backup retention after a verified backup. Count-and-age remains preview-only and requires chart >= 5.3.0. Daily-weekly keeps complete daily sets and older weekly sets, and requires the supporting chart planned for >= 5.8.0. Actual deletion requires daily-weekly and explicit `dry_run = false`. Daily days must be a positive integer; history days an integer at least as large. Existing count/age and timeout limits are unchanged. The timeout adds to the backup Job deadline. See [S3 backup cleanup](#clickhouse-backups). |
+| `helm.clickhouse.backup.cleanup` | `object` | `{ enabled = false, dry_run = true, retention_policy = "count-and-age", daily_days = 7, history_days = 30, keep_last = 2, keep_days = 0, timeout_seconds = 1800 }` | Optional S3 backup retention after a verified backup. Count-and-age remains preview-only and requires chart >= 5.3.0. Daily-weekly keeps complete daily sets and older weekly sets, and requires the supporting chart planned for >= 5.8.0. Actual deletion requires daily-weekly, explicit `dry_run = false`, and `clickhouse_backup.versioning_enabled = true`. Review the daily-weekly preview first, then change only `dry_run`. Daily days must be a positive integer; history days an integer at least as large. Existing count/age and timeout limits are unchanged. The timeout adds to the backup Job deadline. See [S3 backup cleanup](#clickhouse-backups). |
 | `helm.clickhouse.backup.local_cleanup` | `object` | `{ enabled = false, dry_run = true, keep_full_backup_days = 2, timeout_seconds = 1800 }` | Clean up older backup records on each database disk while preserving completed backups in S3. Requires backups enabled and a published chart containing `localCleanup` with base version >= 5.7.0. `keep_full_backup_days` is a whole number >= 2; `timeout_seconds` is a whole number >= 60. Start in preview mode; `dry_run = false` permits local record deletion independently of S3 cleanup. See [Database-disk backup record cleanup](#clickhouse-backups). |
 | `clickhouse_passwords` | `object` (sensitive) | `{}` (all auto-generated) | Passwords for the ClickHouse SQL users. Shape: `{ admin = optional(string), otel = optional(string), monte_carlo = optional(string), schema_owner = optional(string), llm_worker = optional(string), readonly_user = optional(string) }`. Any field left null is auto-generated. Marked `sensitive`, so caller-supplied values are redacted in plan/apply output and CI logs — supply via a `.tfvars` file or `TF_VAR_clickhouse_passwords`. Stored in Secrets Manager and synced into the cluster by ESO; never passed through Helm values. Values remain readable in Terraform state — protect state accordingly. |
 | `helm.opentelemetry_collector.resources` | `object` | `null` | Kubernetes resource requests/limits for the OTel Collector pods. Same shape as `helm.clickhouse.resources`. Omit to use chart defaults. |
