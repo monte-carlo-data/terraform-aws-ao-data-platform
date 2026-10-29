@@ -601,24 +601,12 @@ It runs after a verified backup and checks every configured ClickHouse copy.
 Enabling cleanup does not require changing `clickhouse_replica_count`; existing
 replica-placement and replicated-table requirements still apply.
 
-The existing `count-and-age` policy remains preview-only on charts based on
-5.3.0 or later. It protects the newest `keep_last` backups, the `keep_days` age
-window, and their required bases. `keep_last` must be a whole number of at least
-1, and `keep_days` a whole number of at least 0.
+When `retention_policy` is omitted or `null`, the module selects `daily-weekly`
+for charts with a base version of 5.8.0 or later and `count-and-age` for older
+charts. An explicit policy always takes precedence. Cleanup remains off until
+`enabled = true`, and `dry_run` still defaults to `true`.
 
-```hcl
-# Inside helm.clickhouse.backup, alongside enabled = true:
-cleanup = {
-  enabled          = true
-  dry_run          = true
-  retention_policy = "count-and-age" # Existing preview behavior.
-  keep_last        = 2
-  keep_days        = 0
-  timeout_seconds  = 1800
-}
-```
-
-**Daily and weekly sets.** The new policy keeps whole full-plus-incremental sets
+**Daily and weekly sets (recommended).** This policy keeps whole full-plus-incremental sets
 from the latest seven UTC dates, then the most recent available backup day of
 each Monday-Sunday UTC week through day 30. Both windows include today.
 It keeps any required bases and the newly verified backup. These day counts are
@@ -626,6 +614,7 @@ configurable; they do not change the daily full/every-four-hours backup schedule
 The old `keep_last` and `keep_days` values do not affect this policy.
 
 ```hcl
+# Inside helm.clickhouse.backup, alongside enabled = true:
 cleanup = {
   enabled          = true
   dry_run          = true # Review this result before permitting deletion.
@@ -640,13 +629,33 @@ cleanup = {
 number at least as large. Both the daily/weekly preview and actual deletion
 require a published chart containing backup-set retention, with a base version
 of **5.8.0** or later.
-The numeric version check also accepts pre-release builds with that base, but
-cannot verify their contents. Existing preview and local-cleanup settings keep
-their existing chart requirements. The module keeps `count-and-age` as its
-cleanup default so existing callers on older charts continue to work. A direct
-installation of chart 5.8.0 defaults to `daily-weekly` instead. When using this
-module, explicitly select `retention_policy = "daily-weekly"` with `dry_run = true`
-and review that preview before allowing deletion.
+The numeric version check and default policy selection also accept pre-release
+builds with that base, but cannot verify their contents. Existing preview and
+local-cleanup settings keep their existing chart requirements.
+
+An existing preview on chart 5.3.0 through 5.7.x keeps its count-and-age behavior.
+Upgrading to chart 5.8.0 or later with `retention_policy` omitted or `null`
+changes the preview to daily-weekly. Keep `dry_run = true` and review a fresh
+preview before permitting deletion. To keep the earlier preview policy after
+upgrading, set `retention_policy = "count-and-age"` explicitly; this policy
+cannot delete backups.
+
+**Legacy preview for older charts.** The `count-and-age` policy remains
+preview-only on charts based on 5.3.0 or later. It protects the newest
+`keep_last` backups, the `keep_days` age window, and their required bases.
+`keep_last` must be a whole number of at least 1, and `keep_days` a whole number
+of at least 0.
+
+```hcl
+cleanup = {
+  enabled          = true
+  dry_run          = true
+  retention_policy = "count-and-age" # Keep this preview policy after upgrading.
+  keep_last        = 2
+  keep_days        = 0
+  timeout_seconds  = 1800
+}
+```
 
 Upgrading to chart 5.8.0 changes the default backup image to Altinity 2.8.2.
 With backups enabled and `image = null`, this restarts the ClickHouse pods;
@@ -1186,7 +1195,7 @@ To use a StorageClass you manage outside this module, set `clickhouse_storage_cl
 | `helm.clickhouse.backup.suspend` | `bool` | `false` | Pause new scheduled backup runs while keeping the installation. Running work continues. Persist `true` before maintenance; enabling with the default `false` starts the schedule on the first apply. |
 | `helm.clickhouse.backup.image` | `string` | `null` | Optional image override. Omit to use the chart's tested Altinity image. An override must include a SHA-256 digest; another registry or repository is allowed, and the chart checks that the digest matches its tested image. The module does not build an image. |
 | `helm.clickhouse.backup.api_password_revision` | `string` | `"1"` | Changing this generates a new API password, updates the password and revision together in Secrets Manager, and restarts the ClickHouse pods. Pause backups in a separate apply before changing it. See the rotation steps in [ClickHouse backups](#clickhouse-backups). |
-| `helm.clickhouse.backup.cleanup` | `object` | `{ enabled = false, dry_run = true, retention_policy = "count-and-age", daily_days = 7, history_days = 30, keep_last = 2, keep_days = 0, timeout_seconds = 1800 }` | Optional S3 backup retention after a verified backup. Count-and-age remains preview-only and requires chart >= 5.3.0. Daily-weekly keeps complete daily sets and older weekly sets, and requires the supporting chart planned for >= 5.8.0. Actual deletion requires daily-weekly, explicit `dry_run = false`, and `clickhouse_backup.versioning_enabled = true`. Review the daily-weekly preview first, then change only `dry_run`. Daily days must be a positive integer; history days an integer at least as large. Existing count/age and timeout limits are unchanged. The timeout adds to the backup Job deadline. See [S3 backup cleanup](#clickhouse-backups). |
+| `helm.clickhouse.backup.cleanup` | `object` | `{ enabled = false, dry_run = true, retention_policy = null, daily_days = 7, history_days = 30, keep_last = 2, keep_days = 0, timeout_seconds = 1800 }` | Optional S3 backup retention after a verified backup. Omitted or null `retention_policy` selects daily-weekly on charts with base version >= 5.8.0, including pre-releases, and count-and-age on older charts; an explicit policy always takes precedence. Daily-weekly keeps complete daily sets and older weekly sets and requires a supporting chart based on >= 5.8.0. Count-and-age remains preview-only and requires chart >= 5.3.0. Upgrading an implicit preview to >= 5.8.0 changes its policy; review a fresh daily-weekly preview before deletion. Actual deletion requires daily-weekly, explicit `dry_run = false`, and `clickhouse_backup.versioning_enabled = true`. Review the daily-weekly preview first, then change only `dry_run`. Daily days must be a positive integer; history days an integer at least as large. Existing count/age and timeout limits are unchanged. The timeout adds to the backup Job deadline. See [S3 backup cleanup](#clickhouse-backups). |
 | `helm.clickhouse.backup.local_cleanup` | `object` | `{ enabled = false, dry_run = true, keep_full_backup_days = 2, timeout_seconds = 1800 }` | Clean up older backup records on each database disk while preserving completed backups in S3. Requires backups enabled and a published chart containing `localCleanup` with base version >= 5.7.0. `keep_full_backup_days` is a whole number >= 2; `timeout_seconds` is a whole number >= 60. Start in preview mode; `dry_run = false` permits local record deletion independently of S3 cleanup. See [Database-disk backup record cleanup](#clickhouse-backups). |
 | `clickhouse_passwords` | `object` (sensitive) | `{}` (all auto-generated) | Passwords for the ClickHouse SQL users. Shape: `{ admin = optional(string), otel = optional(string), monte_carlo = optional(string), schema_owner = optional(string), llm_worker = optional(string), readonly_user = optional(string) }`. Any field left null is auto-generated. Marked `sensitive`, so caller-supplied values are redacted in plan/apply output and CI logs — supply via a `.tfvars` file or `TF_VAR_clickhouse_passwords`. Stored in Secrets Manager and synced into the cluster by ESO; never passed through Helm values. Values remain readable in Terraform state — protect state accordingly. |
 | `helm.opentelemetry_collector.resources` | `object` | `null` | Kubernetes resource requests/limits for the OTel Collector pods. Same shape as `helm.clickhouse.resources`. Omit to use chart defaults. |

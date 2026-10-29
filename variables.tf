@@ -614,9 +614,11 @@ variable "helm" {
 
     clickhouse.backup.cleanup: optional S3 backup retention after a successful
     backup. Defaults: enabled = false, dry_run = true, retention_policy =
-    "count-and-age", keep_last = 2, keep_days = 0, daily_days = 7,
-    history_days = 30, timeout_seconds = 1800. The count-and-age policy remains
-    preview-only and requires a published chart based on 5.3.0 or later. It
+    null, keep_last = 2, keep_days = 0, daily_days = 7,
+    history_days = 30, timeout_seconds = 1800. An omitted or null policy selects
+    daily-weekly on charts based on 5.8.0 or later, and count-and-age on older
+    charts. An explicitly selected policy is preserved. The count-and-age policy
+    remains preview-only and requires a published chart based on 5.3.0 or later. It
     protects the newest keep_last backups, the keep_days age window, and their
     required bases. keep_last must be a positive whole number and keep_days a
     nonnegative whole number.
@@ -628,9 +630,9 @@ variable "helm" {
     This policy, including its preview, requires a chart containing backup-set
     retention based on 5.8.0 or later. Start with dry_run = true; dry_run = false
     permits deletion only with daily-weekly and clickhouse_backup.versioning_enabled = true.
-    Review a daily-weekly preview before changing only dry_run to false. The module
-    retains count-and-age as its default for existing callers using older charts,
-    even though chart 5.8.0 defaults to daily-weekly when installed directly.
+    Review a daily-weekly preview before changing only dry_run to false. Upgrading
+    to chart 5.8.0 changes the preview policy when retention_policy is omitted or
+    null; select count-and-age explicitly to keep the earlier preview instead.
     Use a published chart containing that feature; version checks cannot verify
     chart contents.
     Cleanup checks every configured copy. Do not change replica counts without
@@ -820,7 +822,7 @@ variable "helm" {
         cleanup = optional(object({
           enabled          = optional(bool, false)
           dry_run          = optional(bool, true)
-          retention_policy = optional(string, "count-and-age")
+          retention_policy = optional(string, null)
           daily_days       = optional(number, 7)
           history_days     = optional(number, 30)
           keep_last        = optional(number, 2)
@@ -917,13 +919,14 @@ variable "helm" {
   }
 
   validation {
-    condition     = contains(["count-and-age", "daily-weekly"], var.helm.clickhouse.backup.cleanup.retention_policy)
-    error_message = "helm.clickhouse.backup.cleanup.retention_policy must be count-and-age or daily-weekly."
+    condition     = var.helm.clickhouse.backup.cleanup.retention_policy == null ? true : contains(["count-and-age", "daily-weekly"], var.helm.clickhouse.backup.cleanup.retention_policy)
+    error_message = "helm.clickhouse.backup.cleanup.retention_policy must be null (select by chart version), count-and-age, or daily-weekly."
   }
 
   validation {
     condition = (
       !var.helm.clickhouse.backup.cleanup.enabled || var.helm.clickhouse.backup.cleanup.dry_run ||
+      var.helm.clickhouse.backup.cleanup.retention_policy == null ||
       var.helm.clickhouse.backup.cleanup.retention_policy == "daily-weekly"
     )
     error_message = "helm.clickhouse.backup.cleanup.dry_run = false (S3 backup deletion) requires retention_policy = daily-weekly. count-and-age is preview-only: set dry_run = true, or switch to daily-weekly."

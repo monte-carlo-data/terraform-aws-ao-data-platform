@@ -260,9 +260,15 @@ locals {
   chart_supports_local_backup_cleanup = local.chart_version_parts[0] > 5 || (local.chart_version_parts[0] == 5 && local.chart_version_parts[1] >= 7)
   chart_supports_backup_set_retention = local.chart_version_parts[0] > 5 || (local.chart_version_parts[0] == 5 && local.chart_version_parts[1] >= 8)
 
+  # Follow the chart's current policy unless the caller chooses one explicitly.
+  # Older charts support only count-and-age previews.
+  helm_clickhouse_backup_retention_policy = var.helm.clickhouse.backup.cleanup.retention_policy != null ? var.helm.clickhouse.backup.cleanup.retention_policy : (
+    local.chart_supports_backup_set_retention ? "daily-weekly" : "count-and-age"
+  )
+
   helm_clickhouse_backup_cleanup = var.helm.clickhouse.backup.cleanup.enabled ? {
-    # Older charts have only count-and-age previews. New charts default to
-    # daily-weekly, so pass the module's chosen policy explicitly on those charts.
+    # Pass the selected policy explicitly on newer charts. Leave older chart
+    # values unchanged when using their count-and-age preview.
     # Keep numeric fields separate so Terraform does not turn them into strings.
     cleanup = merge({
       enabled        = true
@@ -270,9 +276,9 @@ locals {
       keepLast       = var.helm.clickhouse.backup.cleanup.keep_last
       keepDays       = var.helm.clickhouse.backup.cleanup.keep_days
       timeoutSeconds = var.helm.clickhouse.backup.cleanup.timeout_seconds
-      }, local.chart_supports_backup_set_retention || var.helm.clickhouse.backup.cleanup.retention_policy == "daily-weekly" ? {
-      retentionPolicy = var.helm.clickhouse.backup.cleanup.retention_policy
-      } : {}, var.helm.clickhouse.backup.cleanup.retention_policy == "daily-weekly" ? {
+      }, local.chart_supports_backup_set_retention || local.helm_clickhouse_backup_retention_policy == "daily-weekly" ? {
+      retentionPolicy = local.helm_clickhouse_backup_retention_policy
+      } : {}, local.helm_clickhouse_backup_retention_policy == "daily-weekly" ? {
       dailyDays   = var.helm.clickhouse.backup.cleanup.daily_days
       historyDays = var.helm.clickhouse.backup.cleanup.history_days
     } : {})

@@ -1156,6 +1156,26 @@ run "cleanup_uses_a_published_development_chart" {
   }
 }
 
+run "null_policy_preserves_preview_on_chart_5_3" {
+  command = plan
+  variables {
+    clickhouse_backup     = { bucket_name = "test-clickhouse-backups" }
+    clickhouse_domain     = "clickhouse.example.com"
+    otel_collector_domain = "otel.example.com"
+    helm = {
+      chart_registry = "oci://registry-1.docker.io/montecarlodata"
+      chart_version  = "5.3.0"
+      clickhouse     = { backup = { enabled = true, cleanup = { enabled = true, retention_policy = null, keep_last = 3, keep_days = 14 } } }
+    }
+  }
+  assert {
+    condition = jsonencode(yamldecode(helm_release.ao_data_platform[0].values[0]).clickhouse.backup.cleanup) == jsonencode({
+      enabled = true, dryRun = true, keepLast = 3, keepDays = 14, timeoutSeconds = 1800
+    })
+    error_message = "A null policy on chart 5.3.0 must preserve the existing preview settings and omit unsupported retention fields."
+  }
+}
+
 run "cleanup_rejects_published_charts_without_cleanup_support" {
   command = plan
   variables {
@@ -1187,7 +1207,7 @@ run "cleanup_rejects_dry_run_false" {
       clickhouse = { backup = {
         enabled = true
         image   = "altinity/clickhouse-backup:2.8.1@sha256:08016b048f7e6035c048501315c2a788e5a782f15f168e042c7bd48d5a388cc4"
-        cleanup = { enabled = true, dry_run = false }
+        cleanup = { enabled = true, retention_policy = "count-and-age", dry_run = false }
       } }
     }
   }
@@ -1499,7 +1519,7 @@ run "cleanup_accepts_next_major_chart_version" {
       chart_registry = "oci://registry-1.docker.io/montecarlodata"
       chart_version  = "6.0.0"
       clickhouse = { backup = { enabled = true, image = "altinity/clickhouse-backup:2.8.1@sha256:08016b048f7e6035c048501315c2a788e5a782f15f168e042c7bd48d5a388cc4", cleanup = {
-        enabled = true, dry_run = true, keep_last = 3, keep_days = 30, timeout_seconds = 600
+        enabled = true, dry_run = true, retention_policy = "count-and-age", keep_last = 3, keep_days = 30, timeout_seconds = 600
       } } }
     }
   }
@@ -1527,7 +1547,7 @@ run "cleanup_accepts_double_digit_minor_chart_version" {
       chart_registry = "oci://registry-1.docker.io/montecarlodata"
       chart_version  = "5.10.0"
       clickhouse = { backup = { enabled = true, image = "altinity/clickhouse-backup:2.8.1@sha256:08016b048f7e6035c048501315c2a788e5a782f15f168e042c7bd48d5a388cc4", cleanup = {
-        enabled = true, dry_run = true, keep_last = 3, keep_days = 30, timeout_seconds = 600
+        enabled = true, dry_run = true, retention_policy = "count-and-age", keep_last = 3, keep_days = 30, timeout_seconds = 600
       } } }
     }
   }
@@ -2024,11 +2044,10 @@ run "s3_cleanup_does_not_enable_local_cleanup" {
     error_message = "S3 cleanup must not enable database-disk deletion when local cleanup is disabled."
   }
   assert {
-    condition = (
-      yamldecode(helm_release.ao_data_platform[0].values[0]).clickhouse.backup.cleanup.enabled == true &&
-      yamldecode(helm_release.ao_data_platform[0].values[0]).clickhouse.backup.cleanup.dryRun == true
-    )
-    error_message = "S3 cleanup must remain an enabled preview without local cleanup."
+    condition = jsonencode(yamldecode(helm_release.ao_data_platform[0].values[0]).clickhouse.backup.cleanup) == jsonencode({
+      enabled = true, dryRun = true, keepLast = 2, keepDays = 0, timeoutSeconds = 1800
+    })
+    error_message = "An omitted policy on chart 5.7.0 must preserve the count-and-age preview without local cleanup."
   }
 }
 
@@ -2100,7 +2119,7 @@ run "local_cleanup_deletion_with_s3_preview" {
       clickhouse = { backup = {
         enabled       = true
         local_cleanup = { enabled = true, dry_run = false, timeout_seconds = 60 }
-        cleanup       = { enabled = true, dry_run = true, timeout_seconds = 60 }
+        cleanup       = { enabled = true, retention_policy = null, dry_run = true, timeout_seconds = 60 }
       } }
     }
   }
@@ -2111,11 +2130,10 @@ run "local_cleanup_deletion_with_s3_preview" {
     error_message = "Database-disk cleanup settings must reach the chart without changing S3 retention."
   }
   assert {
-    condition = (
-      yamldecode(helm_release.ao_data_platform[0].values[0]).clickhouse.backup.cleanup.enabled == true &&
-      yamldecode(helm_release.ao_data_platform[0].values[0]).clickhouse.backup.cleanup.dryRun == true
-    )
-    error_message = "Allowing database-disk deletion must not allow S3 deletion."
+    condition = jsonencode(yamldecode(helm_release.ao_data_platform[0].values[0]).clickhouse.backup.cleanup) == jsonencode({
+      enabled = true, dryRun = true, keepLast = 2, keepDays = 0, timeoutSeconds = 60
+    })
+    error_message = "A null policy on chart 5.7.0 must preserve S3 preview settings while allowing separate database-disk deletion."
   }
 }
 
@@ -2131,7 +2149,7 @@ run "local_cleanup_does_not_allow_count_and_age_deletion" {
       clickhouse = { backup = {
         enabled       = true
         local_cleanup = { enabled = true, dry_run = false }
-        cleanup       = { enabled = true, dry_run = false }
+        cleanup       = { enabled = true, retention_policy = "count-and-age", dry_run = false }
       } }
     }
   }
@@ -2338,7 +2356,9 @@ run "backup_retention_new_settings_default_off" {
   }
   assert {
     condition = (
-      var.helm.clickhouse.backup.cleanup.retention_policy == "count-and-age" &&
+      var.helm.clickhouse.backup.cleanup.retention_policy == null &&
+      local.helm_clickhouse_backup_retention_policy == "count-and-age" &&
+      !var.helm.clickhouse.backup.cleanup.enabled &&
       var.helm.clickhouse.backup.cleanup.daily_days == 7 &&
       var.helm.clickhouse.backup.cleanup.history_days == 30 &&
       var.helm.clickhouse.backup.cleanup.dry_run &&
@@ -2438,7 +2458,7 @@ run "version_expiry_accepts_one_day" {
   }
 }
 
-run "daily_weekly_preview_defaults" {
+run "omitted_policy_defaults_to_daily_weekly_preview_on_new_chart" {
   command = plan
   variables {
     clickhouse_backup     = { bucket_name = "test-clickhouse-backups" }
@@ -2447,7 +2467,7 @@ run "daily_weekly_preview_defaults" {
     helm = {
       chart_registry = "oci://registry-1.docker.io/montecarlodata"
       chart_version  = "5.8.0"
-      clickhouse     = { backup = { enabled = true, cleanup = { enabled = true, retention_policy = "daily-weekly" } } }
+      clickhouse     = { backup = { enabled = true, cleanup = { enabled = true } } }
     }
   }
   assert {
@@ -2460,7 +2480,27 @@ run "daily_weekly_preview_defaults" {
   }
 }
 
-run "daily_weekly_delete" {
+run "null_policy_defaults_to_daily_weekly_preview_on_new_chart" {
+  command = plan
+  variables {
+    clickhouse_backup     = { bucket_name = "test-clickhouse-backups" }
+    clickhouse_domain     = "clickhouse.example.com"
+    otel_collector_domain = "otel.example.com"
+    helm = {
+      chart_registry = "oci://registry-1.docker.io/montecarlodata"
+      chart_version  = "5.8.0"
+      clickhouse     = { backup = { enabled = true, cleanup = { enabled = true, retention_policy = null } } }
+    }
+  }
+  assert {
+    condition = jsonencode(yamldecode(helm_release.ao_data_platform[0].values[0]).clickhouse.backup.cleanup) == jsonencode({
+      enabled = true, dryRun = true, retentionPolicy = "daily-weekly", dailyDays = 7, historyDays = 30, keepLast = 2, keepDays = 0, timeoutSeconds = 1800
+    })
+    error_message = "A null policy on chart 5.8.0 must select the daily-weekly preview with seven daily days and thirty history days."
+  }
+}
+
+run "omitted_policy_allows_daily_weekly_deletion_with_versioning" {
   command = plan
   variables {
     clickhouse_backup     = { bucket_name = "test-clickhouse-backups", versioning_enabled = true }
@@ -2469,7 +2509,7 @@ run "daily_weekly_delete" {
     helm = {
       chart_registry = "oci://registry-1.docker.io/montecarlodata"
       chart_version  = "5.8.0"
-      clickhouse     = { backup = { enabled = true, cleanup = { enabled = true, retention_policy = "daily-weekly", dry_run = false } } }
+      clickhouse     = { backup = { enabled = true, cleanup = { enabled = true, dry_run = false } } }
     }
   }
   assert {
@@ -2482,7 +2522,7 @@ run "daily_weekly_delete" {
   }
 }
 
-run "daily_weekly_delete_rejects_unversioned_bucket" {
+run "omitted_policy_deletion_rejects_unversioned_bucket" {
   command = plan
   variables {
     clickhouse_backup     = { bucket_name = "test-clickhouse-backups" }
@@ -2491,13 +2531,13 @@ run "daily_weekly_delete_rejects_unversioned_bucket" {
     helm = {
       chart_registry = "oci://registry-1.docker.io/montecarlodata"
       chart_version  = "5.8.0"
-      clickhouse     = { backup = { enabled = true, cleanup = { enabled = true, retention_policy = "daily-weekly", dry_run = false } } }
+      clickhouse     = { backup = { enabled = true, cleanup = { enabled = true, dry_run = false } } }
     }
   }
   expect_failures = [helm_release.ao_data_platform]
 }
 
-run "daily_weekly_prerelease" {
+run "omitted_policy_defaults_to_daily_weekly_on_new_prerelease" {
   command = plan
   variables {
     clickhouse_backup     = { bucket_name = "test-clickhouse-backups" }
@@ -2506,7 +2546,7 @@ run "daily_weekly_prerelease" {
     helm = {
       chart_registry = "oci://registry-1.docker.io/montecarlodata"
       chart_version  = "5.8.0-dev.g0123456789abcdef"
-      clickhouse     = { backup = { enabled = true, cleanup = { enabled = true, retention_policy = "daily-weekly" } } }
+      clickhouse     = { backup = { enabled = true, cleanup = { enabled = true } } }
     }
   }
   assert {
@@ -2519,7 +2559,7 @@ run "daily_weekly_prerelease" {
   }
 }
 
-run "daily_weekly_next_major" {
+run "omitted_policy_defaults_to_daily_weekly_on_next_major" {
   command = plan
   variables {
     clickhouse_backup     = { bucket_name = "test-clickhouse-backups" }
@@ -2528,7 +2568,7 @@ run "daily_weekly_next_major" {
     helm = {
       chart_registry = "oci://registry-1.docker.io/montecarlodata"
       chart_version  = "6.0.0"
-      clickhouse     = { backup = { enabled = true, cleanup = { enabled = true, retention_policy = "daily-weekly" } } }
+      clickhouse     = { backup = { enabled = true, cleanup = { enabled = true } } }
     }
   }
   assert {
@@ -2541,7 +2581,7 @@ run "daily_weekly_next_major" {
   }
 }
 
-run "daily_weekly_double_digit_minor" {
+run "omitted_policy_defaults_to_daily_weekly_on_double_digit_minor" {
   command = plan
   variables {
     clickhouse_backup     = { bucket_name = "test-clickhouse-backups" }
@@ -2550,7 +2590,7 @@ run "daily_weekly_double_digit_minor" {
     helm = {
       chart_registry = "oci://registry-1.docker.io/montecarlodata"
       chart_version  = "5.10.0"
-      clickhouse     = { backup = { enabled = true, cleanup = { enabled = true, retention_policy = "daily-weekly" } } }
+      clickhouse     = { backup = { enabled = true, cleanup = { enabled = true } } }
     }
   }
   assert {
@@ -2611,6 +2651,21 @@ run "daily_weekly_delete_rejects_old_chart" {
   expect_failures = [helm_release.ao_data_platform]
 }
 
+run "omitted_policy_deletion_rejects_old_chart" {
+  command = plan
+  variables {
+    clickhouse_backup     = { bucket_name = "test-clickhouse-backups", versioning_enabled = true }
+    clickhouse_domain     = "clickhouse.example.com"
+    otel_collector_domain = "otel.example.com"
+    helm = {
+      chart_registry = "oci://registry-1.docker.io/montecarlodata"
+      chart_version  = "5.7.0"
+      clickhouse     = { backup = { enabled = true, cleanup = { enabled = true, dry_run = false } } }
+    }
+  }
+  expect_failures = [helm_release.ao_data_platform]
+}
+
 run "daily_weekly_rejects_old_prerelease" {
   command = plan
   variables {
@@ -2644,7 +2699,7 @@ run "disabled_daily_weekly_keeps_old_backup_chart" {
   }
 }
 
-run "count_and_age_preview_keeps_module_default_on_new_chart" {
+run "explicit_count_and_age_preview_is_preserved_on_new_chart" {
   command = plan
   variables {
     clickhouse_backup     = { bucket_name = "test-clickhouse-backups" }
@@ -2653,14 +2708,14 @@ run "count_and_age_preview_keeps_module_default_on_new_chart" {
     helm = {
       chart_registry = "oci://registry-1.docker.io/montecarlodata"
       chart_version  = "5.8.0"
-      clickhouse     = { backup = { enabled = true, cleanup = { enabled = true, keep_last = 3, keep_days = 14 } } }
+      clickhouse     = { backup = { enabled = true, cleanup = { enabled = true, retention_policy = "count-and-age", keep_last = 3, keep_days = 14 } } }
     }
   }
   assert {
     condition = jsonencode(yamldecode(helm_release.ao_data_platform[0].values[0]).clickhouse.backup.cleanup) == jsonencode({
       enabled = true, dryRun = true, retentionPolicy = "count-and-age", keepLast = 3, keepDays = 14, timeoutSeconds = 1800
     })
-    error_message = "Upgrading the chart must not switch an existing module caller's count-and-age preview to the chart's daily-weekly default."
+    error_message = "An explicit count-and-age policy and its settings must be preserved on a chart that defaults to daily-weekly."
   }
 }
 
@@ -2673,7 +2728,7 @@ run "count_and_age_stays_preview_only_on_new_chart" {
     helm = {
       chart_registry = "oci://registry-1.docker.io/montecarlodata"
       chart_version  = "5.8.0"
-      clickhouse     = { backup = { enabled = true, cleanup = { enabled = true, dry_run = false } } }
+      clickhouse     = { backup = { enabled = true, cleanup = { enabled = true, retention_policy = "count-and-age", dry_run = false } } }
     }
   }
   expect_failures = [var.helm]
