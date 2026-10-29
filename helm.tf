@@ -360,6 +360,24 @@ resource "helm_release" "ao_data_platform" {
     }
 
     precondition {
+      condition = (
+        !var.helm.clickhouse.backup.cleanup.enabled ||
+        (local.helm_clickhouse_backup_retention_policy == "count-and-age" && var.helm.clickhouse.backup.cleanup.dry_run) ||
+        local.chart_supports_backup_set_retention
+      )
+      error_message = "Daily/weekly backup retention or S3 backup deletion requires a published helm.chart_version based on 5.8.0 or later containing those features. Pre-release versions with that base are accepted, but their contents must be verified separately."
+    }
+
+    precondition {
+      condition = (
+        !var.helm.clickhouse.backup.cleanup.enabled ||
+        var.helm.clickhouse.backup.cleanup.dry_run ||
+        local.clickhouse_backup_versioning_enabled
+      )
+      error_message = "S3 backup deletion requires clickhouse_backup.versioning_enabled = true so removed backup sets stay recoverable."
+    }
+
+    precondition {
       condition     = var.clickhouse_domain != null && var.otel_collector_domain != null
       error_message = "clickhouse_domain and otel_collector_domain are required when helm.deploy_charts = true."
     }
@@ -419,6 +437,9 @@ resource "helm_release" "ao_data_platform" {
     # Attach backup permissions before the chart selects the role.
     aws_iam_role_policy.clickhouse_backup,
     aws_iam_role_policy.external_secrets,
+    # Configure optional protection before installing backup software. First
+    # enablement still needs the paused schedule and 15-minute wait in the README.
+    aws_s3_bucket_versioning.clickhouse_backup,
     # Publish all backup passwords before the chart asks External Secrets
     # to read them. Referencing a Secret's name alone does not wait for its value.
     aws_secretsmanager_secret_version.clickhouse_backup,

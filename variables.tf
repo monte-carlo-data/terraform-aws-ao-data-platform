@@ -588,7 +588,8 @@ variable "helm" {
     This 1.3.0 minimum is not checked automatically; a 1.2.x caller can apply
     and hit the original scheduler deadlock. Scheduled backups have a separate
     checked minimum of helm.chart_version >= 5.2.0; S3 cleanup previews require
-    >= 5.3.0, and database-disk backup record cleanup requires >= 5.7.0.
+    >= 5.3.0, database-disk backup record cleanup requires >= 5.7.0, and
+    daily/weekly S3 retention or deletion requires >= 5.8.0.
 
     Set chart_version to an exact, already-published version. Pre-release versions
     with a base of 5.2.0 or later are also accepted for backups. Versions based on
@@ -610,21 +611,41 @@ variable "helm" {
     delivered by External Secrets. Helm receives only the secret reference and
     revision, never the password.
 
-    clickhouse.backup.cleanup: optional preview of which backups could be removed.
-    Defaults: enabled = false, dry_run = true (required when enabled), keep_last = 2,
-    keep_days = 0, timeout_seconds = 1800. keep_last must be a whole number >= 1,
-    keep_days a whole number >= 0, and timeout_seconds a whole number >= 60.
-    Requires enabled backups and a published chart based on 5.3.0 or later.
-    Pre-release builds are supported for cleanup only if they contain
-    the preview code released in chart 5.3.0; the version check cannot detect this.
-    The preview checks every configured copy and works with any supported
-    clickhouse_replica_count. The usual replica placement limits still apply; do not
-    raise the replica count without the table-conversion prerequisites described
-    under clickhouse_replica_count and the README HA section. The preview never
-    deletes backup files in S3. This release has no supported procedure for removing
-    individual S3 backups. Database-disk records continue to grow unless the
-    separate local_cleanup option below is enabled with dry_run = false.
-    Read its report in the scheduled backup Job's logs.
+    clickhouse.backup.cleanup: optional S3 backup retention after a successful
+    backup. Defaults: enabled = false, dry_run = true, retention_policy =
+    null, keep_last = 2, keep_days = 0, daily_days = 7,
+    history_days = 30, timeout_seconds = 1800. An omitted or null policy selects
+    daily-weekly on charts based on 5.8.0 or later, and count-and-age on older
+    charts. An explicitly selected policy is preserved. The count-and-age policy
+    remains preview-only and requires a published chart based on 5.3.0 or later. It
+    protects the newest keep_last backups, the keep_days age window, and their
+    required bases. keep_last must be a positive whole number and keep_days a
+    nonnegative whole number.
+    The daily-weekly policy keeps complete full-plus-incremental sets from the
+    latest daily_days UTC dates, then the most recent available backup day of
+    each Monday-Sunday UTC week through history_days. Both windows include today.
+    It ignores keep_last and keep_days. daily_days must be a positive whole
+    number; history_days must be a whole number at least as large as daily_days.
+    This policy, including its preview, requires a chart containing backup-set
+    retention based on 5.8.0 or later. Start with dry_run = true; dry_run = false
+    permits deletion only with daily-weekly and clickhouse_backup.versioning_enabled = true.
+    Review a daily-weekly preview before changing only dry_run to false. Upgrading
+    to chart 5.8.0 changes the preview policy when retention_policy is omitted or
+    null; select count-and-age explicitly to keep the earlier preview instead.
+    Use a published chart containing that feature; version checks cannot verify
+    chart contents.
+    Cleanup checks every configured copy. Do not change replica counts without
+    the table-conversion prerequisites described under clickhouse_replica_count.
+    Read the result in the scheduled backup Job's logs. S3 cleanup first removes
+    remaining local records for the sets it retires. The separate local_cleanup
+    option removes local records while retaining their S3 backups. On versioned buckets, ordinary
+    deletion preserves older file versions until the optional
+    clickhouse_backup.noncurrent_version_expiration_days setting expires them;
+    the backup role cannot permanently delete versions.
+    timeout_seconds must be a whole number of at least 60 for previews. Deletion
+    needs more than 300 + (5 * copies + 1) * 30 seconds remaining before each
+    request, plus time for password revision checks: more than 850 seconds with
+    two copies. Earlier checks also consume time; start with the 1800-second default.
     The Job deadline adds each enabled cleanup timeout to the backup timeout plus
     60 seconds. With the chart's 10800-second backup timeout, which this module
     does not change, a combined cleanup allowance of 3540 seconds reaches the
@@ -644,7 +665,7 @@ variable "helm" {
     Pre-release builds with the same base pass the check, but their contents
     must be verified separately. Start with dry_run = true and review the logs;
     dry_run = false permits removing eligible database-disk records, not S3 files.
-    This option is independent of cleanup; S3 cleanup remains preview-only.
+    This option is independent of cleanup; enabling it never enables S3 deletion.
     Both cleanup timeouts add to the scheduled Job deadline when enabled.
     Cleanup errors log "Backup local cleanup stopped:" without failing an already
     completed backup Job. Check the cleanup logs, not just Job status. Do not run
@@ -681,7 +702,8 @@ variable "helm" {
     grants) to INSERT on otel_traces.otel_traces only; when false otel keeps
     broad access. Set false only while external readers still query as otel
     rather than the monte_carlo user. Requires chart version >= 2.0.0 (the flag
-    is ignored by older charts).
+    is ignored by older charts). When backups are enabled and restrict_grants is
+    false, Terraform warns during plan and apply without blocking either.
 
     clickhouse.admin optionally provisions the gated break-glass superuser
     (`admin`). When { enabled = true }, the module creates its Secrets Manager
@@ -800,11 +822,14 @@ variable "helm" {
         image                 = optional(string, null)
         api_password_revision = optional(string, "1")
         cleanup = optional(object({
-          enabled         = optional(bool, false)
-          dry_run         = optional(bool, true)
-          keep_last       = optional(number, 2)
-          keep_days       = optional(number, 0)
-          timeout_seconds = optional(number, 1800)
+          enabled          = optional(bool, false)
+          dry_run          = optional(bool, true)
+          retention_policy = optional(string, null)
+          daily_days       = optional(number, 7)
+          history_days     = optional(number, 30)
+          keep_last        = optional(number, 2)
+          keep_days        = optional(number, 0)
+          timeout_seconds  = optional(number, 1800)
         }), {})
         local_cleanup = optional(object({
           enabled               = optional(bool, false)
@@ -896,8 +921,27 @@ variable "helm" {
   }
 
   validation {
-    condition     = !var.helm.clickhouse.backup.cleanup.enabled || var.helm.clickhouse.backup.cleanup.dry_run
-    error_message = "helm.clickhouse.backup.cleanup.dry_run must be true: this module version does not support automatic S3 backup deletion (clickhouse-backup 2.8.1 leaves serialization.json files behind when deleting native backups). With dry_run = true, cleanup reports which backups it would delete without deleting them."
+    condition     = var.helm.clickhouse.backup.cleanup.retention_policy == null ? true : contains(["count-and-age", "daily-weekly"], var.helm.clickhouse.backup.cleanup.retention_policy)
+    error_message = "helm.clickhouse.backup.cleanup.retention_policy must be null (select by chart version), count-and-age, or daily-weekly."
+  }
+
+  validation {
+    condition = (
+      !var.helm.clickhouse.backup.cleanup.enabled || var.helm.clickhouse.backup.cleanup.dry_run ||
+      var.helm.clickhouse.backup.cleanup.retention_policy == null ||
+      var.helm.clickhouse.backup.cleanup.retention_policy == "daily-weekly"
+    )
+    error_message = "helm.clickhouse.backup.cleanup.dry_run = false (S3 backup deletion) requires retention_policy = daily-weekly. count-and-age is preview-only: set dry_run = true, or switch to daily-weekly."
+  }
+
+  validation {
+    condition = (
+      var.helm.clickhouse.backup.cleanup.daily_days >= 1 &&
+      floor(var.helm.clickhouse.backup.cleanup.daily_days) == var.helm.clickhouse.backup.cleanup.daily_days &&
+      var.helm.clickhouse.backup.cleanup.history_days >= var.helm.clickhouse.backup.cleanup.daily_days &&
+      floor(var.helm.clickhouse.backup.cleanup.history_days) == var.helm.clickhouse.backup.cleanup.history_days
+    )
+    error_message = "helm.clickhouse.backup.cleanup.daily_days must be a positive whole number; history_days must be a whole number at least as large as daily_days."
   }
 
   validation {
@@ -949,12 +993,28 @@ variable "clickhouse_backup" {
     Optional ClickHouse backup storage. Creates a private, encrypted S3 bucket,
     a bucket-scoped IAM role, and generated passwords in Secrets Manager for
     the backup database user and its read-only probe. Null creates none of these
-    resources.
+    resources on a fresh installation; removing existing protected storage needs
+    the retirement procedure in the README.
 
-    bucket_name must be a new, globally unique S3 bucket name. No automatic
-    expiry is configured. S3 backup files accumulate; this release has no supported
-    procedure for removing individual S3 backups. Older database-disk records can
-    be removed separately with helm.clickhouse.backup.local_cleanup.
+    bucket_name must be a new, globally unique S3 bucket name. No S3 lifecycle
+    rule expires current backup files; they accumulate unless
+    helm.clickhouse.backup.cleanup is enabled with retention_policy = "daily-weekly"
+    and dry_run = false, which removes complete full-plus-incremental sets and
+    requires versioning_enabled = true. Older database-disk records are managed
+    separately with helm.clickhouse.backup.local_cleanup.
+    versioning_enabled keeps previous S3 object versions after an overwrite or
+    ordinary deletion. It defaults to false and is one-way through the module's
+    normal inputs. Once enabled, Terraform blocks setting it to false, setting
+    clickhouse_backup to null, changing bucket_name, or destroying the stack.
+    The README's deliberate state-rm exit leaves S3 versioning enabled while
+    removing Terraform's management of that setting. Previous versions continue
+    to incur storage charges. noncurrent_version_expiration_days defaults to null
+    (no expiry). A positive whole number enables permanent removal that many
+    days after a file was overwritten or deleted, plus removal of empty delete
+    markers. It requires versioning_enabled = true and applies to existing older
+    versions as well as future ones. Choose this recovery period explicitly;
+    current backup files are never expired by the rule. Pause backup writes
+    before first enabling bucket versioning and wait 15 minutes after applying before resuming.
     The password is generated for a new backup user; supplying an existing
     password is not supported.
     service_account_name identifies the dedicated Kubernetes service account in
@@ -967,10 +1027,23 @@ variable "clickhouse_backup" {
     credentials separately, using the generated backup and probe passwords.
   EOT
   type = object({
-    bucket_name          = string
-    service_account_name = optional(string, "clickhouse-backup")
+    bucket_name                        = string
+    service_account_name               = optional(string, "clickhouse-backup")
+    versioning_enabled                 = optional(bool, false)
+    noncurrent_version_expiration_days = optional(number, null)
   })
   default = null
+
+  validation {
+    condition = var.clickhouse_backup == null ? true : (
+      var.clickhouse_backup.noncurrent_version_expiration_days == null ? true : (
+        var.clickhouse_backup.versioning_enabled &&
+        var.clickhouse_backup.noncurrent_version_expiration_days >= 1 &&
+        floor(var.clickhouse_backup.noncurrent_version_expiration_days) == var.clickhouse_backup.noncurrent_version_expiration_days
+      )
+    )
+    error_message = "clickhouse_backup.noncurrent_version_expiration_days must be null, or a positive whole number with versioning_enabled = true."
+  }
 
   validation {
     condition = var.clickhouse_backup == null ? true : (
